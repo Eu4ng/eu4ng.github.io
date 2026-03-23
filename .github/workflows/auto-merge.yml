@@ -35,7 +35,7 @@ jobs:
       - name: Create Pull Request and Auto-merge
         if: steps.check_changes.outputs.commits > 0
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.PAT }}
         run: |
           # 기존에 develop -> master 로 열려있는 PR이 있는지 확인
           EXISTING_PR=$(gh pr list --base master --head develop --state open --json url --jq '.[0].url')
@@ -45,18 +45,23 @@ jobs:
             PR_URL=$(gh pr create \
               --base master \
               --head develop \
-              --title "Auto Merge: develop -> master" \
-              --body "매일 자정에 \`develop\` 브랜치에서 \`master\` 브랜치로 병합하기 위해 자동으로 생성된 PR입니다. 설정된 CI 테스트 통과 시 자동으로 병합됩니다.")
+              --title "merge: develop -> master 동기화" \
+              --body "매일 자정에 \`develop\` 브랜치에서 \`master\` 브랜치로 병합하기 위해 자동으로 생성된 PR입니다. \n설정된 CI 테스트 통과 시 자동으로 병합됩니다.")
             echo "생성된 PR: $PR_URL"
           else
             echo "이미 열려있는 PR이 존재합니다: $EXISTING_PR"
             PR_URL="$EXISTING_PR"
           fi
           
-          # 해당 PR에 대해 Auto-merge 활성화
+          # 해당 PR에 대해 자동 병합 활성화
           if [ -n "$PR_URL" ]; then
-            echo "Auto-merge를 활성화합니다..."
-            gh pr merge "$PR_URL" --auto --merge
+            # PR_URL(예: https://.../pull/18)에서 맨 뒷자리 숫자만 추출
+            PR_NUMBER="${PR_URL##*/}"
+            
+            echo "PR 자동 병합 활성화 (#$PR_NUMBER)"
+
+            gh pr merge "$PR_URL" --auto --merge \
+              --subject "merge: develop -> master 동기화 (#$PR_NUMBER)"
           else
             echo "PR 생성 및 확인에 실패했습니다."
             exit 1
