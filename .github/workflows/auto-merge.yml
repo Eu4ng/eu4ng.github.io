@@ -1,0 +1,64 @@
+# develop 브랜치 자동 병합
+name: Auto Merge For Develop Branch
+
+on:
+  # Actions 탭에서 수동으로 실행 가능
+  workflow_dispatch:
+
+  # 한국 시간 기준 매일 자정에 자동으로 실행
+  schedule:
+    - cron: '0 15 * * *'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  create-and-merge-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # 모든 브랜치 히스토리를 가져와서 비교할 수 있도록 함
+          fetch-depth: 0
+
+      # 자동 병합 진행 여부 확인
+      - name: Check for commits to merge
+        id: check_changes
+        run: |
+          COMMITS=$(git rev-list --count origin/master..origin/develop)
+          echo "commits=$COMMITS" >> $GITHUB_OUTPUT
+          echo "develop 브랜치에 master로 병합할 커밋이 $COMMITS 개 있습니다."
+
+      # PR 생성 및 자동 병합 진행
+      - name: Create Pull Request and Auto-merge
+        if: steps.check_changes.outputs.commits > 0
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 기존에 develop -> master 로 열려있는 PR이 있는지 확인
+          EXISTING_PR=$(gh pr list --base master --head develop --state open --json url --jq '.[0].url')
+          
+          if [ -z "$EXISTING_PR" ]; then
+            echo "새로운 PR을 생성합니다."
+            PR_URL=$(gh pr create \
+              --base master \
+              --head develop \
+              --title "Auto Merge: develop -> master" \
+              --body "매일 자정에 \`develop\` 브랜치에서 \`master\` 브랜치로 병합하기 위해 자동으로 생성된 PR입니다. 설정된 CI 테스트 통과 시 자동으로 병합됩니다." \
+              --label "auto-merge")
+            echo "생성된 PR: $PR_URL"
+          else
+            echo "이미 열려있는 PR이 존재합니다: $EXISTING_PR"
+            PR_URL="$EXISTING_PR"
+          fi
+          
+          # 해당 PR에 대해 Auto-merge 활성화
+          if [ -n "$PR_URL" ]; then
+            echo "Auto-merge를 활성화합니다..."
+            gh pr merge "$PR_URL" --auto --merge
+          else
+            echo "PR 생성 및 확인에 실패했습니다."
+            exit 1
+          fi
