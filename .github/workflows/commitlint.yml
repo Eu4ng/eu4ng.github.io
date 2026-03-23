@@ -1,4 +1,4 @@
-name: Lint Commit Messages
+name: Lint commit messages
 on: 
   # develop 브랜치에 push 할 때
   push:
