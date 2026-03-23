@@ -3,7 +3,6 @@ layout: post
 title: AttributeSet 사용 방법
 date: 2024-02-05 15:15 +0900
 author: Eu4ng
-categories: [Unreal Engine, GAS]
 tags: [unreal-engine, ue5, gas, attribute-set]
 ---
 
@@ -200,6 +199,13 @@ AMyCharacterBase::BeginPlay()
     - showdebug abilitysystem
     - AbilitySystem.DebugAttribute (Base, Current)
 - NetUpdateFrequency = 100 추천
+- PreAttributeChange 에서 값을 Clamp 걸어주면 됩니다.
+  - `GameplayEffectExecutionCalculations` 혹은 `ModifierMagnitudeCalculations` 로 인해 Current Value 가 변경되는 것은 막아주지 못하므로,
+  이 경우에는 따로 Clamp 를 한 번 더 적용시켜주어야 합니다.
+- Capture Attribute
+  - ASC 에 존재하는 Mod 를 기반으로 Current Value 를 계산합니다.
+  - 이 때 PreAttributeChange 를 호출하지 않기 때문에 Clamp 가 필요합니다.
+- ExecutionCalculation 마다 Attribute Capture 구조체가 필요하다
 
 ## 참고
 

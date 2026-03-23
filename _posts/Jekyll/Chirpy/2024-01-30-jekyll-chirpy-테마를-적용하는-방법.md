@@ -3,7 +3,6 @@ layout: post
 title: Jekyll Chirpy 테마를 적용하는 방법
 date: 2024-01-30 17:56 +0900
 author:
-categories: [Jekyll, Chirpy]
 tags: [jekyll, chirpy]
 ---
 
