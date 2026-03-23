@@ -1,5 +1,5 @@
 # develop 브랜치 자동 병합
-name: Auto Merge For Develop Branch
+name: Auto merge for develop branch
 
 on:
   # Actions 탭에서 수동으로 실행 가능
@@ -32,7 +32,7 @@ jobs:
           echo "develop 브랜치에 master로 병합할 커밋이 $COMMITS 개 있습니다."
 
       # PR 생성 및 자동 병합 진행
-      - name: Create Pull Request and Auto-merge
+      - name: Create pull request and enable auto-merge
         if: steps.check_changes.outputs.commits > 0
         env:
           GH_TOKEN: ${{ secrets.PAT }}

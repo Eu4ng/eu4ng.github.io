@@ -1,4 +1,4 @@
-name: "Build and Deploy"
+name: "Build and deploy"
 on:
   # 테스트만 진행
   pull_request:
@@ -46,7 +46,7 @@ jobs:
           # If using the 'assets' git submodule from Chirpy Starter, uncomment above
           # (See: https://github.com/cotes2020/chirpy-starter/tree/main/assets)
 
-      - name: Setup Pages
+      - name: Setup pages
         id: pages
         uses: actions/configure-pages@v4
 
