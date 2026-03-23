@@ -205,11 +205,9 @@ jekyll_compose:
   default_front_matter:
     drafts:
       author: Eu4ng
-      categories: []
       tags: []
     posts:
       author: Eu4ng
-      categories: []
       tags: []
 
 ## 게시글 업데이트 날짜 표시
