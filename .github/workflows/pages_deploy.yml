@@ -1,6 +1,7 @@
 name: "Build and Deploy"
 on:
-  push:
+  # 테스트만 진행
+  pull_request:
     branches:
       - main
       - master
@@ -9,8 +10,15 @@ on:
       - README.md
       - LICENSE
 
-  # Allows you to run this workflow manually from the Actions tab
-  workflow_dispatch:
+  # 테스트 후 배포 진행
+  push:
+    branches:
+      - main
+      - master
+    paths-ignore:
+      - .gitignore
+      - README.md
+      - LICENSE
 
 permissions:
   contents: read
@@ -57,11 +65,13 @@ jobs:
             --ignore-urls "/^http:\/\/127.0.0.1/,/^http:\/\/0.0.0.0/,/^http:\/\/localhost/,/^\/app\.js$/,/^\/sw\.js$/,/^\/unregister\.js$"
 
       - name: Upload site artifact
+        if: github.event_name == 'push'
         uses: actions/upload-pages-artifact@v3
         with:
           path: "_site${{ steps.pages.outputs.base_path }}"
 
   deploy:
+    if: github.event_name == 'push'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
