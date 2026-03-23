@@ -35,7 +35,7 @@ jobs:
       - name: Create Pull Request and Auto-merge
         if: steps.check_changes.outputs.commits > 0
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.PAT }}
         run: |
           # 기존에 develop -> master 로 열려있는 PR이 있는지 확인
           EXISTING_PR=$(gh pr list --base master --head develop --state open --json url --jq '.[0].url')
