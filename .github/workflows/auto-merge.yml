@@ -14,7 +14,7 @@ permissions:
   pull-requests: write
 
 jobs:
-  create-and-merge-pr:
+  auto-merge:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -46,8 +46,7 @@ jobs:
               --base master \
               --head develop \
               --title "Auto Merge: develop -> master" \
-              --body "매일 자정에 \`develop\` 브랜치에서 \`master\` 브랜치로 병합하기 위해 자동으로 생성된 PR입니다. 설정된 CI 테스트 통과 시 자동으로 병합됩니다." \
-              --label "auto-merge")
+              --body "매일 자정에 \`develop\` 브랜치에서 \`master\` 브랜치로 병합하기 위해 자동으로 생성된 PR입니다. 설정된 CI 테스트 통과 시 자동으로 병합됩니다.")
             echo "생성된 PR: $PR_URL"
           else
             echo "이미 열려있는 PR이 존재합니다: $EXISTING_PR"
