@@ -46,7 +46,8 @@ jobs:
               --base master \
               --head develop \
               --title "merge: develop -> master 동기화" \
-              --body "매일 자정에 \`develop\` 브랜치에서 \`master\` 브랜치로 병합하기 위해 자동으로 생성된 PR입니다. \n설정된 CI 테스트 통과 시 자동으로 병합됩니다.")
+              --body "매일 자정에 \`develop\` 브랜치에서 \`master\` 브랜치로 병합하기 위해 자동으로 생성된 PR입니다.
+              설정된 CI 테스트 통과 시 자동으로 병합됩니다.")
             echo "생성된 PR: $PR_URL"
           else
             echo "이미 열려있는 PR이 존재합니다: $EXISTING_PR"
@@ -61,7 +62,8 @@ jobs:
             echo "PR 자동 병합 활성화 (#$PR_NUMBER)"
 
             gh pr merge "$PR_URL" --auto --merge \
-              --subject "merge: develop -> master 동기화 (#$PR_NUMBER)"
+              --subject "merge: develop -> master 동기화 (#$PR_NUMBER)" \
+              --body ""
           else
             echo "PR 생성 및 확인에 실패했습니다."
             exit 1
