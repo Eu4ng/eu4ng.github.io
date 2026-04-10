@@ -1,6 +1,6 @@
 ---
 layout: post
-title: "GitLab CI/CD 파이프라인을 활용한 언리얼 엔진 자동화 테스트 환경 구축"
+title: GitLab CI/CD 파이프라인을 활용한 언리얼 엔진 자동화 테스트 환경 구축
 date: 2026-04-09 21:34 +0900
 permalink: /posts/25/
 author: Eu4ng
@@ -43,6 +43,9 @@ tags: [ue5, gitlab, ci-cd, tdd]
     - **툴** > **테스트 자동화** 메뉴를 열어 방금 작성한 카테고리를 체크한 후 **시작** 버튼을 클릭합니다.
 
 ### 2. GitLab CI/CD 파이프라인 연동
+
+> 이 작업을 진행하기 위해서는 **GitLab Runner**에 **GHCR** 접근 권한이 미리 설정되어 있어야 합니다. 자세한 연동 방법은 [GitLab Runner와 Private Registry 연동하기](/posts/26/) 포스트를 참고해 주세요.
+{: .prompt-info }
 
 에디터에서 테스트가 성공적으로 동작하는 것을 확인했다면, 이제 **GitLab CI/CD 파이프라인**을 통해 코드가 푸시될 때마다 자동으로 테스트가 진행되도록 프로젝트 루트 디렉토리에 `.gitlab-ci.yml` 파일을 추가하고 아래와 같이 설정해 줍니다.
 
