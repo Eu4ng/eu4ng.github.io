@@ -2,6 +2,7 @@
 layout: post
 title: GameplayEffect 사용 방법
 date: 2024-02-05 21:24 +0900
+permalink: /posts/15/
 author: Eu4ng
 tags: [unreal-engine, ue5, gas, gameplay-effect]
 ---

@@ -2,6 +2,7 @@
 layout: post
 title: GitLab Runner와 Private Registry 연동하기
 date: 2026-04-10 14:44 +0900
+permalink: /posts/26/
 author: Eu4ng
 tags: [gitlab, runner, docker, registry, ghcr]
 ---

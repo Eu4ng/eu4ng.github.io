@@ -2,6 +2,7 @@
 layout: post
 title: AttributeSet 사용 방법
 date: 2024-02-05 15:15 +0900
+permalink: /posts/14/
 author: Eu4ng
 tags: [unreal-engine, ue5, gas, attribute-set]
 ---

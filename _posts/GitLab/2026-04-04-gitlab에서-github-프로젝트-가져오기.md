@@ -2,6 +2,7 @@
 layout: post
 title: GitLab에서 GitHub 프로젝트 가져오기
 date: 2026-04-04 07:11 +0900
+permalink: /posts/23/
 author: Eu4ng
 tags: [gitlab, github, omniauth, docker]
 ---

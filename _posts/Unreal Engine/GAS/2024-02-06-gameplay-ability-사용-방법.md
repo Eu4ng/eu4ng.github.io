@@ -2,6 +2,7 @@
 layout: post
 title: Gameplay Ability 사용 방법
 date: 2024-02-06 15:10 +0900
+permalink: /posts/19/
 author: Eu4ng
 tags: [unreal-engine, ue5, gas, gameplay-ability]
 ---

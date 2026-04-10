@@ -2,6 +2,7 @@
 layout: post
 title: "GitLab CI/CD 파이프라인을 활용한 언리얼 엔진 자동화 테스트 환경 구축"
 date: 2026-04-09 21:34 +0900
+permalink: /posts/25/
 author: Eu4ng
 tags: [ue5, gitlab, ci-cd, tdd]
 ---
