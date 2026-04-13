@@ -24,7 +24,7 @@ tags: [git-hub, actions, workflow, convention]
 
 ### 예제
 
-*check-dist.yml*
+{% raw %}
 ```yaml
 name: Check dist
 
@@ -72,3 +72,5 @@ jobs:
           name: dist
           path: dist/
 ```
+{: file="check-dist.yml" }
+{% endraw %}
