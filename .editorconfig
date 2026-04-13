@@ -29,3 +29,9 @@ indent_size = 4
 # PlantUML
 [*.puml]
 indent_size = 4
+
+[*.{js,css,scss}]
+quote_type = single
+
+[*.{yml,yaml}]
+quote_type = double
