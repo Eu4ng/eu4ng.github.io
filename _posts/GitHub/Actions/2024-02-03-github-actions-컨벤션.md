@@ -2,6 +2,7 @@
 layout: post
 title: GitHub Actions 컨벤션
 date: 2024-02-03 21:27 +0900
+permalink: /posts/11/
 author: Eu4ng
 tags: [git-hub, actions, workflow, convention]
 ---

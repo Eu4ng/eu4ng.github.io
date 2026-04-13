@@ -2,6 +2,7 @@
 layout: post
 title: FObjectInitializer 로 DefaultSubobject 교체하는 방법
 date: 2024-02-06 00:00 +0900
+permalink: /posts/16/
 author: Eu4ng
 tags: [unreal-engine, ue5, objectInitializer]
 ---

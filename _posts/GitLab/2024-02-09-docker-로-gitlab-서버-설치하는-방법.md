@@ -2,6 +2,7 @@
 layout: post
 title: Docker로 GitLab 서버 설치하는 방법
 date: 2024-02-09 20:52 +0900
+permalink: /posts/21/
 author: Eu4ng
 tags: [git-lab, docker]
 ---

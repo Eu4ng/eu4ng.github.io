@@ -183,6 +183,7 @@ exclude:
   - "*.gemspec"
   - docs
   - tools
+  - scripts
   - README.md
   - LICENSE
   - rollup.config.js
@@ -214,3 +215,4 @@ jekyll_compose:
 
 plugins:
   - jekyll-last-modified-at
+  - jekyll-redirect-from

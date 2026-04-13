@@ -2,6 +2,7 @@
 title: Writing a New Post
 author: cotes
 date: 2019-08-08 14:10:00 +0800
+permalink: /posts/2/
 tags: [jekyll, chirpy]
 render_with_liquid: false
 ---

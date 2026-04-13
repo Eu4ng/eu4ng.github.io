@@ -2,6 +2,7 @@
 title: Getting Started
 author: cotes
 date: 2019-08-09 20:55:00 +0800
+permalink: /posts/3/
 tags: [jekyll, chirpy]
 ---
 

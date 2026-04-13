@@ -2,6 +2,7 @@
 layout: post
 title: Docker로 Github Actions 전용 Self-hosted Runner 생성 및 등록하는 방법
 date: 2026-03-23 23:08 +0900
+permalink: /posts/22/
 author: Eu4ng
 tags: [git-hub, actions, self-hosted-runner]
 ---

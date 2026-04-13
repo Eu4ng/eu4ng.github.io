@@ -2,6 +2,7 @@
 layout: post
 title: Portainer에서 Docker Compose로 GitLab Self-managed Runner 등록하는 방법
 date: 2026-04-07 12:46 +0900
+permalink: /posts/24/
 author: Eu4ng
 tags: [gitlab, docker, portainer]
 ---
