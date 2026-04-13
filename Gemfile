@@ -27,4 +27,5 @@ gem "http_parser.rb", "~> 0.6.0", :platforms => [:jruby]
 group :jekyll_plugins do
   gem "jekyll-compose" # 게시글 정보 자동 완성
   gem "jekyll-last-modified-at" # 게시글 업데이트 날짜 자동 기록
+  gem "jekyll-redirect-from" # 이전 주소에서 새 주소로 리다이렉트
 end

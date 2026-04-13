@@ -215,3 +215,4 @@ jekyll_compose:
 
 plugins:
   - jekyll-last-modified-at
+  - jekyll-redirect-from
