@@ -18,30 +18,62 @@ GitLab의 공식 Docker 이미지는 **CE(Community Edition)**와 **EE(Enterpris
 
 [Docker Hub](https://hub.docker.com/r/gitlab/gitlab-ee)에서 `gitlab/gitlab-ee` 이미지를 다운로드하시면 됩니다.
 
-## 2. Docker Compose 설정
+## 2. Docker 스택 배포
 
-설정의 간편함을 위해 **Docker Compose**를 사용합니다. 저는 **Docker**에 **Portainer**를 설치한 뒤, **Stacks** 기능을 통해 배포를 진행했습니다. 본인의 환경(폴더 경로 등)에 맞춰 일부 수정하여 사용하시기 바랍니다.
+다음 내용을 `docker-compose.yml` 파일로 작성하여 **Docker Swarm**에서 배포하시면 됩니다. 호스트명 등은 자신의 환경에 맞게 수정하시기 바랍니다.
 
 ```yaml
 services:
   gitlab:
     image: 'gitlab/gitlab-ee:latest'
-    container_name: gitlab
-    restart: always
-    hostname: 'gitlab.example.com'
-    shm_size: '8g'
+    hostname: '[GITLAB_HOSTNAME]'
+    shm_size: '16g'
     environment:
       GITLAB_TIMEZONE: Asia/Seoul
       GITLAB_OMNIBUS_CONFIG: |
-        external_url 'http://gitlab.example.com'
+        external_url 'https://[GITLAB_HOSTNAME]'
+        
+        # 역방향 프록시 사용 시 필수 설정
+        nginx['listen_port'] = 80
+        nginx['listen_https'] = false
+        letsencrypt['enable'] = false
+        
+        # OmniAuth 설정
+        gitlab_rails['omniauth_enabled'] = true
+        gitlab_rails['omniauth_auto_link_user'] = ['github']
+        gitlab_rails['omniauth_allow_single_sign_on'] = ['github']
+        gitlab_rails['omniauth_block_auto_created_users'] = false
+        gitlab_rails['omniauth_providers'] = [
+          {
+            name: "github",
+            # Docker secrets에서 키 읽기 (Ruby 문법)
+            app_id: File.read('/run/secrets/github_app_id').strip,
+            app_secret: File.read('/run/secrets/github_app_secret').strip,
+            args: { scope: "user:email,repo" }
+          }
+        ]
+    secrets:
+      - source: gitlab_self-managed_client_id
+        target: github_app_id
+      - source: gitlab_self-managed_client_secrets
+        target: github_app_secret
     ports:
       - "11000:80"
       - "11001:443"
       - "11002:22"
     volumes:
-      - '/docker/gitlab/config:/etc/gitlab'
-      - '/docker/gitlab/logs:/var/log/gitlab'
-      - '/docker/gitlab/data:/var/opt/gitlab'
+      - '/volume1/docker/gitlab/config:/etc/gitlab'
+      - '/volume1/docker/gitlab/logs:/var/log/gitlab'
+      - '/volume1/docker/gitlab/data:/var/opt/gitlab'
+    deploy:
+        placement:
+          constraints: [node.role == manager]
+
+secrets:
+  gitlab_self-managed_client_id:
+    external: true
+  gitlab_self-managed_client_secrets:
+    external: true
 ```
 {: file="docker-compose.yml" }
 
