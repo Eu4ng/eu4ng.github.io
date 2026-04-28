@@ -26,19 +26,25 @@ GitLab의 공식 Docker 이미지는 **CE(Community Edition)**와 **EE(Enterpris
 services:
   gitlab:
     image: 'gitlab/gitlab-ee:latest'
-    hostname: '[GITLAB_HOSTNAME]'
+    hostname: 'gitlab.example.com'
     shm_size: '16g'
     environment:
       GITLAB_TIMEZONE: Asia/Seoul
       GITLAB_OMNIBUS_CONFIG: |
-        external_url 'https://[GITLAB_HOSTNAME]'
-        
-        # 역방향 프록시 사용 시 필수 설정
-        nginx['listen_port'] = 80
-        nginx['listen_https'] = false
+        # 역방향 프록시 사용
         letsencrypt['enable'] = false
         
-        # OmniAuth 설정
+        # Gitlab
+        external_url 'https://gitlab.example.com'
+        nginx['listen_port'] = 10080
+        nginx['listen_https'] = false
+
+        # Registry
+        registry_external_url 'https://registry.example.com'
+        registry_nginx['listen_port'] = 15050
+        registry_nginx['listen_https'] = false
+        
+        # OmniAuth
         gitlab_rails['omniauth_enabled'] = true
         gitlab_rails['omniauth_auto_link_user'] = ['github']
         gitlab_rails['omniauth_allow_single_sign_on'] = ['github']
@@ -58,9 +64,9 @@ services:
       - source: gitlab_self-managed_client_secrets
         target: github_app_secret
     ports:
-      - "11000:80"
-      - "11001:443"
-      - "11002:22"
+      - '10080:10080' # HTTP
+      - '10022:22'    # SSH
+      - '15050:15050' # Registry
     volumes:
       - '/volume1/docker/gitlab/config:/etc/gitlab'
       - '/volume1/docker/gitlab/logs:/var/log/gitlab'
