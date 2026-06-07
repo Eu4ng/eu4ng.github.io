@@ -6,8 +6,8 @@ on:
   workflow_dispatch:
 
   # 한국 시간 기준 매일 자정에 자동으로 실행
-  schedule:
-    - cron: '0 15 * * *'
+  # schedule:
+  #   - cron: '0 15 * * *'
 
 permissions:
   contents: write
