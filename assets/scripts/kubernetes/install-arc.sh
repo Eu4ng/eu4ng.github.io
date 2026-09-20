@@ -26,6 +26,8 @@ TOKEN_SECRET=arc-github-token
 log() { echo -e "\n\033[1;32m==>\033[0m $*"; }
 die() { echo -e "\033[1;31m[오류]\033[0m $*" >&2; exit 1; }
 trap 'echo -e "\033[1;31m[오류]\033[0m ${LINENO}번째 줄에서 중단되었습니다." >&2' ERR
+TEMPLATE_VALUES=$(mktemp)
+trap 'rm -f "$TEMPLATE_VALUES"' EXIT
 
 # ---------- 1. 사전 검사 ----------
 log "사전 검사"
@@ -91,8 +93,71 @@ for release in $(helm list --namespace "$RUNNER_NS" --short); do
 done
 
 # ---------- 7. 러너 스케일 셋 ----------
-# dind: 러너 파드에 Docker 데몬을 함께 띄워 워크플로우에서 docker 명령과 컨테이너를 쓸 수 있게 합니다.
-# 자원은 파드 단위(쿠버네티스 1.34 이상)로 지정해 러너와 Docker 데몬이 한 예산을 같이 씁니다.
+# 러너 파드에 Docker 데몬(dind)을 함께 띄워 워크플로우에서 docker 명령과 컨테이너를 쓸 수 있게 합니다.
+# 차트의 containerMode.type=dind 가 만드는 파드 템플릿과 같으며, dind 의 실행 부분만 다릅니다.
+# dind 는 기본값으로 작업 컨테이너를 파드 밖(노드의 /docker cgroup)에 만들어 자원 상한이 걸리지 않으므로,
+# --cgroup-parent 로 이 파드의 cgroup 아래에 만들게 합니다.
+cat > "$TEMPLATE_VALUES" <<'VALUES'
+template:
+  spec:
+    initContainers:
+      - name: init-dind-externals
+        image: ghcr.io/actions/actions-runner:latest
+        command: ["cp", "-r", "/home/runner/externals/.", "/home/runner/tmpDir/"]
+        volumeMounts:
+          - name: dind-externals
+            mountPath: /home/runner/tmpDir
+      - name: dind
+        image: docker:dind
+        command: ["sh", "-c"]
+        args:
+          - |
+            pod_cgroup=$(dirname "$(sed -n 's/^0:://p' /proc/self/cgroup)")
+            case "$pod_cgroup" in /?*) set -- --cgroup-parent="$pod_cgroup/docker" ;; esac
+            exec dockerd-entrypoint.sh dockerd --host=unix:///var/run/docker.sock --group="$DOCKER_GROUP_GID" "$@"
+        env:
+          - name: DOCKER_GROUP_GID
+            value: "123"
+        securityContext:
+          privileged: true
+        restartPolicy: Always
+        startupProbe:
+          exec:
+            command: ["docker", "info"]
+          initialDelaySeconds: 0
+          failureThreshold: 24
+          periodSeconds: 5
+        volumeMounts:
+          - name: work
+            mountPath: /home/runner/_work
+          - name: dind-sock
+            mountPath: /var/run
+          - name: dind-externals
+            mountPath: /home/runner/externals
+    containers:
+      - name: runner
+        image: ghcr.io/actions/actions-runner:latest
+        command: ["/home/runner/run.sh"]
+        env:
+          - name: DOCKER_HOST
+            value: unix:///var/run/docker.sock
+          - name: RUNNER_WAIT_FOR_DOCKER_IN_SECONDS
+            value: "120"
+        volumeMounts:
+          - name: work
+            mountPath: /home/runner/_work
+          - name: dind-sock
+            mountPath: /var/run
+    volumes:
+      - name: work
+        emptyDir: {}
+      - name: dind-sock
+        emptyDir: {}
+      - name: dind-externals
+        emptyDir: {}
+VALUES
+
+# 자원은 파드 단위(쿠버네티스 1.34 이상)로 지정해 러너, Docker 데몬, 작업 컨테이너가 한 예산을 같이 씁니다.
 for runner in "${RUNNERS[@]}"; do
   read -r name cpu mem cpu_limit mem_limit <<<"$runner"
   log "러너 스케일 셋 설치 ($name: CPU $cpu, 메모리 $mem)"
@@ -101,7 +166,7 @@ for runner in "${RUNNERS[@]}"; do
     --version "$ARC_VERSION" \
     --set githubConfigUrl="$GITHUB_CONFIG_URL" \
     --set githubConfigSecret="$TOKEN_SECRET" \
-    --set containerMode.type=dind \
+    --values "$TEMPLATE_VALUES" \
     --set-string template.spec.resources.requests.cpu="$cpu" \
     --set-string template.spec.resources.requests.memory="$mem" \
     --set-string template.spec.resources.limits.cpu="${cpu_limit:-$cpu}" \
@@ -109,6 +174,8 @@ for runner in "${RUNNERS[@]}"; do
 
   applied=$(kubectl get autoscalingrunnerset "$name" -n "$RUNNER_NS" -o jsonpath='{.spec.template.spec.resources.limits.cpu}')
   [ -n "$applied" ] || die "$name 에 자원 설정이 적용되지 않았습니다. 쿠버네티스 1.34 이상인지 확인합니다."
+  kubectl get autoscalingrunnerset "$name" -n "$RUNNER_NS" -o jsonpath='{.spec.template.spec.initContainers[*].args}' | grep -q cgroup-parent \
+    || die "$name 의 Docker 데몬 설정이 적용되지 않았습니다."
 done
 
 # ---------- 8. listener 확인 ----------
