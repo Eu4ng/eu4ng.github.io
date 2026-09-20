@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 #
-# Proxmox VE 호스트에 kubeadm 쿠버네티스 클러스터(control plane 1 + worker N)를 만듭니다.
-# Proxmox 호스트에서 root 로 실행합니다: bash k8s-proxmox.sh
+# 템플릿 VM 을 복제해 kubeadm 쿠버네티스 클러스터(control plane 1 + worker N)를 만듭니다.
+# Proxmox 호스트에서 root 로 실행합니다.
+#   bash deploy-k8s.sh           클러스터 배포
+#   bash deploy-k8s.sh destroy   배포한 노드 VM 삭제 (템플릿은 그대로)
 
 set -euo pipefail
 
 # ---------- 환경에 맞게 수정 ----------
-STORAGE=local-lvm          # VM 디스크를 둘 스토리지
-BRIDGE=vmbr0               # VM 이 연결될 브리지
-TEMPLATE_ID=9000           # 클라우드 이미지 템플릿 VM ID
+TEMPLATE_ID=9000           # create-template.sh 로 만든 템플릿 VM ID
 CP_ID=201                  # control plane VM ID (worker 는 +1 씩 증가)
 WORKER_COUNT=1             # worker 수
 
@@ -16,7 +16,7 @@ IP_PREFIX=192.168.0        # 노드 IP 앞 세 자리
 IP_START=201               # control plane IP 끝자리 (worker 는 +1 씩 증가)
 CIDR=24
 GATEWAY=192.168.0.1
-DNS=1.1.1.1
+DNS=                       # 비워 두면 Proxmox 호스트의 DNS 를 따라감 (값을 넣으면 VM 에 고정)
 
 CP_CORES=4
 CP_MEMORY=8192             # MiB
@@ -30,9 +30,6 @@ K8S_VERSION=v1.37          # pkgs.k8s.io 저장소의 마이너 버전
 POD_CIDR=10.244.0.0/16     # Flannel 기본값
 # --------------------------------------
 
-IMAGE_URL=https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
-IMAGE_PATH=/var/lib/vz/template/iso/noble-server-cloudimg-amd64.img
-TEMPLATE_NAME=ubuntu-2404-cloud
 FLANNEL_URL=https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
 AUTHORIZED_KEYS=/root/.ssh/authorized_keys
 HOST_KEY=/root/.ssh/id_rsa
@@ -52,15 +49,50 @@ for i in $(seq 0 "$WORKER_COUNT"); do
 done
 CP_IP=${NODE_IPS[0]}
 
-# ---------- 1. 사전 검사 ----------
-log "사전 검사"
 [ "$(id -u)" -eq 0 ] || die "root 로 실행해야 합니다."
 command -v qm >/dev/null || die "qm 명령이 없습니다. Proxmox VE 호스트에서 실행하세요."
+
+# ---------- destroy: 노드 VM 삭제 ----------
+# VM ID 와 이름이 모두 일치하는 VM 만 삭제합니다.
+if [ "${1:-}" = destroy ]; then
+  log "삭제 대상 확인"
+  targets=()
+  for i in "${!NODE_IDS[@]}"; do
+    id=${NODE_IDS[$i]} name=${NODE_NAMES[$i]}
+    if ! qm config "$id" >/dev/null 2>&1; then
+      echo "  $id: VM 없음, 건너뜀"
+      continue
+    fi
+    actual=$(qm config "$id" | awk '/^name: /{print $2}')
+    if [ "$actual" != "$name" ]; then
+      echo "  $id: 이름이 $actual 이라 건너뜀 (예상한 이름: $name)"
+      continue
+    fi
+    echo "  $id: $name 삭제 예정"
+    targets+=("$id")
+  done
+  [ "${#targets[@]}" -gt 0 ] || { log "삭제할 노드 VM 이 없습니다."; exit 0; }
+
+  read -r -p "위 VM 과 디스크를 모두 삭제합니다. 계속하려면 y 를 입력하세요: " answer
+  [ "$answer" = y ] || die "취소했습니다."
+  for id in "${targets[@]}"; do
+    log "VM $id 삭제"
+    qm stop "$id"
+    qm destroy "$id" --purge
+  done
+  log "완료. 템플릿 $TEMPLATE_ID 는 그대로 두었습니다."
+  exit 0
+fi
+[ -z "${1:-}" ] || die "알 수 없는 인자: $1 (사용법: bash deploy-k8s.sh [destroy])"
+
+# ---------- 1. 사전 검사 ----------
+log "사전 검사"
 [ -s "$AUTHORIZED_KEYS" ] || die "$AUTHORIZED_KEYS 가 비어 있습니다. 내 PC 의 공개키를 먼저 등록하세요."
-pvesm status --storage "$STORAGE" >/dev/null || die "스토리지 $STORAGE 를 찾을 수 없습니다."
+qm config "$TEMPLATE_ID" 2>/dev/null | grep -q '^template: 1' \
+  || die "템플릿 $TEMPLATE_ID 이 없습니다. create-template.sh 를 먼저 실행하세요."
 for i in "${!NODE_IDS[@]}"; do
   pvesh get /cluster/nextid --vmid "${NODE_IDS[$i]}" >/dev/null 2>&1 \
-    || die "VM ID ${NODE_IDS[$i]} 가 이미 사용 중입니다. CP_ID 를 바꾸세요."
+    || die "VM ID ${NODE_IDS[$i]} 가 이미 사용 중입니다. CP_ID 를 바꾸거나 bash deploy-k8s.sh destroy 로 기존 노드를 삭제하세요."
   ! ping -c 1 -W 1 "${NODE_IPS[$i]}" >/dev/null 2>&1 \
     || die "IP ${NODE_IPS[$i]} 가 이미 사용 중입니다. IP_START 를 바꾸세요."
 done
@@ -71,42 +103,26 @@ done
 log "공개키 준비"
 [ -f "$HOST_KEY" ] || ssh-keygen -q -t rsa -b 4096 -N '' -f "$HOST_KEY"
 KEYS_FILE=$(mktemp)
+trap 'rm -f "$KEYS_FILE"' EXIT
 { cat "$AUTHORIZED_KEYS"; echo; cat "$HOST_KEY.pub"; } | grep -vE '^\s*(#|$)' | awk '!seen[$0]++' > "$KEYS_FILE"
 
-# ---------- 3. 템플릿 VM ----------
-if qm config "$TEMPLATE_ID" >/dev/null 2>&1; then
-  qm config "$TEMPLATE_ID" | grep -q '^template: 1' \
-    || die "VM ID $TEMPLATE_ID 가 템플릿이 아닌 VM 으로 사용 중입니다. TEMPLATE_ID 를 바꾸세요."
-  log "기존 템플릿 $TEMPLATE_ID 재사용"
-else
-  log "템플릿 $TEMPLATE_ID 생성"
-  [ -f "$IMAGE_PATH" ] || wget -q --show-progress -O "$IMAGE_PATH" "$IMAGE_URL"
-  qm create "$TEMPLATE_ID" --name "$TEMPLATE_NAME" --ostype l26 \
-    --cpu host --cores 2 --memory 2048 --balloon 0 --agent 1 \
-    --net0 "virtio,bridge=$BRIDGE" --scsihw virtio-scsi-single \
-    --serial0 socket --vga serial0
-  qm set "$TEMPLATE_ID" --scsi0 "$STORAGE:0,import-from=$IMAGE_PATH,iothread=1,discard=on,ssd=1"
-  qm set "$TEMPLATE_ID" --ide2 "$STORAGE:cloudinit" --boot order=scsi0
-  qm template "$TEMPLATE_ID"
-fi
-
-# ---------- 4. 노드 VM ----------
+# ---------- 3. 노드 VM ----------
 for i in "${!NODE_IDS[@]}"; do
   id=${NODE_IDS[$i]} ip=${NODE_IPS[$i]} name=${NODE_NAMES[$i]}
   if [ "$i" -eq 0 ]; then cores=$CP_CORES memory=$CP_MEMORY disk=$CP_DISK
   else cores=$WORKER_CORES memory=$WORKER_MEMORY disk=$WORKER_DISK; fi
 
   log "VM $id ($name, $ip) 생성"
+  net_args=(--ipconfig0 "ip=$ip/$CIDR,gw=$GATEWAY")
+  [ -z "$DNS" ] || net_args+=(--nameserver "$DNS")
   qm clone "$TEMPLATE_ID" "$id" --name "$name" --full
   qm set "$id" --cores "$cores" --memory "$memory" \
-    --ciuser "$CI_USER" --sshkeys "$KEYS_FILE" --ciupgrade 0 \
-    --ipconfig0 "ip=$ip/$CIDR,gw=$GATEWAY" --nameserver "$DNS"
+    --ciuser "$CI_USER" --sshkeys "$KEYS_FILE" --ciupgrade 0 "${net_args[@]}"
   qm resize "$id" scsi0 "$disk"
   qm start "$id"
 done
-rm -f "$KEYS_FILE"
 
-# ---------- 5. SSH 대기 ----------
+# ---------- 4. SSH 대기 ----------
 for ip in "${NODE_IPS[@]}"; do
   log "$ip SSH 대기"
   for try in $(seq 1 60); do
@@ -117,13 +133,16 @@ for ip in "${NODE_IPS[@]}"; do
   vm_ssh "$ip" "cloud-init status --wait" >/dev/null || true
 done
 
-# ---------- 6. 노드 공통 설정 ----------
+# ---------- 5. 노드 공통 설정 ----------
 for ip in "${NODE_IPS[@]}"; do
   log "$ip containerd, kubeadm 설치"
   vm_ssh "$ip" "sudo bash -s -- $K8S_VERSION" <<'NODE_SETUP'
 set -euo pipefail
 K8S_VERSION=$1
 export DEBIAN_FRONTEND=noninteractive
+
+# 호스트 DNS 변경 등으로 cloud-init 설정이 바뀌어도 SSH 호스트 키를 유지
+echo 'ssh_deletekeys: false' > /etc/cloud/cloud.cfg.d/99-keep-ssh-host-keys.cfg
 
 swapoff -a
 sed -i '/\sswap\s/d' /etc/fstab
@@ -159,7 +178,7 @@ apt-mark hold kubelet kubeadm kubectl
 NODE_SETUP
 done
 
-# ---------- 7. 클러스터 구성 ----------
+# ---------- 6. 클러스터 구성 ----------
 log "control plane 초기화 ($CP_IP)"
 vm_ssh "$CP_IP" "sudo kubeadm init --pod-network-cidr=$POD_CIDR --apiserver-advertise-address=$CP_IP"
 vm_ssh "$CP_IP" 'mkdir -p ~/.kube && sudo cp /etc/kubernetes/admin.conf ~/.kube/config && sudo chown "$(id -u):$(id -g)" ~/.kube/config'
@@ -171,7 +190,7 @@ for ip in "${NODE_IPS[@]:1}"; do
   vm_ssh "$ip" "sudo $JOIN_COMMAND"
 done
 
-# ---------- 8. 마무리 ----------
+# ---------- 7. 마무리 ----------
 log "노드 Ready 대기"
 vm_ssh "$CP_IP" "kubectl wait --for=condition=Ready nodes --all --timeout=300s"
 vm_ssh "$CP_IP" "kubectl get nodes -o wide"
