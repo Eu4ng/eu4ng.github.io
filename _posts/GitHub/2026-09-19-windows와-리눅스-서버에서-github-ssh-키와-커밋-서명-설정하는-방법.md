@@ -8,16 +8,20 @@ author: Eu4ng
 tags: [github, ssh, git, windows, linux, remote-ssh]
 ---
 
-## 개요
+키를 만들고 옮기는 일은 Windows에서 한 번만 하고, Git 설정과 확인은 Windows와 서버에서 같은 명령으로 진행합니다.
 
-Windows PC에서 만든 SSH 키 하나를 GitHub에 등록하고 Remote SSH용 리눅스 서버로 옮겨, 양쪽에서 GitHub 인증과 커밋 서명까지 설정하는 과정을 정리한 문서입니다.
+1. SSH 키 생성 (Windows)
+2. GitHub에 공개키 등록
+3. 서버로 키 전송 (Windows)
+4. Git 설정 (Windows와 서버 공통)
+5. 연결과 서명 확인 (Windows와 서버 공통)
 
 ## 사전 준비
 
 > 이미 준비되어 있는 경우 건너뛰셔도 됩니다.
 {: .prompt-info }
 
-### 환경
+아래 환경을 기준으로 작성했습니다.
 
 | 항목 | 버전 |
 | :--- | :--- |
@@ -26,7 +30,7 @@ Windows PC에서 만든 SSH 키 하나를 GitHub에 등록하고 Remote SSH용 �
 | Git | `2.34 이상` |
 | 작성 기준일 | `2026-09-19` |
 
-### 준비물
+다음 항목이 준비되어 있어야 합니다.
 
 - GitHub 계정
 - 리눅스 서버의 SSH 접속 정보 (`[USER]@[HOST]`)
@@ -45,17 +49,7 @@ sudo apt update
 sudo apt install -y git openssh-client
 ```
 
-## 방법
-
-키를 만들고 옮기는 일은 Windows에서 한 번만 하고, Git 설정과 확인은 Windows와 서버에서 같은 명령으로 진행합니다.
-
-1. SSH 키 생성 (Windows)
-2. GitHub에 공개키 등록
-3. 서버로 키 전송 (Windows)
-4. Git 설정 (Windows와 서버 공통)
-5. 연결과 서명 확인 (Windows와 서버 공통)
-
-### 1. SSH 키 생성 (Windows)
+## 1. SSH 키 생성 (Windows)
 
 PowerShell에서 키를 생성합니다. 저장 위치를 묻는 질문에는 Enter를 눌러 기본 경로를 그대로 사용합니다.
 
@@ -66,7 +60,7 @@ ssh-keygen -t ed25519 -C "[EMAIL]"
 
 - **확인:** `C:\Users\[USER]\.ssh` 폴더에 `id_ed25519`(비밀키)와 `id_ed25519.pub`(공개키) 생성
 
-### 2. GitHub에 공개키 등록
+## 2. GitHub에 공개키 등록
 
 같은 공개키를 인증용과 서명용으로 각각 한 번씩, 총 두 번 등록합니다.
 
@@ -85,7 +79,7 @@ Get-Content ~\.ssh\id_ed25519.pub | Set-Clipboard
 
 - **확인:** **Authentication keys**와 **Signing keys** 목록에 키가 하나씩 표시
 
-### 3. 서버로 키 전송 (Windows)
+## 3. 서버로 키 전송 (Windows)
 
 PowerShell에서 서버에 `.ssh` 폴더를 만들고 키 파일 두 개를 복사한 뒤, 비밀키 권한을 소유자 전용으로 바꿉니다.
 
@@ -105,7 +99,7 @@ ssh [USER]@[HOST] "chmod 600 ~/.ssh/id_ed25519"
 
 - **확인:** 서버에서 `ls -l ~/.ssh` 실행 시 `id_ed25519`의 권한이 `-rw-------`로 표시
 
-### 4. Git 설정 (Windows와 서버 공통)
+## 4. Git 설정 (Windows와 서버 공통)
 
 아래 명령을 Windows PowerShell과 서버 터미널에서 각각 똑같이 실행합니다. GPG 키를 따로 만들지 않고 SSH 키로 커밋에 서명하는 설정입니다.
 
@@ -125,7 +119,7 @@ git config --global commit.gpgsign true
 
 - **확인:** `git config --global --list` 출력에 위 다섯 항목이 표시
 
-### 5. 연결과 서명 확인 (Windows와 서버 공통)
+## 5. 연결과 서명 확인 (Windows와 서버 공통)
 
 Windows와 서버에서 각각 GitHub 연결을 확인합니다. 처음 접속할 때 지문을 묻는 질문이 나오면, 표시된 지문이 `SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU`인지 확인한 뒤 `yes`를 입력합니다.
 
@@ -150,7 +144,8 @@ git push
 
 ## 트러블슈팅
 
-### 비밀키 권한이 너무 열려 있다는 오류
+<details markdown="1">
+<summary><code>Permissions 0644 for '...' are too open</code></summary>
 
 ```text
 @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
@@ -162,7 +157,10 @@ Permissions 0644 for '/home/[USER]/.ssh/id_ed25519' are too open.
 - **원인:** 서버로 복사한 비밀키를 다른 사용자도 읽을 수 있는 상태
 - **해결:** 서버에서 `chmod 600 ~/.ssh/id_ed25519` 실행
 
-### GitHub 연결이 거부되는 오류
+</details>
+
+<details markdown="1">
+<summary><code>Permission denied (publickey)</code></summary>
 
 ```text
 git@github.com: Permission denied (publickey).
@@ -171,10 +169,15 @@ git@github.com: Permission denied (publickey).
 - **원인:** 공개키가 `Authentication Key`로 등록되지 않았거나, 키 파일이 `~/.ssh/id_ed25519` 경로에 없음
 - **해결:** 2단계의 등록 상태와 키 파일의 이름, 위치를 확인
 
-### 커밋이 Unverified로 표시
+</details>
+
+<details markdown="1">
+<summary>커밋이 GitHub에서 <code>Unverified</code>로 표시</summary>
 
 - **원인:** 공개키가 `Signing Key`로 등록되지 않았거나, `user.email`이 GitHub 계정에 인증된 이메일과 다름
 - **해결:** 2단계의 4번과 4단계의 `user.email` 값을 확인한 뒤 새 커밋을 푸시
+
+</details>
 
 ## 마무리
 
