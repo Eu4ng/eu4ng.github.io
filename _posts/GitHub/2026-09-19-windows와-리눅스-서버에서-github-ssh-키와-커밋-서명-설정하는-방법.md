@@ -3,16 +3,21 @@ layout: post
 title: Windows와 리눅스 서버에서 GitHub SSH 키와 커밋 서명 설정하는 방법
 date: 2026-09-19 23:22 +0900
 permalink: /posts/31/
-description: Windows에서 만든 SSH 키 하나로 Windows PC와 Remote SSH 리눅스 서버 양쪽에서 GitHub 인증과 커밋 서명을 설정하는 방법을 정리했습니다.
+description: 개인용 키와 서버용 키를 따로 만들어 Windows PC와 Remote SSH 리눅스 서버 양쪽에서 GitHub 인증과 커밋 서명을 설정하는 방법을 정리했습니다.
 author: Eu4ng
 tags: [github, ssh, git, windows, linux, remote-ssh]
 ---
 
-키를 만들고 옮기는 일은 Windows에서 한 번만 하고, Git 설정과 확인은 Windows와 서버에서 같은 명령으로 진행합니다.
+SSH 키는 장비마다 따로 만들고, Git 설정과 확인은 Windows와 서버에서 같은 명령으로 진행합니다. 비밀키가 만든 장비 밖으로 나가지 않으므로, 서버가 유출되어도 GitHub에서 서버용 키만 삭제하면 됩니다.
 
-1. SSH 키 생성 (Windows)
-2. GitHub에 공개키 등록
-3. 서버로 키 전송 (Windows)
+| 키 | 생성 위치 | 서버 접속 | GitHub 인증 | 커밋 서명 |
+| :--- | :--- | :---: | :---: | :---: |
+| `[GITHUB_ID]@desktop` | Windows PC | O | O | O |
+| `[GITHUB_ID]@server` | 리눅스 서버 | X | O | O |
+
+1. SSH 키 생성 (Windows와 서버 공통)
+2. 서버에 개인용 공개키 등록 (Windows)
+3. GitHub에 공개키 등록
 4. Git 설정 (Windows와 서버 공통)
 5. 연결과 서명 확인 (Windows와 서버 공통)
 
@@ -49,55 +54,56 @@ sudo apt update
 sudo apt install -y git openssh-client
 ```
 
-## 1. SSH 키 생성 (Windows)
+## 1. SSH 키 생성 (Windows와 서버 공통)
 
-PowerShell에서 키를 생성합니다. 저장 위치를 묻는 질문에는 Enter를 눌러 기본 경로를 그대로 사용합니다.
+Windows PowerShell과 서버 터미널에서 각각 키를 생성합니다. 명령은 같고 키를 구분하는 주석(`-C`)만 다릅니다. 저장 위치를 묻는 질문에는 Enter를 눌러 기본 경로를 그대로 사용합니다.
 
 ```bash
-# Ed25519 키 생성
-ssh-keygen -t ed25519 -C "[EMAIL]"
+# Windows PowerShell: 개인용 키 생성
+ssh-keygen -t ed25519 -C "[GITHUB_ID]@desktop"
+
+# 리눅스 서버: 서버용 키 생성
+ssh-keygen -t ed25519 -C "[GITHUB_ID]@server"
 ```
 
-- **확인:** `C:\Users\[USER]\.ssh` 폴더에 `id_ed25519`(비밀키)와 `id_ed25519.pub`(공개키) 생성
+> 비밀키(`id_ed25519`)를 가진 사람은 누구나 내 GitHub 계정으로 푸시할 수 있습니다. 비밀키는 만든 장비 밖으로 복사하지 않습니다.
+{: .prompt-danger }
 
-## 2. GitHub에 공개키 등록
+- **확인:** 각 장비의 `~/.ssh` 폴더에 `id_ed25519`(비밀키)와 `id_ed25519.pub`(공개키) 생성
 
-같은 공개키를 인증용과 서명용으로 각각 한 번씩, 총 두 번 등록합니다.
+## 2. 서버에 개인용 공개키 등록 (Windows)
+
+PowerShell에서 개인용 공개키를 서버의 `authorized_keys`에 추가합니다. 이후 Windows에서 서버에 접속할 때 개인용 키로 인증합니다.
 
 ```bash
-# 공개키를 클립보드에 복사
+# 개인용 공개키를 서버의 authorized_keys에 추가
+Get-Content ~\.ssh\id_ed25519.pub | ssh [USER]@[HOST] "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+```
+
+- **확인:** `ssh [USER]@[HOST]` 접속 시 서버 비밀번호를 묻지 않음
+
+## 3. GitHub에 공개키 등록
+
+공개키 두 개를 인증용과 서명용으로 각각 한 번씩, 총 네 번 등록합니다.
+
+```bash
+# Windows PowerShell: 개인용 공개키를 클립보드에 복사
 Get-Content ~\.ssh\id_ed25519.pub | Set-Clipboard
+
+# 리눅스 서버: 서버용 공개키 출력 (출력된 한 줄을 복사)
+cat ~/.ssh/id_ed25519.pub
 ```
 
 1. GitHub의 **Settings** > **SSH and GPG keys**로 이동
 2. **New SSH key** 클릭
 3. 아래 값을 입력하고 **Add SSH key** 클릭
-   - **Title**: 키를 구분할 이름
+   - **Title**: 키 주석과 같은 이름 (`[GITHUB_ID]@desktop` 또는 `[GITHUB_ID]@server`)
    - **Key type**: `Authentication Key`
    - **Key**: 복사한 공개키 붙여넣기
 4. **New SSH key**를 다시 클릭하고 **Key type**만 `Signing Key`로 바꿔 한 번 더 등록
+5. 나머지 공개키도 2~4번을 반복해 등록
 
-- **확인:** **Authentication keys**와 **Signing keys** 목록에 키가 하나씩 표시
-
-## 3. 서버로 키 전송 (Windows)
-
-PowerShell에서 서버에 `.ssh` 폴더를 만들고 키 파일 두 개를 복사한 뒤, 비밀키 권한을 소유자 전용으로 바꿉니다.
-
-```bash
-# 서버에 .ssh 폴더 생성
-ssh [USER]@[HOST] "mkdir -p ~/.ssh && chmod 700 ~/.ssh"
-
-# 비밀키와 공개키 전송
-scp $env:USERPROFILE\.ssh\id_ed25519 $env:USERPROFILE\.ssh\id_ed25519.pub [USER]@[HOST]:~/.ssh/
-
-# 비밀키 권한 설정
-ssh [USER]@[HOST] "chmod 600 ~/.ssh/id_ed25519"
-```
-
-> 비밀키를 가진 사람은 누구나 내 GitHub 계정으로 푸시할 수 있습니다. 본인만 사용하는 서버에만 복사합니다.
-{: .prompt-danger }
-
-- **확인:** 서버에서 `ls -l ~/.ssh` 실행 시 `id_ed25519`의 권한이 `-rw-------`로 표시
+- **확인:** **Authentication keys**와 **Signing keys** 목록에 키가 두 개씩 표시
 
 ## 4. Git 설정 (Windows와 서버 공통)
 
@@ -145,43 +151,28 @@ git push
 ## 트러블슈팅
 
 <details markdown="1">
-<summary><code>Permissions 0644 for '...' are too open</code></summary>
-
-```text
-@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
-@         WARNING: UNPROTECTED PRIVATE KEY FILE!          @
-@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
-Permissions 0644 for '/home/[USER]/.ssh/id_ed25519' are too open.
-```
-
-- **원인:** 서버로 복사한 비밀키를 다른 사용자도 읽을 수 있는 상태
-- **해결:** 서버에서 `chmod 600 ~/.ssh/id_ed25519` 실행
-
-</details>
-
-<details markdown="1">
 <summary><code>Permission denied (publickey)</code></summary>
 
 ```text
 git@github.com: Permission denied (publickey).
 ```
 
-- **원인:** 공개키가 `Authentication Key`로 등록되지 않았거나, 키 파일이 `~/.ssh/id_ed25519` 경로에 없음
-- **해결:** 2단계의 등록 상태와 키 파일의 이름, 위치를 확인
+- **원인:** 해당 장비의 공개키가 `Authentication Key`로 등록되지 않았거나, 키 파일이 `~/.ssh/id_ed25519` 경로에 없음
+- **해결:** 3단계의 등록 상태와 키 파일의 이름, 위치를 확인
 
 </details>
 
 <details markdown="1">
 <summary>커밋이 GitHub에서 <code>Unverified</code>로 표시</summary>
 
-- **원인:** 공개키가 `Signing Key`로 등록되지 않았거나, `user.email`이 GitHub 계정에 인증된 이메일과 다름
-- **해결:** 2단계의 4번과 4단계의 `user.email` 값을 확인한 뒤 새 커밋을 푸시
+- **원인:** 해당 장비의 공개키가 `Signing Key`로 등록되지 않았거나, `user.email`이 GitHub 계정에 인증된 이메일과 다름
+- **해결:** 3단계의 4번과 4단계의 `user.email` 값을 확인한 뒤 새 커밋을 푸시
 
 </details>
 
 ## 마무리
 
-SSH 키 하나로 Windows PC와 리눅스 서버 양쪽에서 GitHub 인증과 커밋 서명을 설정했습니다. 이후 새 서버를 추가할 때는 3단계부터 반복하면 됩니다.
+개인용 키와 서버용 키를 따로 만들어 Windows PC와 리눅스 서버 양쪽에서 GitHub 인증과 커밋 서명을 설정했습니다. 새 서버를 추가할 때는 그 서버에서 1단계부터 반복하고, 서버를 폐기할 때는 GitHub에서 해당 서버용 키만 삭제하면 됩니다.
 
 ## 참고 자료
 
