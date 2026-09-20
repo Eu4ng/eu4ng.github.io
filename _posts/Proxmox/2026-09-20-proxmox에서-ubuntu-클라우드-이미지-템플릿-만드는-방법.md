@@ -49,7 +49,7 @@ wget https://eu4ng.github.io/assets/scripts/proxmox/create-template.sh
 #!/usr/bin/env bash
 #
 # Proxmox VE 호스트에 Ubuntu 24.04 클라우드 이미지 템플릿 VM 을 만듭니다.
-# 템플릿에는 접속 계정, SSH 공개키, qemu-guest-agent 설치가 들어 있어 복제한 VM 에 바로 접속할 수 있습니다.
+# 템플릿에는 접속 계정, SSH 공개키, qemu-guest-agent 설치, 부팅 시 자동 시작이 들어 있어 복제한 VM 에 바로 접속할 수 있습니다.
 # Proxmox 호스트에서 root 로 한 번만 실행합니다: bash create-template.sh
 
 set -euo pipefail
@@ -59,6 +59,7 @@ STORAGE=local-lvm          # VM 디스크를 둘 스토리지
 BRIDGE=vmbr0               # VM 이 연결될 브리지
 TEMPLATE_ID=9000           # 템플릿 VM ID
 CI_USER=ubuntu             # VM 접속 계정
+ONBOOT=1                   # 1 이면 Proxmox 호스트가 부팅할 때 복제한 VM 도 자동 시작
 SNIPPET_STORAGE=local      # cloud-init 스니펫을 둘 디렉터리형 스토리지
 # --------------------------------------
 
@@ -136,7 +137,7 @@ qm create "$TEMPLATE_ID" --name "$TEMPLATE_NAME" --ostype l26 \
   --serial0 socket --vga serial0
 qm set "$TEMPLATE_ID" --scsi0 "$STORAGE:0,import-from=$IMAGE_PATH,iothread=1,discard=on,ssd=1"
 qm set "$TEMPLATE_ID" --ide2 "$STORAGE:cloudinit" --boot order=scsi0
-qm set "$TEMPLATE_ID" --ciuser "$CI_USER" --sshkeys "$KEYS_FILE" --ciupgrade 0 \
+qm set "$TEMPLATE_ID" --onboot "$ONBOOT" --ciuser "$CI_USER" --sshkeys "$KEYS_FILE" --ciupgrade 0 \
   --cicustom "vendor=$SNIPPET_STORAGE:snippets/$SNIPPET_NAME"
 qm template "$TEMPLATE_ID"
 
@@ -163,6 +164,7 @@ nano create-template.sh
 | `BRIDGE` | `vmbr0` | VM이 연결될 브리지 |
 | `TEMPLATE_ID` | `9000` | 템플릿 VM ID |
 | `CI_USER` | `ubuntu` | VM 접속 계정 |
+| `ONBOOT` | `1` | `1`이면 Proxmox 호스트가 부팅할 때 복제한 VM도 자동 시작 |
 | `SNIPPET_STORAGE` | `local` | cloud-init 스니펫을 둘 디렉터리형 스토리지 |
 
 - **확인:** `STORAGE`, `BRIDGE` 값이 Proxmox 웹 UI의 스토리지, 네트워크 이름과 일치
@@ -179,7 +181,9 @@ bash create-template.sh
 1. `SNIPPET_STORAGE`에 스니펫 콘텐츠가 꺼져 있으면 켜고, 모든 복제 VM에 적용할 cloud-init 스니펫 저장 (QEMU 게스트 에이전트 설치, SSH 호스트 키 유지)
 2. Proxmox의 `authorized_keys`와 호스트 공개키를 VM에 넣을 키 목록으로 준비
 3. Ubuntu 24.04 클라우드 이미지를 내려받아 템플릿 VM 생성
-4. 템플릿에 접속 계정, 공개키, 스니펫 설정
+4. 템플릿에 접속 계정, 공개키, 스니펫, 부팅 시 자동 시작 설정
+
+`ONBOOT`을 `1`로 두면 이 템플릿을 복제한 모든 VM이 Proxmox 호스트가 부팅할 때 함께 켜집니다. 특정 VM만 끄려면 `qm set [VM_ID] --onboot 0`을 실행합니다.
 
 > 이 템플릿을 복제한 VM은 Proxmox의 `authorized_keys`에 있는 모든 키와 Proxmox 호스트의 root 키로 접속할 수 있습니다. 키는 템플릿을 만든 시점의 값으로 고정되므로, `authorized_keys`를 바꿨다면 템플릿을 지우고 다시 만듭니다.
 {: .prompt-warning }

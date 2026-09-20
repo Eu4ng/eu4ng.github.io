@@ -11,6 +11,7 @@ set -euo pipefail
 TEMPLATE_ID=9000           # create-template.sh 로 만든 템플릿 VM ID
 CP_ID=201                  # control plane VM ID (worker 는 +1 씩 증가)
 WORKER_COUNT=1             # worker 수
+ONBOOT=1                   # 1 이면 Proxmox 호스트가 부팅할 때 노드도 자동 시작
 
 IP_PREFIX=192.168.0        # 노드 IP 앞 세 자리
 IP_START=201               # control plane IP 끝자리 (worker 는 +1 씩 증가)
@@ -111,7 +112,7 @@ for i in "${!NODE_IDS[@]}"; do
   [ -z "$DNS" ] || net_args+=(--nameserver "$DNS")
   qm clone "$TEMPLATE_ID" "$id" --name "$name" --full
   qm config "$id" | grep -q '^sshkeys:' || die "VM $id 가 템플릿의 SSH 키를 물려받지 못했습니다."
-  qm set "$id" --cores "$cores" --memory "$memory" "${net_args[@]}"
+  qm set "$id" --cores "$cores" --memory "$memory" --onboot "$ONBOOT" "${net_args[@]}"
   qm resize "$id" scsi0 "$disk"
   qm start "$id"
 done

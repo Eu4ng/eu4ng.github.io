@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Proxmox VE 호스트에 Ubuntu 24.04 클라우드 이미지 템플릿 VM 을 만듭니다.
-# 템플릿에는 접속 계정, SSH 공개키, qemu-guest-agent 설치가 들어 있어 복제한 VM 에 바로 접속할 수 있습니다.
+# 템플릿에는 접속 계정, SSH 공개키, qemu-guest-agent 설치, 부팅 시 자동 시작이 들어 있어 복제한 VM 에 바로 접속할 수 있습니다.
 # Proxmox 호스트에서 root 로 한 번만 실행합니다: bash create-template.sh
 
 set -euo pipefail
@@ -11,6 +11,7 @@ STORAGE=local-lvm          # VM 디스크를 둘 스토리지
 BRIDGE=vmbr0               # VM 이 연결될 브리지
 TEMPLATE_ID=9000           # 템플릿 VM ID
 CI_USER=ubuntu             # VM 접속 계정
+ONBOOT=1                   # 1 이면 Proxmox 호스트가 부팅할 때 복제한 VM 도 자동 시작
 SNIPPET_STORAGE=local      # cloud-init 스니펫을 둘 디렉터리형 스토리지
 # --------------------------------------
 
@@ -88,7 +89,7 @@ qm create "$TEMPLATE_ID" --name "$TEMPLATE_NAME" --ostype l26 \
   --serial0 socket --vga serial0
 qm set "$TEMPLATE_ID" --scsi0 "$STORAGE:0,import-from=$IMAGE_PATH,iothread=1,discard=on,ssd=1"
 qm set "$TEMPLATE_ID" --ide2 "$STORAGE:cloudinit" --boot order=scsi0
-qm set "$TEMPLATE_ID" --ciuser "$CI_USER" --sshkeys "$KEYS_FILE" --ciupgrade 0 \
+qm set "$TEMPLATE_ID" --onboot "$ONBOOT" --ciuser "$CI_USER" --sshkeys "$KEYS_FILE" --ciupgrade 0 \
   --cicustom "vendor=$SNIPPET_STORAGE:snippets/$SNIPPET_NAME"
 qm template "$TEMPLATE_ID"
 
