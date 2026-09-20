@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
 # 쿠버네티스 클러스터에 Actions Runner Controller(ARC)를 Helm 으로 설치하고 GitHub Actions self-hosted runner 를 등록합니다.
+# 러너가 쓰는 Docker Hub 이미지를 캐시하는 레지스트리도 함께 설치합니다.
 # kubectl 로 클러스터에 접근할 수 있는 곳(예: control plane)에서 실행합니다: bash install-arc.sh [GITHUB_CONFIG_URL]
 #   개인 계정: https://github.com/[OWNER]/[REPO]
 #   조직 계정: https://github.com/[ORG]
@@ -16,12 +17,17 @@ RUNNERS=(
   "arc-linux-medium  4  8Gi"
   "arc-linux-high    8 16Gi"
 )
+# Docker Hub 이미지 캐시: 보존 기간과 최대 용량입니다.
+CACHE_TTL=720h    # 받은 시점부터 이 시간이 지나면 삭제되고 다음에 필요할 때 다시 받습니다 (30일). 사용 여부와는 관계없습니다. 0 이면 만료가 없어 용량 한도에 닿을 때까지 쌓입니다.
+CACHE_SIZE=20Gi   # 넘으면 캐시 파드가 퇴출되어 새로 만들어지며 캐시 전체가 초기화됩니다. worker 노드의 디스크를 러너와 나눠 씁니다.
 # --------------------------------------
 
 HELM_INSTALL_URL=https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4
 CHART_BASE=oci://ghcr.io/actions/actions-runner-controller-charts
 CONTROLLER_NS=arc-systems
 TOKEN_SECRET=arc-github-token
+CACHE_NAME=docker-hub-cache
+CACHE_ADDR=$CACHE_NAME.$CONTROLLER_NS.svc:5000
 
 log() { echo -e "\n\033[1;32m==>\033[0m $*"; }
 die() { echo -e "\033[1;31m[오류]\033[0m $*" >&2; exit 1; }
@@ -45,6 +51,10 @@ for runner in "${RUNNERS[@]}"; do
   [[ "$name" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ && ${#name} -le 45 ]] \
     || die "러너 이름은 소문자, 숫자, 하이픈으로 45자 이하여야 합니다: $name"
 done
+
+# 캐시 설정 형식 검사
+[[ "$CACHE_TTL" =~ ^([0-9]+[smh]|0)$ ]] || die "CACHE_TTL 은 30m, 720h 같은 형식이거나 0 이어야 합니다: $CACHE_TTL"
+[[ "$CACHE_SIZE" =~ ^[0-9]+(Mi|Gi)$ ]] || die "CACHE_SIZE 는 512Mi, 20Gi 같은 형식이어야 합니다: $CACHE_SIZE"
 
 # 저장소(또는 조직)마다 네임스페이스를 나눠, 모든 저장소에서 같은 러너 이름을 쓸 수 있게 합니다.
 slug=$(basename "$GITHUB_CONFIG_URL" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//' | cut -c1-51 | sed -E 's/-+$//')
@@ -72,7 +82,71 @@ helm upgrade --install arc "$CHART_BASE/gha-runner-scale-set-controller" \
   --version "$ARC_VERSION" \
   --wait --timeout 5m
 
-# ---------- 5. 토큰 Secret ----------
+# ---------- 5. Docker Hub 캐시 ----------
+# 러너 파드는 작업마다 새로 만들어져 Docker 이미지를 매번 내려받으므로, 클러스터 안에 Docker Hub 이미지를 캐시하는 레지스트리를 둡니다.
+# 처음 한 번만 인터넷에서 받고 이후에는 이 캐시에서 받습니다. Docker Hub 이미지만 대상이며, 캐시는 파드의 emptyDir 에 쌓입니다.
+# 받은 지 CACHE_TTL 이 지난 이미지 층은 삭제되어 다음에 필요할 때 다시 받고, CACHE_SIZE 를 넘으면 캐시 파드가 퇴출되어 새로 만들어지며 캐시 전체가 초기화됩니다.
+log "Docker Hub 캐시 설치"
+kubectl apply -f - <<CACHE
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: $CACHE_NAME
+  namespace: $CONTROLLER_NS
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: $CACHE_NAME
+  template:
+    metadata:
+      labels:
+        app: $CACHE_NAME
+    spec:
+      containers:
+        - name: registry
+          image: registry:3.1
+          ports:
+            - containerPort: 5000
+          env:
+            - name: REGISTRY_PROXY_REMOTEURL
+              value: https://registry-1.docker.io
+            - name: REGISTRY_STORAGE_DELETE_ENABLED
+              value: "true"
+            - name: REGISTRY_PROXY_TTL
+              value: "$CACHE_TTL"
+            - name: REGISTRY_LOG_LEVEL
+              value: info
+          readinessProbe:
+            httpGet:
+              path: /v2/
+              port: 5000
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+          volumeMounts:
+            - name: cache
+              mountPath: /var/lib/registry
+      volumes:
+        - name: cache
+          emptyDir:
+            sizeLimit: $CACHE_SIZE
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: $CACHE_NAME
+  namespace: $CONTROLLER_NS
+spec:
+  selector:
+    app: $CACHE_NAME
+  ports:
+    - port: 5000
+CACHE
+kubectl rollout status deployment/"$CACHE_NAME" --namespace "$CONTROLLER_NS" --timeout=2m
+
+# ---------- 6. 토큰 Secret ----------
 # 토큰을 Helm 값으로 넘기지 않고 Secret 으로 분리합니다. 다시 실행하면 새 토큰으로 교체됩니다.
 log "토큰 Secret 생성 ($RUNNER_NS)"
 kubectl create namespace "$RUNNER_NS" --dry-run=client -o yaml | kubectl apply -f -
@@ -80,7 +154,7 @@ kubectl create secret generic "$TOKEN_SECRET" --namespace "$RUNNER_NS" \
   --from-literal=github_token="$GITHUB_PAT" \
   --dry-run=client -o yaml | kubectl apply -f -
 
-# ---------- 6. 목록에서 빠진 러너 제거 ----------
+# ---------- 7. 목록에서 빠진 러너 제거 ----------
 names=" "
 for runner in "${RUNNERS[@]}"; do
   read -r name _ <<<"$runner"
@@ -92,11 +166,12 @@ for release in $(helm list --namespace "$RUNNER_NS" --short); do
   helm uninstall "$release" --namespace "$RUNNER_NS" --wait
 done
 
-# ---------- 7. 러너 스케일 셋 ----------
+# ---------- 8. 러너 스케일 셋 ----------
 # 러너 파드에 Docker 데몬(dind)을 함께 띄워 워크플로우에서 docker 명령과 컨테이너를 쓸 수 있게 합니다.
 # 차트의 containerMode.type=dind 가 만드는 파드 템플릿과 같으며, dind 의 실행 부분만 다릅니다.
 # dind 는 기본값으로 작업 컨테이너를 파드 밖(노드의 /docker cgroup)에 만들어 자원 상한이 걸리지 않으므로,
 # --cgroup-parent 로 이 파드의 cgroup 아래에 만들게 합니다.
+# Docker Hub 이미지는 --registry-mirror 로 위에서 설치한 클러스터 안 캐시를 거쳐 받습니다.
 cat > "$TEMPLATE_VALUES" <<'VALUES'
 template:
   spec:
@@ -114,7 +189,8 @@ template:
           - |
             pod_cgroup=$(dirname "$(sed -n 's/^0:://p' /proc/self/cgroup)")
             case "$pod_cgroup" in /?*) set -- --cgroup-parent="$pod_cgroup/docker" ;; esac
-            exec dockerd-entrypoint.sh dockerd --host=unix:///var/run/docker.sock --group="$DOCKER_GROUP_GID" "$@"
+            exec dockerd-entrypoint.sh dockerd --host=unix:///var/run/docker.sock --group="$DOCKER_GROUP_GID" \
+              --registry-mirror=http://__CACHE_ADDR__ --insecure-registry=__CACHE_ADDR__ "$@"
         env:
           - name: DOCKER_GROUP_GID
             value: "123"
@@ -156,6 +232,7 @@ template:
       - name: dind-externals
         emptyDir: {}
 VALUES
+sed -i "s|__CACHE_ADDR__|$CACHE_ADDR|g" "$TEMPLATE_VALUES"
 
 # 자원은 파드 단위(쿠버네티스 1.34 이상)로 지정해 러너, Docker 데몬, 작업 컨테이너가 한 예산을 같이 씁니다.
 for runner in "${RUNNERS[@]}"; do
@@ -174,11 +251,12 @@ for runner in "${RUNNERS[@]}"; do
 
   applied=$(kubectl get autoscalingrunnerset "$name" -n "$RUNNER_NS" -o jsonpath='{.spec.template.spec.resources.limits.cpu}')
   [ -n "$applied" ] || die "$name 에 자원 설정이 적용되지 않았습니다. 쿠버네티스 1.34 이상인지 확인합니다."
-  kubectl get autoscalingrunnerset "$name" -n "$RUNNER_NS" -o jsonpath='{.spec.template.spec.initContainers[*].args}' | grep -q cgroup-parent \
+  dind_args=$(kubectl get autoscalingrunnerset "$name" -n "$RUNNER_NS" -o jsonpath='{.spec.template.spec.initContainers[*].args}')
+  [[ "$dind_args" == *cgroup-parent* && "$dind_args" == *registry-mirror* ]] \
     || die "$name 의 Docker 데몬 설정이 적용되지 않았습니다."
 done
 
-# ---------- 8. listener 확인 ----------
+# ---------- 9. listener 확인 ----------
 # GitHub 에 등록되면 컨트롤러가 러너마다 listener 파드를 만듭니다. 토큰이나 URL 이 틀리면 만들어지지 않습니다.
 log "listener 파드 대기"
 for runner in "${RUNNERS[@]}"; do
