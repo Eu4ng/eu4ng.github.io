@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# 템플릿 VM 을 복제해 kubeadm 쿠버네티스 클러스터(control plane 1 + worker N)를 만듭니다.
+# create-template.sh 로 만든 템플릿 VM 을 복제해 kubeadm 쿠버네티스 클러스터(control plane 1 + worker N)를 만듭니다.
 # Proxmox 호스트에서 root 로 실행합니다.
 #   bash deploy-k8s.sh           클러스터 배포
 #   bash deploy-k8s.sh destroy   배포한 노드 VM 삭제 (템플릿은 그대로)
@@ -25,19 +25,17 @@ WORKER_CORES=16
 WORKER_MEMORY=32768        # MiB
 WORKER_DISK=100G
 
-CI_USER=ubuntu             # VM 접속 계정
 K8S_VERSION=v1.37          # pkgs.k8s.io 저장소의 마이너 버전
 POD_CIDR=10.244.0.0/16     # Flannel 기본값
 # --------------------------------------
 
 FLANNEL_URL=https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
-AUTHORIZED_KEYS=/root/.ssh/authorized_keys
 HOST_KEY=/root/.ssh/id_rsa
 SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=5 -o BatchMode=yes)
 
 log() { echo -e "\n\033[1;32m==>\033[0m $*"; }
 die() { echo -e "\033[1;31m[오류]\033[0m $*" >&2; exit 1; }
-vm_ssh() { local ip=$1; shift; ssh "${SSH_OPTS[@]}" "$CI_USER@$ip" "$@"; }
+vm_ssh() { local ip=$1; shift; ssh -i "$HOST_KEY" "${SSH_OPTS[@]}" "$CI_USER@$ip" "$@"; }
 trap 'echo -e "\033[1;31m[오류]\033[0m ${LINENO}번째 줄에서 중단되었습니다." >&2' ERR
 
 # 노드 목록: 첫 번째가 control plane
@@ -87,9 +85,13 @@ fi
 
 # ---------- 1. 사전 검사 ----------
 log "사전 검사"
-[ -s "$AUTHORIZED_KEYS" ] || die "$AUTHORIZED_KEYS 가 비어 있습니다. 내 PC 의 공개키를 먼저 등록하세요."
-qm config "$TEMPLATE_ID" 2>/dev/null | grep -q '^template: 1' \
+template_conf=$(qm config "$TEMPLATE_ID" 2>/dev/null) || true
+grep -q '^template: 1' <<<"$template_conf" \
   || die "템플릿 $TEMPLATE_ID 이 없습니다. create-template.sh 를 먼저 실행하세요."
+grep -q '^sshkeys:' <<<"$template_conf" && [ -f "$HOST_KEY" ] \
+  || die "템플릿 $TEMPLATE_ID 에 SSH 키가 없습니다. create-template.sh 로 템플릿을 다시 만드세요."
+CI_USER=$(awk '/^ciuser:/{print $2}' <<<"$template_conf")
+[ -n "$CI_USER" ] || die "템플릿 $TEMPLATE_ID 에 접속 계정이 없습니다. create-template.sh 로 템플릿을 다시 만드세요."
 for i in "${!NODE_IDS[@]}"; do
   pvesh get /cluster/nextid --vmid "${NODE_IDS[$i]}" >/dev/null 2>&1 \
     || die "VM ID ${NODE_IDS[$i]} 가 이미 사용 중입니다. CP_ID 를 바꾸거나 bash deploy-k8s.sh destroy 로 기존 노드를 삭제하세요."
@@ -97,16 +99,8 @@ for i in "${!NODE_IDS[@]}"; do
     || die "IP ${NODE_IPS[$i]} 가 이미 사용 중입니다. IP_START 를 바꾸세요."
 done
 
-# ---------- 2. VM 에 넣을 공개키 준비 ----------
-# authorized_keys: 내 PC 에서 VM 으로 접속하는 용도
-# 호스트 공개키: 이 스크립트가 VM 에 접속해 설정하는 용도
-log "공개키 준비"
-[ -f "$HOST_KEY" ] || ssh-keygen -q -t rsa -b 4096 -N '' -f "$HOST_KEY"
-KEYS_FILE=$(mktemp)
-trap 'rm -f "$KEYS_FILE"' EXIT
-{ cat "$AUTHORIZED_KEYS"; echo; cat "$HOST_KEY.pub"; } | grep -vE '^\s*(#|$)' | awk '!seen[$0]++' > "$KEYS_FILE"
-
-# ---------- 3. 노드 VM ----------
+# ---------- 2. 노드 VM ----------
+# 접속 계정, SSH 키, qemu-guest-agent 는 템플릿에서 물려받습니다.
 for i in "${!NODE_IDS[@]}"; do
   id=${NODE_IDS[$i]} ip=${NODE_IPS[$i]} name=${NODE_NAMES[$i]}
   if [ "$i" -eq 0 ]; then cores=$CP_CORES memory=$CP_MEMORY disk=$CP_DISK
@@ -116,33 +110,30 @@ for i in "${!NODE_IDS[@]}"; do
   net_args=(--ipconfig0 "ip=$ip/$CIDR,gw=$GATEWAY")
   [ -z "$DNS" ] || net_args+=(--nameserver "$DNS")
   qm clone "$TEMPLATE_ID" "$id" --name "$name" --full
-  qm set "$id" --cores "$cores" --memory "$memory" \
-    --ciuser "$CI_USER" --sshkeys "$KEYS_FILE" --ciupgrade 0 "${net_args[@]}"
+  qm config "$id" | grep -q '^sshkeys:' || die "VM $id 가 템플릿의 SSH 키를 물려받지 못했습니다."
+  qm set "$id" --cores "$cores" --memory "$memory" "${net_args[@]}"
   qm resize "$id" scsi0 "$disk"
   qm start "$id"
 done
 
-# ---------- 4. SSH 대기 ----------
+# ---------- 3. SSH 대기 ----------
 for ip in "${NODE_IPS[@]}"; do
   log "$ip SSH 대기"
   for try in $(seq 1 60); do
     vm_ssh "$ip" true 2>/dev/null && break
-    [ "$try" -lt 60 ] || die "$ip 에 5분 동안 SSH 로 접속하지 못했습니다."
+    [ "$try" -lt 60 ] || die "$ip 에 5분 동안 SSH 로 접속하지 못했습니다. 네트워크 값을 확인하고, 템플릿을 만든 뒤 호스트 SSH 키가 바뀌었다면 템플릿을 다시 만드세요."
     sleep 5
   done
   vm_ssh "$ip" "cloud-init status --wait" >/dev/null || true
 done
 
-# ---------- 5. 노드 공통 설정 ----------
+# ---------- 4. 노드 공통 설정 ----------
 for ip in "${NODE_IPS[@]}"; do
   log "$ip containerd, kubeadm 설치"
   vm_ssh "$ip" "sudo bash -s -- $K8S_VERSION" <<'NODE_SETUP'
 set -euo pipefail
 K8S_VERSION=$1
 export DEBIAN_FRONTEND=noninteractive
-
-# 호스트 DNS 변경 등으로 cloud-init 설정이 바뀌어도 SSH 호스트 키를 유지
-echo 'ssh_deletekeys: false' > /etc/cloud/cloud.cfg.d/99-keep-ssh-host-keys.cfg
 
 swapoff -a
 sed -i '/\sswap\s/d' /etc/fstab
@@ -158,8 +149,7 @@ SYSCTL
 sysctl --system >/dev/null
 
 apt-get update -q
-apt-get install -yq containerd qemu-guest-agent apt-transport-https ca-certificates curl gpg
-systemctl enable --now qemu-guest-agent
+apt-get install -yq containerd apt-transport-https ca-certificates curl gpg
 
 mkdir -p /etc/containerd
 containerd config default > /etc/containerd/config.toml
@@ -178,7 +168,7 @@ apt-mark hold kubelet kubeadm kubectl
 NODE_SETUP
 done
 
-# ---------- 6. 클러스터 구성 ----------
+# ---------- 5. 클러스터 구성 ----------
 log "control plane 초기화 ($CP_IP)"
 vm_ssh "$CP_IP" "sudo kubeadm init --pod-network-cidr=$POD_CIDR --apiserver-advertise-address=$CP_IP"
 vm_ssh "$CP_IP" 'mkdir -p ~/.kube && sudo cp /etc/kubernetes/admin.conf ~/.kube/config && sudo chown "$(id -u):$(id -g)" ~/.kube/config'
@@ -190,7 +180,7 @@ for ip in "${NODE_IPS[@]:1}"; do
   vm_ssh "$ip" "sudo $JOIN_COMMAND"
 done
 
-# ---------- 7. 마무리 ----------
+# ---------- 6. 마무리 ----------
 log "노드 Ready 대기"
 vm_ssh "$CP_IP" "kubectl wait --for=condition=Ready nodes --all --timeout=300s"
 vm_ssh "$CP_IP" "kubectl get nodes -o wide"
