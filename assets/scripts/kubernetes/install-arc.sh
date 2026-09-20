@@ -1,22 +1,26 @@
 #!/usr/bin/env bash
 #
 # 쿠버네티스 클러스터에 Actions Runner Controller(ARC)를 Helm 으로 설치하고 GitHub Actions self-hosted runner 를 등록합니다.
-# kubectl 로 클러스터에 접근할 수 있는 곳(예: control plane)에서 실행합니다: bash install-arc.sh [GITHUB_CONFIG_URL] [RUNNER_NAME]
+# kubectl 로 클러스터에 접근할 수 있는 곳(예: control plane)에서 실행합니다: bash install-arc.sh [GITHUB_CONFIG_URL]
 #   개인 계정: https://github.com/[OWNER]/[REPO]
 #   조직 계정: https://github.com/[ORG]
-# RUNNER_NAME 을 생략하면 아래 기본값을 씁니다. 저장소를 추가할 때는 이름을 바꿔 다시 실행합니다.
 
 set -euo pipefail
 
 # ---------- 환경에 맞게 수정 ----------
-RUNNER_NAME=arc-runner-set   # 워크플로우의 runs-on 에 적을 이름 (두 번째 인자의 기본값)
 ARC_VERSION=0.14.2           # 두 Helm 차트의 버전
+# 러너 종류: "이름 CPU 메모리 [CPU상한 메모리상한]". 줄을 추가·수정·삭제한 뒤 스크립트를 다시 실행하면 그대로 반영됩니다.
+# CPU 와 메모리는 러너 파드 하나가 보장받는 자원이며, 상한을 생략하면 보장값과 같습니다. 가장 큰 worker 의 사양보다 작아야 합니다.
+RUNNERS=(
+  "arc-linux-low     2  4Gi"
+  "arc-linux-medium  4  8Gi"
+  "arc-linux-high    8 16Gi"
+)
 # --------------------------------------
 
 HELM_INSTALL_URL=https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4
 CHART_BASE=oci://ghcr.io/actions/actions-runner-controller-charts
 CONTROLLER_NS=arc-systems
-RUNNER_NS=arc-runners
 TOKEN_SECRET=arc-github-token
 
 log() { echo -e "\n\033[1;32m==>\033[0m $*"; }
@@ -26,9 +30,24 @@ trap 'echo -e "\033[1;31m[오류]\033[0m ${LINENO}번째 줄에서 중단되었�
 # ---------- 1. 사전 검사 ----------
 log "사전 검사"
 GITHUB_CONFIG_URL=${1:-}
-RUNNER_NAME=${2:-$RUNNER_NAME}
-[[ "$GITHUB_CONFIG_URL" == https://github.com/* ]] || die "사용법: bash install-arc.sh https://github.com/[OWNER]/[REPO] [RUNNER_NAME]"
+GITHUB_CONFIG_URL=${GITHUB_CONFIG_URL%/}
+[[ "$GITHUB_CONFIG_URL" == https://github.com/?* ]] || die "사용법: bash install-arc.sh https://github.com/[OWNER]/[REPO]"
 kubectl get nodes >/dev/null || die "kubectl 로 클러스터에 접근할 수 없습니다."
+
+# 러너 목록 형식 검사
+[ "${#RUNNERS[@]}" -gt 0 ] || die "RUNNERS 가 비어 있습니다."
+for runner in "${RUNNERS[@]}"; do
+  read -r name cpu mem cpu_limit mem_limit extra <<<"$runner"
+  { [ -n "${mem:-}" ] && [ -z "${extra:-}" ] && { [ -z "${cpu_limit:-}" ] || [ -n "${mem_limit:-}" ]; }; } \
+    || die "RUNNERS 의 각 줄은 \"이름 CPU 메모리\" 또는 \"이름 CPU 메모리 CPU상한 메모리상한\" 이어야 합니다: $runner"
+  [[ "$name" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ && ${#name} -le 45 ]] \
+    || die "러너 이름은 소문자, 숫자, 하이픈으로 45자 이하여야 합니다: $name"
+done
+
+# 저장소(또는 조직)마다 네임스페이스를 나눠, 모든 저장소에서 같은 러너 이름을 쓸 수 있게 합니다.
+slug=$(basename "$GITHUB_CONFIG_URL" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//' | cut -c1-51 | sed -E 's/-+$//')
+[ -n "$slug" ] || die "주소에서 저장소 또는 조직 이름을 찾을 수 없습니다: $GITHUB_CONFIG_URL"
+RUNNER_NS=arc-runners-$slug
 
 # ---------- 2. 액세스 토큰 ----------
 # 토큰이 화면과 셸 기록에 남지 않도록 입력받습니다. 환경 변수 GITHUB_PAT 가 있으면 그 값을 씁니다.
@@ -53,33 +72,62 @@ helm upgrade --install arc "$CHART_BASE/gha-runner-scale-set-controller" \
 
 # ---------- 5. 토큰 Secret ----------
 # 토큰을 Helm 값으로 넘기지 않고 Secret 으로 분리합니다. 다시 실행하면 새 토큰으로 교체됩니다.
-log "토큰 Secret 생성"
+log "토큰 Secret 생성 ($RUNNER_NS)"
 kubectl create namespace "$RUNNER_NS" --dry-run=client -o yaml | kubectl apply -f -
 kubectl create secret generic "$TOKEN_SECRET" --namespace "$RUNNER_NS" \
   --from-literal=github_token="$GITHUB_PAT" \
   --dry-run=client -o yaml | kubectl apply -f -
 
-# ---------- 6. 러너 스케일 셋 ----------
-# dind: 러너 파드에 Docker 데몬을 함께 띄워 워크플로우에서 docker 명령과 컨테이너 액션을 쓸 수 있게 합니다.
-log "러너 스케일 셋 설치 ($RUNNER_NAME, $GITHUB_CONFIG_URL)"
-helm upgrade --install "$RUNNER_NAME" "$CHART_BASE/gha-runner-scale-set" \
-  --namespace "$RUNNER_NS" \
-  --version "$ARC_VERSION" \
-  --set githubConfigUrl="$GITHUB_CONFIG_URL" \
-  --set githubConfigSecret="$TOKEN_SECRET" \
-  --set containerMode.type=dind
-
-# ---------- 7. listener 확인 ----------
-# GitHub 에 등록되면 컨트롤러가 listener 파드를 만듭니다. 토큰이나 URL 이 틀리면 만들어지지 않습니다.
-log "listener 파드 대기"
-phase=
-for _ in $(seq 1 60); do
-  listener=$(kubectl get pods -n "$CONTROLLER_NS" -o name | grep -- "/$RUNNER_NAME-.*-listener" | head -n 1 || true)
-  [ -z "$listener" ] || phase=$(kubectl get "$listener" -n "$CONTROLLER_NS" -o jsonpath='{.status.phase}')
-  [ "$phase" != Running ] || break
-  sleep 2
+# ---------- 6. 목록에서 빠진 러너 제거 ----------
+names=" "
+for runner in "${RUNNERS[@]}"; do
+  read -r name _ <<<"$runner"
+  names+="$name "
 done
-[ "$phase" = Running ] || die "러너가 등록되지 않았습니다. 토큰 권한과 URL 을 확인합니다: kubectl logs -n $CONTROLLER_NS deploy/arc-gha-rs-controller"
+for release in $(helm list --namespace "$RUNNER_NS" --short); do
+  [[ "$names" != *" $release "* ]] || continue
+  log "목록에 없는 러너 제거 ($release)"
+  helm uninstall "$release" --namespace "$RUNNER_NS" --wait
+done
 
-log "완료. 워크플로우에서 아래와 같이 지정합니다."
-echo "  runs-on: $RUNNER_NAME"
+# ---------- 7. 러너 스케일 셋 ----------
+# dind: 러너 파드에 Docker 데몬을 함께 띄워 워크플로우에서 docker 명령과 컨테이너를 쓸 수 있게 합니다.
+# 자원은 파드 단위(쿠버네티스 1.34 이상)로 지정해 러너와 Docker 데몬이 한 예산을 같이 씁니다.
+for runner in "${RUNNERS[@]}"; do
+  read -r name cpu mem cpu_limit mem_limit <<<"$runner"
+  log "러너 스케일 셋 설치 ($name: CPU $cpu, 메모리 $mem)"
+  helm upgrade --install "$name" "$CHART_BASE/gha-runner-scale-set" \
+    --namespace "$RUNNER_NS" \
+    --version "$ARC_VERSION" \
+    --set githubConfigUrl="$GITHUB_CONFIG_URL" \
+    --set githubConfigSecret="$TOKEN_SECRET" \
+    --set containerMode.type=dind \
+    --set-string template.spec.resources.requests.cpu="$cpu" \
+    --set-string template.spec.resources.requests.memory="$mem" \
+    --set-string template.spec.resources.limits.cpu="${cpu_limit:-$cpu}" \
+    --set-string template.spec.resources.limits.memory="${mem_limit:-$mem}"
+
+  applied=$(kubectl get autoscalingrunnerset "$name" -n "$RUNNER_NS" -o jsonpath='{.spec.template.spec.resources.limits.cpu}')
+  [ -n "$applied" ] || die "$name 에 자원 설정이 적용되지 않았습니다. 쿠버네티스 1.34 이상인지 확인합니다."
+done
+
+# ---------- 8. listener 확인 ----------
+# GitHub 에 등록되면 컨트롤러가 러너마다 listener 파드를 만듭니다. 토큰이나 URL 이 틀리면 만들어지지 않습니다.
+log "listener 파드 대기"
+for runner in "${RUNNERS[@]}"; do
+  read -r name _ <<<"$runner"
+  selector="actions.github.com/scale-set-name=$name,actions.github.com/scale-set-namespace=$RUNNER_NS"
+  phase=
+  for _ in $(seq 1 60); do
+    phase=$(kubectl get pods -n "$CONTROLLER_NS" -l "$selector" -o jsonpath='{.items[0].status.phase}' 2>/dev/null || true)
+    [ "$phase" != Running ] || break
+    sleep 2
+  done
+  [ "$phase" = Running ] || die "$name 러너가 등록되지 않았습니다. 토큰 권한과 URL 을 확인합니다: kubectl logs -n $CONTROLLER_NS deploy/arc-gha-rs-controller"
+done
+
+log "완료. 워크플로우의 runs-on 에 아래 이름을 지정합니다. (네임스페이스: $RUNNER_NS)"
+for runner in "${RUNNERS[@]}"; do
+  read -r name cpu mem _ <<<"$runner"
+  printf '  runs-on: %-20s # CPU %s, 메모리 %s\n' "$name" "$cpu" "$mem"
+done
