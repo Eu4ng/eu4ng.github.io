@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 #
 # 쿠버네티스 클러스터에 Actions Runner Controller(ARC)를 Helm 으로 설치하고 GitHub Actions self-hosted runner 를 등록합니다.
-# kubectl 로 클러스터에 접근할 수 있는 곳(예: control plane)에서 실행합니다: bash install-arc.sh [GITHUB_CONFIG_URL]
-#   저장소 러너: https://github.com/[OWNER]/[REPO]
-#   조직 러너:   https://github.com/[ORG]
+# kubectl 로 클러스터에 접근할 수 있는 곳(예: control plane)에서 실행합니다: bash install-arc.sh [GITHUB_CONFIG_URL] [RUNNER_NAME]
+#   개인 계정: https://github.com/[OWNER]/[REPO]
+#   조직 계정: https://github.com/[ORG]
+# RUNNER_NAME 을 생략하면 아래 기본값을 씁니다. 저장소를 추가할 때는 이름을 바꿔 다시 실행합니다.
 
 set -euo pipefail
 
 # ---------- 환경에 맞게 수정 ----------
-RUNNER_NAME=arc-runner-set   # 워크플로우의 runs-on 에 적을 이름
+RUNNER_NAME=arc-runner-set   # 워크플로우의 runs-on 에 적을 이름 (두 번째 인자의 기본값)
 ARC_VERSION=0.14.2           # 두 Helm 차트의 버전
 # --------------------------------------
 
@@ -25,7 +26,8 @@ trap 'echo -e "\033[1;31m[오류]\033[0m ${LINENO}번째 줄에서 중단되었�
 # ---------- 1. 사전 검사 ----------
 log "사전 검사"
 GITHUB_CONFIG_URL=${1:-}
-[[ "$GITHUB_CONFIG_URL" == https://github.com/* ]] || die "사용법: bash install-arc.sh https://github.com/[OWNER]/[REPO]"
+RUNNER_NAME=${2:-$RUNNER_NAME}
+[[ "$GITHUB_CONFIG_URL" == https://github.com/* ]] || die "사용법: bash install-arc.sh https://github.com/[OWNER]/[REPO] [RUNNER_NAME]"
 kubectl get nodes >/dev/null || die "kubectl 로 클러스터에 접근할 수 없습니다."
 
 # ---------- 2. 액세스 토큰 ----------
@@ -59,7 +61,7 @@ kubectl create secret generic "$TOKEN_SECRET" --namespace "$RUNNER_NS" \
 
 # ---------- 6. 러너 스케일 셋 ----------
 # dind: 러너 파드에 Docker 데몬을 함께 띄워 워크플로우에서 docker 명령과 컨테이너 액션을 쓸 수 있게 합니다.
-log "러너 스케일 셋 설치 ($GITHUB_CONFIG_URL)"
+log "러너 스케일 셋 설치 ($RUNNER_NAME, $GITHUB_CONFIG_URL)"
 helm upgrade --install "$RUNNER_NAME" "$CHART_BASE/gha-runner-scale-set" \
   --namespace "$RUNNER_NS" \
   --version "$ARC_VERSION" \

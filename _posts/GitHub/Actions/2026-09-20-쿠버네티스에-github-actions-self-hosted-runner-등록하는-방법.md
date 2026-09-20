@@ -31,7 +31,7 @@ GitHub에서 액세스 토큰을 발급하고, control plane에서 스크립트�
 
 - `kubectl`로 접근할 수 있는 쿠버네티스 클러스터 (만드는 방법은 [Proxmox에 kubeadm으로 쿠버네티스 클러스터 설치하는 방법](/posts/32/) 참고)
 - 클러스터 노드에서 인터넷으로 나가는 HTTPS(443) 연결
-- 러너를 등록할 저장소 또는 조직의 관리자 권한
+- 러너를 등록할 개인 계정의 저장소 또는 조직 계정의 관리자 권한
 
 ## 1. 액세스 토큰 발급
 
@@ -39,14 +39,19 @@ ARC가 러너를 등록할 때 사용할 fine-grained 토큰을 발급합니다.
 
 1. GitHub 우측 상단 프로필 > **Settings** > **Developer settings** > **Personal access tokens** > **Fine-grained tokens**로 이동
 2. **Generate new token** 클릭
-3. **Resource owner**에서 러너를 등록할 계정 또는 조직 선택
-4. **Repository access**에서 **Only select repositories**를 고르고 러너를 등록할 저장소 선택 (조직 러너는 **All repositories**)
-5. **Permissions**에서 아래 표의 권한을 추가한 뒤 **Generate token** 클릭
+3. **Token name**에 용도를 알 수 있는 이름 입력 (예: `k8s-arc-runner`)
+4. **Resource owner**에서 러너를 등록할 개인 계정 또는 조직 계정 선택
+5. **Repository access**에서 **All repositories** 선택
+6. **Permissions**의 **Add permissions**에서 아래 표의 권한을 추가하고 접근 수준을 표와 같이 변경
+7. **Generate token** 클릭
 
-| 러너 범위 | 필요한 권한 |
-| :--- | :--- |
-| 저장소 | Repository permissions의 `Administration: Read and write` |
-| 조직 | Repository permissions의 `Administration: Read-only`, Organization permissions의 `Self-hosted runners: Read and write` |
+| Resource owner | 탭 | 권한 | 접근 수준 |
+| :--- | :--- | :--- | :--- |
+| 개인 계정 | **Repositories** | Administration | Read and write |
+| 조직 계정 | **Repositories** | Administration | Read-only |
+| 조직 계정 | **Organizations** | Self-hosted runners | Read and write |
+
+`Metadata: Read-only`는 자동으로 추가되는 필수 권한이므로 그대로 둡니다. 개인 계정에는 계정 단위 러너가 없어 저장소 단위로만 등록할 수 있습니다. 여러 저장소에서 쓰려면 저장소마다 3단계를 러너 이름을 바꿔 반복합니다.
 
 - **확인:** `github_pat_`로 시작하는 토큰이 표시되며, 이 화면을 벗어나면 다시 볼 수 없으므로 복사해 둠
 
@@ -67,14 +72,15 @@ wget https://eu4ng.github.io/assets/scripts/kubernetes/install-arc.sh
 #!/usr/bin/env bash
 #
 # 쿠버네티스 클러스터에 Actions Runner Controller(ARC)를 Helm 으로 설치하고 GitHub Actions self-hosted runner 를 등록합니다.
-# kubectl 로 클러스터에 접근할 수 있는 곳(예: control plane)에서 실행합니다: bash install-arc.sh [GITHUB_CONFIG_URL]
-#   저장소 러너: https://github.com/[OWNER]/[REPO]
-#   조직 러너:   https://github.com/[ORG]
+# kubectl 로 클러스터에 접근할 수 있는 곳(예: control plane)에서 실행합니다: bash install-arc.sh [GITHUB_CONFIG_URL] [RUNNER_NAME]
+#   개인 계정: https://github.com/[OWNER]/[REPO]
+#   조직 계정: https://github.com/[ORG]
+# RUNNER_NAME 을 생략하면 아래 기본값을 씁니다. 저장소를 추가할 때는 이름을 바꿔 다시 실행합니다.
 
 set -euo pipefail
 
 # ---------- 환경에 맞게 수정 ----------
-RUNNER_NAME=arc-runner-set   # 워크플로우의 runs-on 에 적을 이름
+RUNNER_NAME=arc-runner-set   # 워크플로우의 runs-on 에 적을 이름 (두 번째 인자의 기본값)
 ARC_VERSION=0.14.2           # 두 Helm 차트의 버전
 # --------------------------------------
 
@@ -91,7 +97,8 @@ trap 'echo -e "\033[1;31m[오류]\033[0m ${LINENO}번째 줄에서 중단되었�
 # ---------- 1. 사전 검사 ----------
 log "사전 검사"
 GITHUB_CONFIG_URL=${1:-}
-[[ "$GITHUB_CONFIG_URL" == https://github.com/* ]] || die "사용법: bash install-arc.sh https://github.com/[OWNER]/[REPO]"
+RUNNER_NAME=${2:-$RUNNER_NAME}
+[[ "$GITHUB_CONFIG_URL" == https://github.com/* ]] || die "사용법: bash install-arc.sh https://github.com/[OWNER]/[REPO] [RUNNER_NAME]"
 kubectl get nodes >/dev/null || die "kubectl 로 클러스터에 접근할 수 없습니다."
 
 # ---------- 2. 액세스 토큰 ----------
@@ -125,7 +132,7 @@ kubectl create secret generic "$TOKEN_SECRET" --namespace "$RUNNER_NS" \
 
 # ---------- 6. 러너 스케일 셋 ----------
 # dind: 러너 파드에 Docker 데몬을 함께 띄워 워크플로우에서 docker 명령과 컨테이너 액션을 쓸 수 있게 합니다.
-log "러너 스케일 셋 설치 ($GITHUB_CONFIG_URL)"
+log "러너 스케일 셋 설치 ($RUNNER_NAME, $GITHUB_CONFIG_URL)"
 helm upgrade --install "$RUNNER_NAME" "$CHART_BASE/gha-runner-scale-set" \
   --namespace "$RUNNER_NS" \
   --version "$ARC_VERSION" \
@@ -156,12 +163,12 @@ echo "  runs-on: $RUNNER_NAME"
 
 ## 3. 스크립트 실행
 
-러너를 등록할 주소를 인자로 넘겨 실행하고, 토큰을 묻는 프롬프트에 1단계의 토큰을 붙여 넣습니다. 입력한 토큰은 화면에 표시되지 않습니다.
+러너를 등록할 주소와 러너 이름을 인자로 넘겨 실행하고, 토큰을 묻는 프롬프트에 1단계의 토큰을 붙여 넣습니다. 입력한 토큰은 화면에 표시되지 않습니다.
 
 ```bash
-# 저장소 러너: https://github.com/[OWNER]/[REPO]
-# 조직 러너:   https://github.com/[ORG]
-bash install-arc.sh [GITHUB_CONFIG_URL]
+# 개인 계정: https://github.com/[OWNER]/[REPO]
+# 조직 계정: https://github.com/[ORG]
+bash install-arc.sh [GITHUB_CONFIG_URL] [RUNNER_NAME]
 ```
 
 스크립트를 실행하면 아래 작업이 순서대로 진행됩니다.
@@ -169,12 +176,12 @@ bash install-arc.sh [GITHUB_CONFIG_URL]
 1. Helm이 없으면 설치
 2. ARC 컨트롤러를 `arc-systems` 네임스페이스에 설치
 3. 토큰을 `arc-runners` 네임스페이스의 Secret으로 저장
-4. 러너 스케일 셋 `arc-runner-set`을 설치하고, GitHub에 등록되어 listener 파드가 실행될 때까지 대기
+4. 러너 스케일 셋을 `[RUNNER_NAME]`이라는 이름으로 설치하고, GitHub에 등록되어 listener 파드가 실행될 때까지 대기
 
-> 러너 스케일 셋의 이름이 곧 워크플로우의 `runs-on`에 적는 이름입니다. 바꾸려면 실행하기 전에 스크립트 맨 위의 `RUNNER_NAME`을 고칩니다.
+> `[RUNNER_NAME]`이 곧 워크플로우의 `runs-on`에 적는 이름이며, 생략하면 `arc-runner-set`입니다. 이 글의 나머지 예시는 `arc-runner-set`을 기준으로 합니다.
 {: .prompt-warning }
 
-- **확인:** 마지막에 `runs-on: arc-runner-set`이 출력되고, GitHub 저장소(또는 조직)의 **Settings** > **Actions** > **Runners**에 `arc-runner-set` 표시
+- **확인:** 마지막에 `runs-on: arc-runner-set`이 출력되고, GitHub 저장소(조직 계정은 조직)의 **Settings** > **Actions** > **Runners**에 `arc-runner-set` 표시
 
 ## 4. 워크플로우에서 실행
 
