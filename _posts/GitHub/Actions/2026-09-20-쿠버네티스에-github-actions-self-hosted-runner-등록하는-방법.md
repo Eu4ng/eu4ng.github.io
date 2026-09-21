@@ -1,10 +1,10 @@
 ---
 layout: post
 title: 쿠버네티스에 GitHub Actions Self-hosted Runner 등록하는 방법
-permalink: /posts/35/
 description: 스크립트 하나로 Actions Runner Controller를 설치해, 워크플로우가 실행될 때만 러너 파드가 만들어지는 self-hosted runner를 쿠버네티스에 등록하는 방법을 정리했습니다.
 author: Eu4ng
 tags: [github, actions, self-hosted-runner, kubernetes, helm]
+permalink: /posts/35/
 ---
 
 GitHub에서 액세스 토큰을 발급하고, control plane에서 스크립트를 실행해 GitHub 공식 도구인 **Actions Runner Controller**(ARC)를 설치한 뒤, 워크플로우의 `runs-on`에 러너 이름을 지정해 실행합니다. 러너는 CPU와 메모리가 다른 `arc-linux-low`, `arc-linux-medium`, `arc-linux-high` 세 종류가 설치되며, 작업의 무게에 맞춰 골라 씁니다. 클러스터 안의 listener 파드가 GitHub로 나가는 HTTPS 연결을 열어 작업을 받아 오므로, 로컬 네트워크 전용 클러스터에서도 포트포워딩, 도메인, SSL 인증서 없이 동작합니다.
