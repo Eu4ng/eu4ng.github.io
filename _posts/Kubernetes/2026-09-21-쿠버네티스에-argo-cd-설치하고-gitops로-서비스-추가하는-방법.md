@@ -69,6 +69,7 @@ wget https://eu4ng.github.io/assets/scripts/kubernetes/install-argocd.sh
 <details markdown="1">
 <summary>스크립트 전문 보기</summary>
 
+{% raw %}
 ```bash
 #!/usr/bin/env bash
 #
@@ -204,6 +205,7 @@ echo
 echo "저장소의 $SERVICES_DIR/[이름]/ 폴더에 매니페스트를 넣고 push 하면 배포됩니다."
 ```
 {: file="install-argocd.sh" }
+{% endraw %}
 
 </details>
 
