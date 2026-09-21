@@ -1,6 +1,7 @@
 ---
 layout: post
 title: 쿠버네티스에 Argo CD 설치하고 GitOps로 서비스 추가하는 방법
+permalink: /posts/36/
 description: 스크립트 하나로 Argo CD를 설치하고 GitHub 저장소를 연결해, 저장소에 폴더를 추가하고 push하는 것만으로 쿠버네티스에 서비스가 배포되는 GitOps 구성을 만드는 방법을 정리했습니다.
 author: Eu4ng
 tags: [kubernetes, argo-cd, gitops, helm, github]

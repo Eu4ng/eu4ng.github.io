@@ -1,6 +1,7 @@
 ---
 layout: post
 title: 쿠버네티스에 GitHub Actions Self-hosted Runner 등록하는 방법
+permalink: /posts/35/
 description: 스크립트 하나로 Actions Runner Controller를 설치해, 워크플로우가 실행될 때만 러너 파드가 만들어지는 self-hosted runner를 쿠버네티스에 등록하는 방법을 정리했습니다.
 author: Eu4ng
 tags: [github, actions, self-hosted-runner, kubernetes, helm]
