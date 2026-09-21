@@ -6,12 +6,17 @@ on:
   workflow_dispatch:
 
   # 한국 시간 기준 매일 자정에 자동으로 실행
-  # schedule:
-  #   - cron: '0 15 * * *'
+  schedule:
+    - cron: '0 15 * * *'
 
 permissions:
   contents: write
   pull-requests: write
+
+# 스케줄과 수동 실행이 겹쳐 PR 생성이 경합하지 않도록 함
+concurrency:
+  group: auto-merge-develop
+  cancel-in-progress: false
 
 jobs:
   auto-merge:
@@ -27,42 +32,44 @@ jobs:
       - name: Check for commits to merge
         id: check_changes
         run: |
-          COMMITS=$(git rev-list --count origin/master..origin/develop)
+          set -euo pipefail
+          COMMITS=$(git rev-list --count origin/main..origin/develop)
           echo "commits=$COMMITS" >> $GITHUB_OUTPUT
-          echo "develop 브랜치에 master로 병합할 커밋이 $COMMITS 개 있습니다."
+          echo "develop 브랜치에 main으로 병합할 커밋이 $COMMITS 개 있습니다."
 
       # PR 생성 및 자동 병합 진행
       - name: Create pull request and enable auto-merge
-        if: steps.check_changes.outputs.commits > 0
+        if: steps.check_changes.outputs.commits != '0'
         env:
           GH_TOKEN: ${{ secrets.PAT }}
         run: |
-          # 기존에 develop -> master 로 열려있는 PR이 있는지 확인
-          EXISTING_PR=$(gh pr list --base master --head develop --state open --json url --jq '.[0].url')
-          
+          set -euo pipefail
+
+          # 기존에 develop -> main 으로 열려있는 PR이 있는지 확인
+          EXISTING_PR=$(gh pr list --base main --head develop --state open --json url --jq '.[0].url')
+
           if [ -z "$EXISTING_PR" ]; then
             echo "새로운 PR을 생성합니다."
             PR_URL=$(gh pr create \
-              --base master \
+              --base main \
               --head develop \
-              --title "merge: develop -> master 동기화" \
-              --body "매일 자정에 \`develop\` 브랜치에서 \`master\` 브랜치로 병합하기 위해 자동으로 생성된 PR입니다.
-              설정된 CI 테스트 통과 시 자동으로 병합됩니다.")
+              --title "merge: develop -> main 동기화" \
+              --body "매일 자정에 \`develop\` 브랜치에서 \`main\` 브랜치로 병합하기 위해 자동으로 생성된 PR입니다.
+          설정된 CI 테스트 통과 시 자동으로 병합됩니다.")
             echo "생성된 PR: $PR_URL"
           else
             echo "이미 열려있는 PR이 존재합니다: $EXISTING_PR"
             PR_URL="$EXISTING_PR"
           fi
-          
+
           # 해당 PR에 대해 자동 병합 활성화
           if [ -n "$PR_URL" ]; then
-            # PR_URL(예: https://.../pull/18)에서 맨 뒷자리 숫자만 추출
-            PR_NUMBER="${PR_URL##*/}"
-            
+            PR_NUMBER=$(gh pr view "$PR_URL" --json number --jq .number)
+
             echo "PR 자동 병합 활성화 (#$PR_NUMBER)"
 
             gh pr merge "$PR_URL" --auto --merge \
-              --subject "merge: develop -> master 동기화 (#$PR_NUMBER)" \
+              --subject "merge: develop -> main 동기화 (#$PR_NUMBER)" \
               --body ""
           else
             echo "PR 생성 및 확인에 실패했습니다."

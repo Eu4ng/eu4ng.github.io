@@ -2,6 +2,7 @@
 layout: post
 title: Synology NAS에 Portainer 설치하기
 date: 2026-04-26 22:23 +0900
+permalink: /posts/29/
 author: Eu4ng
 tags: []
 ---
