@@ -82,6 +82,7 @@ fi
 
 # ---------- 5. ApplicationSet ----------
 # services/ 아래 폴더마다 Application 을 만듭니다. 폴더 이름이 Application 이름이자 네임스페이스입니다.
+# 폴더의 내용이 일반 매니페스트, kustomization.yaml, Chart.yaml(Helm) 중 무엇인지는 Argo CD 가 알아서 판단합니다.
 # 폴더를 지워도 배포된 자원(네임스페이스, PVC)은 남깁니다.
 log "ApplicationSet 등록"
 kubectl apply -f - <<APPSET
@@ -117,6 +118,7 @@ spec:
           selfHeal: true
         syncOptions:
           - CreateNamespace=true
+          - ServerSideApply=true   # kube-prometheus-stack 처럼 CRD 가 큰 차트도 적용되게 합니다
   syncPolicy:
     preserveResourcesOnDeletion: true
 APPSET

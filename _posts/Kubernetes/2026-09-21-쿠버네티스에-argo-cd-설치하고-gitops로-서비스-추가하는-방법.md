@@ -1,10 +1,10 @@
 ---
 layout: post
 title: 쿠버네티스에 Argo CD 설치하고 GitOps로 서비스 추가하는 방법
-permalink: /posts/36/
 description: 스크립트 하나로 Argo CD를 설치하고 GitHub 저장소를 연결해, 저장소에 폴더를 추가하고 push하는 것만으로 쿠버네티스에 서비스가 배포되는 GitOps 구성을 만드는 방법을 정리했습니다.
 author: Eu4ng
 tags: [kubernetes, argo-cd, gitops, helm, github]
+permalink: /posts/36/
 ---
 
 GitHub에 매니페스트 저장소를 만들고, control plane에서 스크립트를 실행해 **Argo CD**를 설치하고 저장소를 연결한 뒤, 저장소에 폴더를 추가해 첫 서비스를 배포합니다. 공식 문서처럼 서비스마다 Application을 만들지 않고, 저장소의 `services/` 아래 폴더마다 Application을 자동으로 만들어 주는 **ApplicationSet**을 등록하므로 이후에는 폴더를 추가하고 push하는 것이 서비스 추가의 전부입니다.
@@ -52,7 +52,7 @@ gh repo create [OWNER]/k8s-gitops --private --clone
 저장소는 아래 규칙으로 씁니다. 폴더 이름이 Argo CD의 Application 이름이자 배포되는 네임스페이스가 됩니다.
 
 ```text
-services/[이름]/   # 폴더 하나가 서비스 하나. 일반 매니페스트(*.yaml) 또는 kustomization.yaml
+services/[이름]/   # 폴더 하나가 서비스 하나. 일반 매니페스트(*.yaml), kustomization.yaml, 또는 Chart.yaml(Helm)
 ```
 
 - **확인:** 내 PC에 빈 `k8s-gitops` 폴더 생성
@@ -156,6 +156,7 @@ fi
 
 # ---------- 5. ApplicationSet ----------
 # services/ 아래 폴더마다 Application 을 만듭니다. 폴더 이름이 Application 이름이자 네임스페이스입니다.
+# 폴더의 내용이 일반 매니페스트, kustomization.yaml, Chart.yaml(Helm) 중 무엇인지는 Argo CD 가 알아서 판단합니다.
 # 폴더를 지워도 배포된 자원(네임스페이스, PVC)은 남깁니다.
 log "ApplicationSet 등록"
 kubectl apply -f - <<APPSET
@@ -191,6 +192,7 @@ spec:
           selfHeal: true
         syncOptions:
           - CreateNamespace=true
+          - ServerSideApply=true   # kube-prometheus-stack 처럼 CRD 가 큰 차트도 적용되게 합니다
   syncPolicy:
     preserveResourcesOnDeletion: true
 APPSET
