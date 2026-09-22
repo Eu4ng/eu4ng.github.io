@@ -52,7 +52,7 @@ gh repo create [OWNER]/k8s-gitops --private --clone
 저장소는 아래 규칙으로 씁니다. 폴더 이름이 Argo CD의 Application 이름이자 배포되는 네임스페이스가 됩니다.
 
 ```text
-services/[이름]/   # 폴더 하나가 서비스 하나. 일반 매니페스트(*.yaml) 또는 kustomization.yaml
+services/[이름]/   # 폴더 하나가 서비스 하나. 일반 매니페스트(*.yaml), kustomization.yaml, 또는 Chart.yaml(Helm)
 ```
 
 - **확인:** 내 PC에 빈 `k8s-gitops` 폴더 생성
@@ -156,6 +156,7 @@ fi
 
 # ---------- 5. ApplicationSet ----------
 # services/ 아래 폴더마다 Application 을 만듭니다. 폴더 이름이 Application 이름이자 네임스페이스입니다.
+# 폴더의 내용이 일반 매니페스트, kustomization.yaml, Chart.yaml(Helm) 중 무엇인지는 Argo CD 가 알아서 판단합니다.
 # 폴더를 지워도 배포된 자원(네임스페이스, PVC)은 남깁니다.
 log "ApplicationSet 등록"
 kubectl apply -f - <<APPSET
@@ -191,6 +192,7 @@ spec:
           selfHeal: true
         syncOptions:
           - CreateNamespace=true
+          - ServerSideApply=true   # kube-prometheus-stack 처럼 CRD 가 큰 차트도 적용되게 합니다
   syncPolicy:
     preserveResourcesOnDeletion: true
 APPSET
