@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """공유기(UPnP IGD)에 외부 노출용 포트포워딩을 겁니다. 표준 라이브러리만 씁니다.
 
-    WAN 443 -> <이 호스트>:31443 (Traefik websecure NodePort)
-    WAN 80  -> <이 호스트>:31080 (Traefik web NodePort)
+    WAN 443 -> <이 호스트>:443 (Traefik websecure hostPort)
+    WAN 80  -> <이 호스트>:80  (Traefik web hostPort)
 
 MiniUPnPd 는 요청한 호스트만 내부 클라이언트로 허용하는 것이 보통이라, 트래픽을 받을 노드에서 실행합니다:
 
@@ -20,8 +20,8 @@ import urllib.request
 import xml.etree.ElementTree as ET
 
 MAPPINGS = [  # (외부 포트, 내부 포트, 설명)
-    (443, 31443, "k8s traefik https"),
-    (80, 31080, "k8s traefik http"),
+    (443, 443, "k8s traefik https"),
+    (80, 80, "k8s traefik http"),
 ]
 PROTOCOL = "TCP"
 LEASE = 0  # 0 = 영구
@@ -139,8 +139,12 @@ def main():
             if cur.get("NewInternalClient") == host and cur.get("NewInternalPort") == str(internal):
                 print(f"{PROTOCOL} {ext} -> {host}:{internal}: 이미 있음 (lease {cur.get('NewLeaseDuration')})")
                 continue
-            die(f"{PROTOCOL} {ext} 이 이미 {cur.get('NewInternalClient')}:{cur.get('NewInternalPort')} 로 걸려 있습니다. "
-                "공유기 관리 화면에서 지우고 다시 실행하세요.")
+            if cur.get("NewPortMappingDescription") != desc:
+                die(f"{PROTOCOL} {ext} 이 이미 {cur.get('NewInternalClient')}:{cur.get('NewInternalPort')} "
+                    f"('{cur.get('NewPortMappingDescription')}') 로 걸려 있습니다. 공유기 관리 화면에서 지우고 다시 실행하세요.")
+            # 이 스크립트가 예전에 건 매핑(같은 설명)이면 내부 포트가 바뀐 것이므로 지우고 다시 겁니다.
+            igd.call("DeletePortMapping", **key)
+            print(f"{PROTOCOL} {ext} -> {cur.get('NewInternalClient')}:{cur.get('NewInternalPort')}: 옛 매핑 삭제")
         try:
             igd.call("AddPortMapping", **key, NewInternalPort=internal, NewInternalClient=host,
                      NewEnabled=1, NewPortMappingDescription=desc, NewLeaseDuration=LEASE)
