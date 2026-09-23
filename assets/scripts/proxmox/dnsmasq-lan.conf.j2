@@ -1,0 +1,16 @@
+# proxmox-ansible 의 playbooks/lan-dns.yml 이 만듭니다. 직접 고치지 마세요.
+listen-address={{ lan_dns_ip }}
+bind-interfaces
+no-resolv
+no-hosts
+cache-size=1000
+{% for up in lan_dns_upstream %}
+server={{ up }}
+{% endfor %}
+{# 와일드카드(address=/도메인/)는 쓰지 않습니다. 기존 공개 이름과 파드의 검색 도메인 조회가 깨집니다. #}
+{% for name in lan_dns_names %}
+local=/{{ name }}.{{ lan_dns_domain }}/
+{% for ip in lan_dns_targets %}
+address=/{{ name }}.{{ lan_dns_domain }}/{{ ip }}
+{% endfor %}
+{% endfor %}
