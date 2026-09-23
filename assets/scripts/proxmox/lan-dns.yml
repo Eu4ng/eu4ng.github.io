@@ -1,0 +1,108 @@
+# 내부망 DNS 컨테이너. 밖에 여는 서비스 이름만 클러스터 노드 IP 로 답해, 집 안에서는 Cloudflare 를 거치지 않고 노드로 직접 붙게 합니다.
+#   ansible-playbook playbooks/lan-dns.yml   (PROXMOX_* 환경변수 필요, README 참고)
+---
+- name: CT 템플릿 준비
+  hosts: proxmox
+  gather_facts: false
+  tasks:
+    - name: 템플릿 내려받기 (없을 때만)
+      ansible.builtin.command: pveam download {{ ct_template_storage }} {{ lan_dns_template }}
+      args:
+        creates: /var/lib/vz/template/cache/{{ lan_dns_template }}
+
+- name: lan-dns CT 만들기
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: CT 정의 (있으면 설정만 맞춤)
+      community.proxmox.proxmox:
+        node: "{{ proxmox_node }}"
+        vmid: "{{ lan_dns_vmid }}"
+        hostname: "{{ lan_dns_hostname }}"
+        ostemplate: "{{ ct_template_storage }}:vztmpl/{{ lan_dns_template }}"
+        cores: 1
+        memory: 256
+        swap: 0
+        disk: "{{ ct_disk_storage }}:2"
+        netif: { net0: "name=eth0,bridge={{ ct_bridge }},ip={{ lan_dns_ip }}/24,gw={{ ct_gateway }}" }
+        nameserver: "{{ lan_dns_upstream[0] }}"
+        onboot: true
+        unprivileged: true
+        pubkey: "{{ ct_ssh_pubkey }}"
+        state: present
+    - name: CT 시작
+      community.proxmox.proxmox:
+        node: "{{ proxmox_node }}"
+        vmid: "{{ lan_dns_vmid }}"
+        hostname: "{{ lan_dns_hostname }}"
+        state: started
+    - name: SSH 열릴 때까지 대기
+      ansible.builtin.wait_for:
+        host: "{{ lan_dns_ip }}"
+        port: 22
+        timeout: 120
+
+- name: CT 안에 dnsmasq 설정
+  hosts: lan_dns
+  gather_facts: false
+  pre_tasks:
+    - name: python3 준비 (Ansible 모듈 실행에 필요)
+      ansible.builtin.raw: command -v python3 >/dev/null || (apt-get update -q && apt-get install -y -q python3)
+      changed_when: false
+  tasks:
+    - name: dnsmasq 설치
+      ansible.builtin.apt:
+        name: dnsmasq
+        update_cache: true
+        cache_valid_time: 3600
+    - name: 설정 파일
+      ansible.builtin.template:
+        src: ../templates/dnsmasq-lan.conf.j2
+        dest: /etc/dnsmasq.d/lan.conf
+        mode: "0644"
+        validate: dnsmasq --test --conf-file=%s
+      notify: dnsmasq 재시작
+    - name: dnsmasq 켜기
+      ansible.builtin.service:
+        name: dnsmasq
+        enabled: true
+        state: started
+  handlers:
+    - name: dnsmasq 재시작
+      ansible.builtin.service:
+        name: dnsmasq
+        state: restarted
+
+- name: 호스트 정리와 확인
+  hosts: proxmox
+  gather_facts: false
+  vars:
+    first_name: "{{ lan_dns_names[0] }}.{{ lan_dns_domain }}"
+  tasks:
+    - name: 호스트에 직접 깔았던 옛 dnsmasq 제거
+      ansible.builtin.apt:
+        name: dnsmasq
+        state: absent
+        purge: true
+    - name: 옛 설정 파일 제거
+      ansible.builtin.file:
+        path: /etc/dnsmasq.d/lan.conf
+        state: absent
+    - name: dig 준비
+      ansible.builtin.apt:
+        name: dnsutils
+    - name: 조회 검사
+      ansible.builtin.shell: |
+        echo "A     {{ first_name }} -> $(dig +short +time=2 @{{ lan_dns_ip }} {{ first_name }} A | tr '\n' ' ')"
+        echo "AAAA  {{ first_name }} -> $(dig +short +time=2 @{{ lan_dns_ip }} {{ first_name }} AAAA | tr '\n' ' ')(비어 있어야 함)"
+        echo "공개  www.{{ lan_dns_domain }} -> $(dig +short +time=2 @{{ lan_dns_ip }} www.{{ lan_dns_domain }} A | tr '\n' ' ')"
+        echo "외부  github.com -> $(dig +short +time=2 @{{ lan_dns_ip }} github.com A | tr '\n' ' ')"
+      register: lookup
+      changed_when: false
+    - name: 결과
+      ansible.builtin.debug:
+        msg: "{{ lookup.stdout_lines }}"
+    - name: 노드 IP 로 답하는지
+      ansible.builtin.assert:
+        that: lan_dns_targets[0] in lookup.stdout_lines[0]
+        fail_msg: "{{ first_name }} 이 노드 IP 로 풀리지 않습니다"
