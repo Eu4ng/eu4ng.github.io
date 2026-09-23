@@ -1,6 +1,6 @@
 ---
 name: blog-post
-description: 이 Jekyll 블로그(eu4ng.github.io)의 게시글을 새로 쓰거나 고칠 때 쓴다. 유형에 맞는 템플릿 선택, 파일 위치와 front matter, 제목 구조와 문체, 코드 블록과 프롬프트 블록 표기, 설치 글의 스크립트 작성 방식, 그리고 push 전에 반드시 거쳐야 하는 permalink 부여와 빌드·링크 검증 절차를 담고 있다.
+description: 이 Jekyll 블로그(eu4ng.github.io)의 게시글을 새로 쓰거나 고칠 때 쓴다. 유형에 맞는 템플릿 선택, 파일 위치와 front matter, 제목 구조와 문체, 코드 블록과 프롬프트 블록 표기, 설치 글의 스크립트 작성 방식, push 전에 반드시 거쳐야 하는 permalink 부여와 빌드·링크 검증 절차, 그리고 검증을 통과하면 자동으로 이어지는 커밋·push 까지 담고 있다.
 ---
 
 # 블로그 게시글 작성
@@ -156,3 +156,8 @@ bundle exec htmlproofer /tmp/_site --disable-external \
   2026-09-21 에 게시글 4개가 이 상태로 push 되어 내부 링크 7건이 깨지고 CI 가 실패했다.
 - 빌드 중 나오는 태그 관련 `Conflict` 경고는 이전부터 있던 것으로 빌드를 실패시키지 않는다.
 - 글은 `develop` 브랜치에 커밋한다. `main` 은 `develop` 에서 PR 로만 갱신되고, 병합되면 배포된다.
+
+## 8. 발행
+
+검증(7번)을 통과하면 사용자에게 다시 묻지 않고 이 글과 관련된 변경을 커밋하고 `develop` 에 push 한다.
+이 글과 관련 없는 변경은 함께 커밋하지 않는다.
