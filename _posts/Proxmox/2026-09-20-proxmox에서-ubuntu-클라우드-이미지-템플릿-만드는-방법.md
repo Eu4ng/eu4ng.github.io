@@ -10,6 +10,9 @@ tags: [proxmox, ubuntu, cloud-init, template, ssh]
 
 Proxmox 호스트에서 스크립트를 한 번 실행해 Ubuntu 24.04 클라우드 이미지 템플릿을 만듭니다. 스크립트가 Proxmox의 `authorized_keys`를 템플릿에 넣어 두므로, Proxmox에 SSH로 접속하던 PC라면 템플릿을 복제한 VM에도 추가 설정 없이 접속할 수 있습니다.
 
+> 같은 템플릿을 Ansible 플레이북으로 만드는 방법은 [Proxmox에 Ansible로 kubeadm 쿠버네티스 클러스터 만드는 방법](/posts/46/)의 2단계에 정리했습니다.
+{: .prompt-info }
+
 1. 스크립트 내려받기
 2. 변수 수정
 3. 스크립트 실행

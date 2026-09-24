@@ -1,0 +1,234 @@
+# 허브 쿠버네티스 클러스터(kubeadm, control plane 1 + worker N). 템플릿(vm-template.yml)을 복제해 VM 을 만들고
+# containerd·kubeadm 을 설치해 클러스터를 구성한 뒤 kubeconfig 를 실행 PC 로 가져옵니다. 그 다음은 Argo CD 설치(install-argocd.sh)부터 GitOps 입니다.
+#   ansible-playbook playbooks/k8s-hub.yml                   만들기 (여러 번 실행해도 됨)
+#   ansible-playbook playbooks/k8s-hub.yml -e k8s_hub_state=absent   VM 삭제 (ID 와 이름이 모두 맞는 VM 만, yes 입력 후)
+---
+- name: VM 만들기
+  hosts: localhost
+  gather_facts: false
+  vars:
+    state: "{{ k8s_hub_state | default('present') }}"
+  tasks:
+    - name: 노드 목록을 인벤토리 그룹으로
+      ansible.builtin.add_host:
+        name: "{{ item.name }}"
+        groups: [k8s_hub_nodes, "{{ 'k8s_hub_cp' if idx == 0 else 'k8s_hub_workers' }}"]
+        ansible_host: "{{ item.ip }}"
+        ansible_user: "{{ vm_template_user }}"
+      loop: "{{ k8s_hub_nodes }}"
+      loop_control: { index_var: idx, label: "{{ item.name }}" }
+      changed_when: false
+      when: state == 'present'            # 삭제할 때는 뒤의 플레이가 노드에 접속하지 않게 그룹을 비워 둡니다
+
+    - name: 삭제
+      when: state == 'absent'
+      block:
+        - name: 확인 (-e k8s_hub_confirm=yes 로 건너뜀)
+          ansible.builtin.pause:
+            prompt: "{{ k8s_hub_nodes | map(attribute='name') | join(', ') }} VM 과 디스크를 삭제합니다. 계속하려면 yes"
+          register: confirm
+          when: k8s_hub_confirm | default('') != 'yes'
+        - name: 삭제 중단
+          ansible.builtin.meta: end_play
+          when: k8s_hub_confirm | default('') != 'yes' and confirm.user_input | default('') != 'yes'
+        - name: 현재 VM 목록
+          community.proxmox.proxmox_vm_info:
+            node: "{{ proxmox_node }}"
+            type: qemu
+          register: vms
+        - name: VM 중지·삭제 (ID 와 이름이 모두 맞는 경우만)
+          community.proxmox.proxmox_kvm:
+            node: "{{ proxmox_node }}"
+            vmid: "{{ item.vmid }}"
+            name: "{{ item.name }}"
+            state: absent
+            force: true
+            timeout: 120
+          loop: "{{ k8s_hub_nodes }}"
+          loop_control: { label: "{{ item.name }}" }
+          when: vms.proxmox_vms | selectattr('vmid', 'equalto', item.vmid | int) | selectattr('name', 'equalto', item.name) | list | length > 0
+        - name: 끝
+          ansible.builtin.meta: end_play
+
+    - name: 템플릿 복제 (VM 이 없을 때만)
+      community.proxmox.proxmox_kvm:
+        node: "{{ proxmox_node }}"
+        clone: "{{ vm_template_name }}"
+        vmid: "{{ vm_template_vmid }}"
+        newid: "{{ item.vmid }}"
+        name: "{{ item.name }}"
+        full: true
+        storage: "{{ vm_disk_storage }}"
+        format: raw
+        timeout: 300
+        state: present
+      loop: "{{ k8s_hub_nodes }}"
+      loop_control: { label: "{{ item.name }}" }
+      register: clones
+    - name: 디스크 늘리기 (복제 직후 한 번)
+      community.proxmox.proxmox_disk:
+        vmid: "{{ item.item.vmid }}"
+        disk: scsi0
+        size: "{{ item.item.disk }}"
+        state: resized
+      loop: "{{ clones.results }}"
+      loop_control: { label: "{{ item.item.name }}" }
+      when: item.changed
+    - name: VM 설정 맞추기 (코어·메모리·IP·DNS·자동 시작. 모듈 특성상 매번 changed 로 보고됨)
+      community.proxmox.proxmox_kvm:
+        node: "{{ proxmox_node }}"
+        vmid: "{{ item.vmid }}"
+        name: "{{ item.name }}"
+        cores: "{{ item.cores }}"
+        memory: "{{ item.memory }}"
+        onboot: true
+        ipconfig: { ipconfig0: "ip={{ item.ip }}/24,gw={{ ct_gateway }}" }
+        nameservers: "{{ k8s_hub_nameservers }}"
+        update: true
+      loop: "{{ k8s_hub_nodes }}"
+      loop_control: { label: "{{ item.name }}" }
+    - name: VM 시작
+      community.proxmox.proxmox_kvm:
+        node: "{{ proxmox_node }}"
+        vmid: "{{ item.vmid }}"
+        name: "{{ item.name }}"
+        state: started
+      loop: "{{ k8s_hub_nodes }}"
+      loop_control: { label: "{{ item.name }}" }
+    - name: SSH 열릴 때까지 대기
+      ansible.builtin.wait_for:
+        host: "{{ item.ip }}"
+        port: 22
+        timeout: 300
+      loop: "{{ k8s_hub_nodes }}"
+      loop_control: { label: "{{ item.name }}" }
+
+- name: 노드 공통 (containerd, kubeadm)
+  hosts: k8s_hub_nodes
+  become: true
+  gather_facts: false
+  tasks:
+    - name: cloud-init 완료 대기 (첫 부팅의 패키지 갱신)
+      ansible.builtin.command: cloud-init status --wait
+      changed_when: false
+      failed_when: false
+    - name: 시간대
+      community.general.timezone:
+        name: "{{ timezone }}"
+    - name: swap 끄기 (fstab)
+      ansible.builtin.replace:
+        path: /etc/fstab
+        regexp: '^([^#].*\sswap\s.*)$'
+        replace: '# \1'
+    - name: swap 끄기 (지금)
+      ansible.builtin.command: swapoff -a
+      changed_when: false
+    - name: 커널 모듈 (자동 로드)
+      ansible.builtin.copy:
+        dest: /etc/modules-load.d/k8s.conf
+        mode: "0644"
+        content: "overlay\nbr_netfilter\n"
+    - name: 커널 모듈 (지금)
+      community.general.modprobe:
+        name: "{{ item }}"
+      loop: [overlay, br_netfilter]
+    - name: 커널 설정
+      ansible.posix.sysctl:
+        name: "{{ item }}"
+        value: "1"
+        sysctl_file: /etc/sysctl.d/k8s.conf
+      loop: [net.bridge.bridge-nf-call-iptables, net.bridge.bridge-nf-call-ip6tables, net.ipv4.ip_forward]
+    - name: 패키지 저장소 키
+      ansible.builtin.get_url:
+        url: https://pkgs.k8s.io/core:/stable:/{{ k8s_hub_version }}/deb/Release.key
+        dest: /etc/apt/keyrings/kubernetes-apt-keyring.asc
+        mode: "0644"
+    - name: 패키지 저장소
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/kubernetes.list
+        mode: "0644"
+        content: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.asc] https://pkgs.k8s.io/core:/stable:/{{ k8s_hub_version }}/deb/ /\n"
+    - name: containerd·kubeadm 설치
+      ansible.builtin.apt:
+        name: [containerd, kubelet, kubeadm, kubectl]
+        update_cache: true
+    - name: 버전 고정 (apt upgrade 로 올라가지 않게)
+      ansible.builtin.dpkg_selections:
+        name: "{{ item }}"
+        selection: hold
+      loop: [kubelet, kubeadm, kubectl]
+    - name: containerd 기본 설정 (없을 때만)
+      ansible.builtin.shell: mkdir -p /etc/containerd && containerd config default > /etc/containerd/config.toml
+      args:
+        creates: /etc/containerd/config.toml
+    - name: containerd 가 systemd cgroup 을 쓰게
+      ansible.builtin.replace:
+        path: /etc/containerd/config.toml
+        regexp: 'SystemdCgroup = false'
+        replace: 'SystemdCgroup = true'
+      register: cgroup
+    - name: containerd 재시작
+      ansible.builtin.service:
+        name: containerd
+        state: restarted
+      when: cgroup.changed
+
+- name: control plane
+  hosts: k8s_hub_cp
+  become: true
+  gather_facts: false
+  tasks:
+    - name: kubeadm init (처음 한 번)
+      ansible.builtin.command: >-
+        kubeadm init --pod-network-cidr={{ k8s_hub_pod_cidr }} --apiserver-advertise-address={{ ansible_host }}
+      args:
+        creates: /etc/kubernetes/admin.conf
+    - name: ubuntu 계정 kubeconfig
+      ansible.builtin.shell: |
+        install -d -o {{ ansible_user }} -g {{ ansible_user }} /home/{{ ansible_user }}/.kube
+        install -o {{ ansible_user }} -g {{ ansible_user }} -m 0600 /etc/kubernetes/admin.conf /home/{{ ansible_user }}/.kube/config
+      changed_when: false
+    - name: Flannel (CNI)
+      ansible.builtin.command: >-
+        kubectl --kubeconfig /etc/kubernetes/admin.conf apply
+        -f https://github.com/flannel-io/flannel/releases/download/{{ k8s_hub_flannel_version }}/kube-flannel.yml
+      register: flannel
+      changed_when: "'created' in flannel.stdout or 'configured' in flannel.stdout"
+    - name: join 명령 만들기
+      ansible.builtin.command: kubeadm token create --print-join-command
+      register: join
+      changed_when: false
+    - name: kubeconfig 를 실행 PC 로
+      ansible.builtin.fetch:
+        src: /etc/kubernetes/admin.conf
+        dest: "{{ k8s_hub_kubeconfig }}"
+        flat: true
+
+- name: worker 합류
+  hosts: k8s_hub_workers
+  become: true
+  gather_facts: false
+  tasks:
+    - name: kubeadm join (처음 한 번)
+      ansible.builtin.command: "{{ hostvars[groups['k8s_hub_cp'][0]].join.stdout }}"
+      args:
+        creates: /etc/kubernetes/kubelet.conf
+
+- name: 확인
+  hosts: k8s_hub_cp
+  become: true
+  gather_facts: false
+  tasks:
+    - name: 모든 노드 Ready 대기
+      ansible.builtin.command: kubectl --kubeconfig /etc/kubernetes/admin.conf wait --for=condition=Ready nodes --all --timeout=300s
+      changed_when: false
+    - name: 노드 목록
+      ansible.builtin.command: kubectl --kubeconfig /etc/kubernetes/admin.conf get nodes -o wide
+      register: nodes
+      changed_when: false
+    - name: 결과
+      ansible.builtin.debug:
+        msg: "{{ nodes.stdout_lines }}"
+    - name: 노드 수가 맞는지
+      ansible.builtin.assert:
+        that: (nodes.stdout_lines | length - 1) == (k8s_hub_nodes | length)

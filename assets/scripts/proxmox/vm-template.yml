@@ -1,0 +1,80 @@
+# Ubuntu 24.04 클라우드 이미지로 VM 템플릿을 만듭니다. 복제한 VM 은 cloud-init 으로 계정·SSH 키·qemu-guest-agent 가 준비되어 바로 접속됩니다.
+# 템플릿이 이미 있으면 아무것도 하지 않습니다. 다시 만들려면 호스트에서 qm destroy <ID> --purge 후 실행합니다.
+#   ansible-playbook playbooks/vm-template.yml
+---
+- name: VM 템플릿
+  hosts: proxmox
+  gather_facts: false
+  vars:
+    image_path: /var/lib/vz/template/iso/{{ vm_template_image_url | basename }}
+    snippet_name: ubuntu-cloud-vendor.yaml
+    host_key: /root/.ssh/id_rsa             # 호스트에서 VM 으로 접속할 때 쓰는 키 (k3s-edge 등은 실행 PC 키를 씀)
+  tasks:
+    - name: 템플릿이 이미 있는지
+      ansible.builtin.command: qm config {{ vm_template_vmid }}
+      register: existing
+      changed_when: false
+      failed_when: false
+    - name: 이미 있는 ID 가 템플릿이 아니면 중단
+      ansible.builtin.assert:
+        that: "'template: 1' in existing.stdout"
+        fail_msg: "VM {{ vm_template_vmid }} 가 템플릿이 아닌 VM 입니다. vm_template_vmid 를 바꾸거나 그 VM 을 지우세요."
+      when: existing.rc == 0
+
+    - name: 템플릿 만들기
+      when: existing.rc != 0
+      block:
+        - name: 스니펫 스토리지 정보
+          ansible.builtin.command: pvesh get /storage/{{ vm_snippet_storage }} --output-format json
+          register: storage
+          changed_when: false
+        - name: 스니펫 콘텐츠 허용 (없을 때만)
+          ansible.builtin.command: >-
+            pvesm set {{ vm_snippet_storage }} --content {{ (storage.stdout | from_json).content }},snippets
+          when: "'snippets' not in (storage.stdout | from_json).content.split(',')"
+        - name: cloud-init vendor 스니펫 (모든 복제 VM 에 적용)
+          ansible.builtin.copy:
+            dest: "{{ (storage.stdout | from_json).path }}/snippets/{{ snippet_name }}"
+            mode: "0644"
+            content: |
+              #cloud-config
+              # cloud-init 설정이 바뀌어도(호스트 DNS 변경 등) SSH 호스트 키를 유지
+              ssh_deletekeys: false
+              package_update: true
+              packages:
+                - qemu-guest-agent
+              runcmd:
+                - systemctl enable --now qemu-guest-agent
+        - name: 호스트 키 (없을 때만)
+          ansible.builtin.command: ssh-keygen -q -t rsa -b 4096 -N '' -f {{ host_key }}
+          args:
+            creates: "{{ host_key }}"
+        - name: VM 에 넣을 공개키 (실행 PC 키 + 호스트 authorized_keys + 호스트 키)
+          ansible.builtin.shell: |
+            { echo '{{ ct_ssh_pubkey }}'; cat /root/.ssh/authorized_keys 2>/dev/null; echo; cat {{ host_key }}.pub; } \
+              | grep -vE '^\s*(#|$)' | awk '!seen[$0]++' > /tmp/vm-template-keys
+          changed_when: false
+        - name: 클라우드 이미지 내려받기
+          ansible.builtin.get_url:
+            url: "{{ vm_template_image_url }}"
+            dest: "{{ image_path }}"
+            mode: "0644"
+        - name: 템플릿 VM 생성
+          ansible.builtin.shell: |
+            set -e
+            qm create {{ vm_template_vmid }} --name {{ vm_template_name }} --ostype l26 \
+              --cpu host --cores 2 --memory 2048 --balloon 0 --agent 1 \
+              --net0 virtio,bridge={{ vm_bridge }} --scsihw virtio-scsi-single --serial0 socket --vga serial0
+            qm set {{ vm_template_vmid }} --scsi0 {{ vm_disk_storage }}:0,import-from={{ image_path }},iothread=1,discard=on,ssd=1
+            qm set {{ vm_template_vmid }} --ide2 {{ vm_disk_storage }}:cloudinit --boot order=scsi0
+            qm set {{ vm_template_vmid }} --onboot 1 --ciuser {{ vm_template_user }} --sshkeys /tmp/vm-template-keys --ciupgrade 0 \
+              --cicustom vendor={{ vm_snippet_storage }}:snippets/{{ snippet_name }}
+            qm template {{ vm_template_vmid }}
+            rm -f /tmp/vm-template-keys
+    - name: 결과
+      ansible.builtin.command: qm config {{ vm_template_vmid }}
+      register: result
+      changed_when: false
+    - name: 템플릿인지
+      ansible.builtin.assert:
+        that: "'template: 1' in result.stdout and 'sshkeys:' in result.stdout"
