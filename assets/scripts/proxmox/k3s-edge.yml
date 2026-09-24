@@ -1,0 +1,136 @@
+# IoT 엣지용 k3s 단일 노드 VM. 클라우드 이미지 템플릿을 복제해 VM 을 만들고 k3s 를 설치한 뒤 kubeconfig 를 실행 PC 로 가져옵니다.
+# 엣지 클러스터는 허브(Argo CD)와 떨어져도 혼자 동작해야 하므로 컨트롤플레인을 자체적으로 갖는 k3s 를 씁니다.
+#   ansible-playbook playbooks/k3s-edge.yml   (PROXMOX_* 환경변수 필요, README 참고)
+---
+- name: k3s 엣지 VM 만들기
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: 템플릿 복제 (VM 이 없을 때만)
+      community.proxmox.proxmox_kvm:
+        node: "{{ proxmox_node }}"
+        clone: "{{ vm_template_name }}"
+        vmid: "{{ vm_template_vmid }}"
+        newid: "{{ k3s_edge_vmid }}"
+        name: "{{ k3s_edge_name }}"
+        full: true
+        storage: "{{ vm_disk_storage }}"
+        format: raw
+        timeout: 300
+        state: present
+      register: clone
+    - name: 디스크 늘리기 (복제 직후 한 번)
+      community.proxmox.proxmox_disk:
+        vmid: "{{ k3s_edge_vmid }}"
+        disk: scsi0
+        size: "{{ k3s_edge_disk }}"
+        state: resized
+      when: clone.changed
+    - name: VM 설정 맞추기 (코어·메모리·IP·DNS·자동 시작. 모듈 특성상 매번 changed 로 보고됨)
+      community.proxmox.proxmox_kvm:
+        node: "{{ proxmox_node }}"
+        vmid: "{{ k3s_edge_vmid }}"
+        name: "{{ k3s_edge_name }}"
+        cores: "{{ k3s_edge_cores }}"
+        memory: "{{ k3s_edge_memory }}"
+        onboot: true
+        ipconfig: { ipconfig0: "ip={{ k3s_edge_ip }}/24,gw={{ ct_gateway }}" }
+        nameservers: "{{ k3s_edge_nameservers }}"
+        update: true
+    - name: VM 시작
+      community.proxmox.proxmox_kvm:
+        node: "{{ proxmox_node }}"
+        vmid: "{{ k3s_edge_vmid }}"
+        name: "{{ k3s_edge_name }}"
+        state: started
+    - name: SSH 열릴 때까지 대기
+      ansible.builtin.wait_for:
+        host: "{{ k3s_edge_ip }}"
+        port: 22
+        timeout: 300
+
+- name: VM 안에 k3s 설치
+  hosts: k3s_edge
+  become: true
+  gather_facts: false
+  pre_tasks:
+    - name: cloud-init 완료 대기 (첫 부팅의 패키지 갱신)
+      ansible.builtin.command: cloud-init status --wait
+      changed_when: false
+      failed_when: false
+  tasks:
+    - name: 시간대
+      community.general.timezone:
+        name: "{{ timezone }}"
+    - name: OTBR 파드가 요구하는 커널 설정 (IPv6 포워딩, RA 와 경로 광고 수용)
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/60-otbr.conf
+        mode: "0644"
+        content: |
+          # proxmox-ansible 의 playbooks/k3s-edge.yml 이 만듭니다. OpenThread Border Router 파드(hostNetwork)용.
+          net.ipv4.ip_forward = 1
+          net.ipv6.conf.all.forwarding = 1
+          net.ipv6.conf.eth0.accept_ra = 2
+          net.ipv6.conf.eth0.accept_ra_rt_info_max_plen = 64
+      notify: sysctl 적용
+    - name: tun 모듈 자동 로드 (OTBR 의 wpan0 인터페이스)
+      ansible.builtin.copy:
+        dest: /etc/modules-load.d/tun.conf
+        mode: "0644"
+        content: "tun\n"
+    - name: tun 모듈 지금 로드
+      community.general.modprobe:
+        name: tun
+    - name: k3s 설치 (없을 때만. Traefik 은 끄고 kubeconfig 는 읽을 수 있게)
+      ansible.builtin.shell: |
+        curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION={{ k3s_edge_version }} \
+          INSTALL_K3S_EXEC="server --disable traefik --write-kubeconfig-mode 644" sh -
+      args:
+        creates: /usr/local/bin/k3s
+    - name: 노드 Ready 대기
+      ansible.builtin.command: k3s kubectl wait --for=condition=Ready node --all --timeout=300s
+      changed_when: false
+    - name: kubeconfig 읽기
+      ansible.builtin.slurp:
+        src: /etc/rancher/k3s/k3s.yaml
+      register: kubeconfig
+    - name: kubeconfig 를 실행 PC 에 저장 (server 를 VM 주소로 바꿈)
+      ansible.builtin.copy:
+        dest: "{{ k3s_edge_kubeconfig }}"
+        mode: "0600"
+        content: "{{ kubeconfig.content | b64decode | replace('https://127.0.0.1:6443', 'https://' ~ k3s_edge_ip ~ ':6443') }}"
+      delegate_to: localhost
+      become: false
+  handlers:
+    - name: sysctl 적용
+      ansible.builtin.command: sysctl --system
+      changed_when: false
+
+- name: 확인
+  hosts: k3s_edge
+  gather_facts: false
+  tasks:
+    - name: 내장 local-path StorageClass 가 생길 때까지 대기 (노드 Ready 직후 몇 초 걸림)
+      ansible.builtin.command: k3s kubectl get storageclass local-path -o name
+      register: sc
+      until: sc.rc == 0
+      retries: 30
+      delay: 2
+      changed_when: false
+    - name: 노드·스토리지클래스·커널 설정
+      ansible.builtin.shell: |
+        k3s kubectl get nodes -o wide | tail -n +2
+        k3s kubectl get storageclass -o name
+        sysctl -n net.ipv6.conf.all.forwarding net.ipv6.conf.eth0.accept_ra
+        ip -6 addr show eth0 scope global | grep -c inet6
+      register: check
+      changed_when: false
+    - name: 결과
+      ansible.builtin.debug:
+        msg: "{{ check.stdout_lines }}"
+    - name: k3s 가 Ready 이고 local-path 가 있는지
+      ansible.builtin.assert:
+        that:
+          - "' Ready ' in check.stdout_lines[0]"
+          - "'storageclass.storage.k8s.io/local-path' in check.stdout"
+        fail_msg: "k3s 노드가 Ready 가 아니거나 local-path StorageClass 가 없습니다"

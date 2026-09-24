@@ -10,6 +10,9 @@ tags: [proxmox, kubernetes, kubeadm, cloud-init, ssh]
 
 Proxmox 호스트에서 스크립트를 한 번 실행해 control plane 1대와 worker 1대로 이루어진 쿠버네티스 클러스터를 만듭니다. VM은 미리 만들어 둔 Ubuntu 템플릿을 복제해서 만들기 때문에, 설정을 바꿔 다시 배포할 때도 같은 스크립트만 다시 실행하면 됩니다.
 
+> 같은 일을 Ansible 플레이북으로 하는 방법은 [Proxmox에 Ansible로 kubeadm 쿠버네티스 클러스터 만드는 방법](/posts/46/)에 정리했습니다.
+{: .prompt-info }
+
 1. 스크립트 내려받기
 2. 변수 수정
 3. 스크립트 실행
