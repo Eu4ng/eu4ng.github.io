@@ -90,7 +90,7 @@ nc -zv [SLZB_IP] 6638   # Thread RCP (OTBR 이 붙을 포트)
 
 ## 마무리
 
-SLZB-MR3U 를 고정 IP 로 LAN 에 붙이고 웹 UI 에 로그인 보호를 건 뒤, CC2674P10 은 Zigbee 코디네이터로, EFR32MG24 는 원격 OTBR 용 Thread 라디오로 나눠 각 라디오의 TCP 포트를 확인했습니다. 다음 글에서는 Zigbee 포트에 [Zigbee2MQTT 를 붙이고](/posts/44/), 그 다음에 Thread 포트에 OpenThread Border Router 를 붙입니다.
+SLZB-MR3U 를 고정 IP 로 LAN 에 붙이고 웹 UI 에 로그인 보호를 건 뒤, CC2674P10 은 Zigbee 코디네이터로, EFR32MG24 는 원격 OTBR 용 Thread 라디오로 나눠 각 라디오의 TCP 포트를 확인했습니다. 다음 글에서는 Zigbee 포트에 [Zigbee2MQTT 를 붙이고](/posts/44/), 그 다음에 Thread 포트에 [OpenThread Border Router 를 붙입니다](/posts/47/).
 
 ## 참고 자료
 
