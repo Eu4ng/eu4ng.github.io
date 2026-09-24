@@ -59,6 +59,9 @@
       changed_when: false
       failed_when: false
   tasks:
+    - name: 시간대
+      community.general.timezone:
+        name: "{{ timezone }}"
     - name: OTBR 파드가 요구하는 커널 설정 (IPv6 포워딩, RA 와 경로 광고 수용)
       ansible.builtin.copy:
         dest: /etc/sysctl.d/60-otbr.conf

@@ -46,6 +46,7 @@ Proxmox 위에 IoT 엣지용 **k3s** 단일 노드 VM을 Ansible 플레이북으
 vm_template_vmid: 9000                        # create-template.sh 로 만든 Ubuntu 클라우드 이미지 템플릿 (SSH 키·qemu-guest-agent 포함)
 vm_template_name: ubuntu-2404-cloud
 vm_disk_storage: local-lvm                    # VM 디스크를 두는 스토리지 (lvmthin 이라 포맷은 raw)
+timezone: Asia/Seoul                          # VM 의 시간대
 
 # ---- k3s-edge: IoT 엣지 클러스터 (단일 노드 k3s VM) ----
 k3s_edge_site: [SITE]                         # Argo CD 에 등록할 클러스터 이름이자 k8s-gitops 의 iot/clusters/<이름>/
@@ -150,6 +151,9 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/k3s-edge.yml -o playbo
       changed_when: false
       failed_when: false
   tasks:
+    - name: 시간대
+      community.general.timezone:
+        name: "{{ timezone }}"
     - name: OTBR 파드가 요구하는 커널 설정 (IPv6 포워딩, RA 와 경로 광고 수용)
       ansible.builtin.copy:
         dest: /etc/sysctl.d/60-otbr.conf
