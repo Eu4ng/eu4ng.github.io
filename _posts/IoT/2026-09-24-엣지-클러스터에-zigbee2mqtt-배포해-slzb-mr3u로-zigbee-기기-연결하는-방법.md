@@ -61,6 +61,8 @@ configMapGenerator:
   - name: zigbee2mqtt-seed
     files:
       - configuration.yaml
+    options:
+      disableNameSuffixHash: true   # 시드는 첫 기동에만 복사되므로, 내용이 바뀌어도 이름(해시)을 바꿔 Z2M 을 재기동하지 않습니다
 ```
 {: file="iot/edge/zigbee2mqtt/kustomization.yaml" }
 
@@ -72,6 +74,9 @@ homeassistant:
   enabled: true                  # Home Assistant 가 MQTT 디스커버리로 기기를 보게 합니다 (수집 경로와 무관)
 mqtt:
   base_topic: zigbee2mqtt        # Telegraf 가 zigbee2mqtt/+ 를 구독합니다
+# 기기 이름(friendly_name)은 <방>-<종류> (예: bedroom-th). Telegraf 가 첫 - 에서 나눠 DB 의 room, device 컬럼에 넣으므로 방 이름에는 - 를 쓰지 않습니다.
+# 규칙에 맞지 않는 이름(페어링 직후의 0x…)과 retired-… 는 Telegraf 가 기록하지 않으므로 페어링하면 바로 이름을 붙입니다.
+# / 는 쓰지 않습니다(토픽이 두 단계가 되어 수집되지 않음). 옮기면 이름을 새 방으로, 교체하면 새 기기에 옛 이름을 줍니다.
 frontend:
   enabled: true
 advanced:
@@ -126,6 +131,15 @@ spec:
             - { name: ZIGBEE2MQTT_CONFIG_SERIAL_ADAPTER, value: zstack }
             - { name: ZIGBEE2MQTT_CONFIG_SERIAL_BAUDRATE, value: "115200" }
             - { name: ZIGBEE2MQTT_CONFIG_ADVANCED_CHANNEL, value: "25" }   # Thread(기본 15)·Wi-Fi 와 겹치지 않게. 바꾸면 기기를 다시 페어링해야 합니다
+            - { name: ZIGBEE2MQTT_CONFIG_MQTT_INCLUDE_DEVICE_INFORMATION, value: "true" }   # 메시지에 device{ieeeAddr, model …}를 넣어 DB 에 실물 기기가 남게 합니다
+            # 가용성: 기기가 죽으면 <이름>/availability 에 offline 을 알리고 HA 엔티티가 "사용할 수 없음"이 됩니다(마지막 값을 계속 보여 주지 않게).
+            # 배터리 기기는 잠들어 ping 에 답하지 못하므로 active 방식을 쓸 수 없고, 제한 시간 동안 메시지가 없으면 offline 으로 봅니다(passive).
+            - { name: ZIGBEE2MQTT_CONFIG_AVAILABILITY_ENABLED, value: "true" }
+            - { name: ZIGBEE2MQTT_CONFIG_AVAILABILITY_PASSIVE_TIMEOUT, value: "60" }   # 분. 기본 1500. 온습도계가 값이 안 바뀌면 30분까지 조용하므로 그 두 배
+            # 모든 기기의 기본 옵션입니다. 기기별로 같은 키를 주면 이 값이 가려집니다.
+            #   qos 1: 기본 0 이면 Telegraf 가 QoS1 로 구독해도 전달이 QoS0 이 되어, Telegraf 가 내려간 동안 브로커가 메시지를 보관하지 않고 버립니다
+            #   linkquality: HA 가 LQI 엔티티를 비활성으로 등록하지 않게 합니다(처음 등록될 때만 적용)
+            - { name: ZIGBEE2MQTT_CONFIG_DEVICE_OPTIONS, value: '{"qos":1,"homeassistant":{"linkquality":{"enabled_by_default":true}}}' }
           volumeMounts:
             - { name: data, mountPath: /app/data }
           startupProbe:
@@ -225,7 +239,10 @@ kubectl $E -n zigbee2mqtt logs deploy/zigbee2mqtt | grep -E 'Socket connected|Co
 
 ## 4. 프런트엔드 접속과 기기 페어링
 
-내 PC 브라우저에서 `http://[EDGE_IP]:30083` 을 열고 시크릿 스크립트에 입력한 프런트엔드 토큰으로 들어갑니다. 상단의 **Permit join** 을 켠 뒤 기기를 페어링 모드로 만들면(기기마다 버튼을 몇 초 누르는 식) 목록에 나타납니다. 기기 이름(friendly name)은 토픽과 DB 의 `device` 컬럼에 그대로 쓰이므로 `/` 없이 짧은 영문으로 바꿉니다.
+내 PC 브라우저에서 `http://[EDGE_IP]:30083` 을 열고 시크릿 스크립트에 입력한 프런트엔드 토큰으로 들어갑니다. 상단의 **Permit join** 을 켠 뒤 기기를 페어링 모드로 만들면(기기마다 버튼을 몇 초 누르는 식) 목록에 나타납니다. 기기 이름(friendly name)은 토픽에 그대로 쓰이고 DB 에서는 `room`·`device` 컬럼으로 나뉘므로 `<방>-<종류>` 형식의 영문 소문자로 바꿉니다(예: 온습도계 `bedroom-th`, 멀티 센서 `bedroom-multi`, 문 센서 `bedroom-door`). 종류는 측정 항목이 아니라 기기 역할이고, 같은 방에 여럿이면 `bedroom-th2` 처럼 번호를 붙입니다. Telegraf 가 이름을 첫 `-` 에서 나눠 `room`(`bedroom`)과 `device`(`th`)에 넣으므로 방 이름에는 `-` 를 쓰지 않습니다(`livingroom`). Telegraf 는 이 규칙에 맞는 이름만 기록하므로, 페어링 직후의 `0x…` 이름으로 보낸 값은 DB 에 남지 않습니다. 또 `include_device_information` 으로 실린 실물 기기의 IEEE 주소와 모델을 `hw_id`, `model`, `vendor` 컬럼에 넣습니다.
+
+- 기기를 다른 방으로 옮기면 옮기는 즉시 이름을 새 방으로 바꿉니다. 바꾼 시각부터 새 방으로 기록되고, 과거 행은 옛 방으로 남습니다.
+- 기기를 교체하면 옛 기기를 `retired-[기기 이름]` 으로 바꾸거나 제거하고, 새 기기에 옛 이름을 줍니다. 이름은 이어지고 `hw_id`, `model` 만 바뀝니다. `retired-` 이름의 값은 기록되지 않습니다.
 
 > 이름에 `/` 를 넣으면 토픽이 `zigbee2mqtt/거실/온도` 처럼 두 단계가 되어 Telegraf 의 `zigbee2mqtt/+` 구독에 잡히지 않습니다.
 {: .prompt-warning }
@@ -241,16 +258,16 @@ kubectl $E -n mosquitto run mq-sub --rm -i -q --restart=Never --image=eclipse-mo
 
 ## 5. 허브 DB 에서 확인
 
-Telegraf 는 기기 메시지의 숫자·불리언·문자열 필드를 그대로 컬럼으로 넣고, 처음 보는 필드는 컬럼을 추가합니다. 허브에서 기기별 최근 행을 봅니다.
+Telegraf 는 기기 메시지의 필드 하나를 `readings` 테이블의 행 하나(`property`, `value`, `value_text`)로 넣습니다. 기기 설정값(보정값, 감도, 표시등 등)은 버립니다. 허브에서 기기별로 들어온 속성을 봅니다.
 
 ```bash
 # 허브 control plane
 kubectl -n timescaledb exec deploy/timescaledb -- psql -U iot -d iot \
-  -c "select device, count(*), max(time) from zigbee2mqtt group by device order by device;" \
-  -c "\d zigbee2mqtt"
+  -c "select room, device, hw_id, model, string_agg(distinct property, ', ') as properties, max(time)
+      from readings where protocol = 'zigbee' group by 1,2,3,4 order by 1,2;"
 ```
 
-- **확인:** `device` 에 기기 이름이 보이고 `max(time)` 이 기기가 마지막으로 보고한 시각(`last_seen`)과 같습니다. 테이블 정의에 기기가 보내는 필드(`temperature`, `battery`, `linkquality` 등)가 컬럼으로 추가되어 있습니다.
+- **확인:** `room`·`device` 에 규칙에 맞는 기기 이름을 나눈 방과 종류가 있고 `hw_id`·`model` 에 실물 기기가 보이고 `max(time)` 이 기기가 마지막으로 보고한 시각(`last_seen`)과 같습니다. `properties` 에 기기가 보내는 측정 항목(`temperature`, `battery`, `linkquality` 등)이 보입니다.
 
 ## 마무리
 

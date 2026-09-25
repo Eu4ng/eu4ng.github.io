@@ -1,0 +1,820 @@
+{
+  "uid": "iot-records",
+  "title": "IoT 기록",
+  "tags": [
+    "iot",
+    "timescaledb"
+  ],
+  "timezone": "Asia/Seoul",
+  "editable": true,
+  "graphTooltip": 1,
+  "refresh": "1m",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "schemaVersion": 39,
+  "version": 1,
+  "templating": {
+    "list": [
+      {
+        "type": "query",
+        "name": "site",
+        "label": "지역",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "timescaledb"
+        },
+        "query": "SELECT DISTINCT site FROM readings WHERE $__timeFilter(time) AND site IS NOT NULL",
+        "definition": "SELECT DISTINCT site FROM readings WHERE $__timeFilter(time) AND site IS NOT NULL",
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      },
+      {
+        "type": "query",
+        "name": "protocol",
+        "label": "프로토콜",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "timescaledb"
+        },
+        "query": "SELECT DISTINCT protocol FROM readings WHERE $__timeFilter(time) AND site IN ($site)",
+        "definition": "SELECT DISTINCT protocol FROM readings WHERE $__timeFilter(time) AND site IN ($site)",
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      },
+      {
+        "type": "query",
+        "name": "room",
+        "label": "방",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "timescaledb"
+        },
+        "query": "SELECT DISTINCT room FROM readings WHERE $__timeFilter(time) AND room IS NOT NULL AND site IN ($site) AND protocol IN ($protocol)",
+        "definition": "SELECT DISTINCT room FROM readings WHERE $__timeFilter(time) AND room IS NOT NULL AND site IN ($site) AND protocol IN ($protocol)",
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "allValue": "'__all__'"
+      },
+      {
+        "type": "query",
+        "name": "device",
+        "label": "기기",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "timescaledb"
+        },
+        "query": "SELECT DISTINCT device FROM readings WHERE $__timeFilter(time) AND site IN ($site) AND protocol IN ($protocol) AND ('__all__' IN ($room) OR room IN ($room))",
+        "definition": "SELECT DISTINCT device FROM readings WHERE $__timeFilter(time) AND site IN ($site) AND protocol IN ($protocol) AND ('__all__' IN ($room) OR room IN ($room))",
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "allValue": "'__all__'"
+      },
+      {
+        "type": "query",
+        "name": "property",
+        "label": "속성",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "timescaledb"
+        },
+        "query": "SELECT DISTINCT property AS __value, replace(property, 'pm25', 'pm2.5') AS __text FROM readings WHERE $__timeFilter(time) AND site IN ($site) AND protocol IN ($protocol) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device)) AND value IS NOT NULL",
+        "definition": "SELECT DISTINCT property AS __value, replace(property, 'pm25', 'pm2.5') AS __text FROM readings WHERE $__timeFilter(time) AND site IN ($site) AND protocol IN ($protocol) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device)) AND value IS NOT NULL",
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "allValue": "'__all__'"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "기기 (모든 프로토콜)",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [],
+      "id": 1
+    },
+    {
+      "type": "table",
+      "title": "기기별 최신 값",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "timescaledb"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT max(time) AS \"마지막 기록\", site AS \"지역\", protocol AS \"프로토콜\", room AS \"방\", device AS \"기기\",\n  last(value, time) FILTER (WHERE property = 'temperature') AS \"온도\",\n  last(value, time) FILTER (WHERE property = 'humidity') AS \"습도\",\n  last(value, time) FILTER (WHERE property = 'presence') AS \"재실\",\n  last(value, time) FILTER (WHERE property = 'contact') AS \"닫힘\",\n  last(value, time) FILTER (WHERE property = 'illuminance') AS \"조도\",\n  last(value, time) FILTER (WHERE property = 'carbon_dioxide') AS \"CO2\",\n  last(value, time) FILTER (WHERE property = 'pm25') AS \"PM2.5\",\n  last(value, time) FILTER (WHERE property = 'battery') AS \"배터리\",\n  last(value, time) FILTER (WHERE property = 'linkquality') AS \"LQI\"\nFROM readings\nWHERE $__timeFilter(time) AND site IN ($site) AND protocol IN ($protocol) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device))\nGROUP BY site, protocol, room, device\nORDER BY site, protocol, room, device"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "filterable": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "id": 2,
+      "description": "선택한 기간에서 기기마다 속성별 마지막 값입니다. 재실·닫힘은 1/0 입니다."
+    },
+    {
+      "type": "timeseries",
+      "title": "온도",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "timescaledb"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 9,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(time, $__interval), device AS metric, avg(value) AS value\nFROM readings\nWHERE $__timeFilter(time) AND site IN ($site) AND protocol IN ($protocol) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device)) AND property = 'temperature' AND value IS NOT NULL\nGROUP BY 1, 2\nORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "celsius",
+          "custom": {
+            "spanNulls": true,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 3
+    },
+    {
+      "type": "timeseries",
+      "title": "습도",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "timescaledb"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 9,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(time, $__interval), device AS metric, avg(value) AS value\nFROM readings\nWHERE $__timeFilter(time) AND site IN ($site) AND protocol IN ($protocol) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device)) AND property = 'humidity' AND value IS NOT NULL\nGROUP BY 1, 2\nORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "humidity",
+          "custom": {
+            "spanNulls": true,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 4
+    },
+    {
+      "type": "state-timeline",
+      "title": "재실",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "timescaledb"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 17,
+        "w": 12,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT time, device AS metric, value\nFROM readings\nWHERE $__timeFilter(time) AND site IN ($site) AND protocol IN ($protocol) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device)) AND property = 'presence' AND value IS NOT NULL\nORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": "재실",
+                  "color": "green",
+                  "index": 0
+                },
+                "0": {
+                  "text": "없음",
+                  "color": "transparent",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "transparent",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "mergeValues": true,
+        "showValue": "never",
+        "rowHeight": 0.8,
+        "legend": {
+          "showLegend": false
+        }
+      },
+      "id": 5
+    },
+    {
+      "type": "state-timeline",
+      "title": "닫힘 (문·창문)",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "timescaledb"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 17,
+        "w": 12,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT time, device AS metric, value\nFROM readings\nWHERE $__timeFilter(time) AND site IN ($site) AND protocol IN ($protocol) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device)) AND property = 'contact' AND value IS NOT NULL\nORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": "닫힘",
+                  "color": "green",
+                  "index": 0
+                },
+                "0": {
+                  "text": "열림",
+                  "color": "transparent",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "transparent",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "mergeValues": true,
+        "showValue": "never",
+        "rowHeight": 0.8,
+        "legend": {
+          "showLegend": false
+        }
+      },
+      "id": 6
+    },
+    {
+      "type": "timeseries",
+      "title": "조도",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "timescaledb"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 23,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(time, $__interval), device AS metric, avg(value) AS value\nFROM readings\nWHERE $__timeFilter(time) AND site IN ($site) AND protocol IN ($protocol) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device)) AND property = 'illuminance' AND value IS NOT NULL\nGROUP BY 1, 2\nORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "lux",
+          "custom": {
+            "spanNulls": true,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 7
+    },
+    {
+      "type": "timeseries",
+      "title": "배터리",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "timescaledb"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 23,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(time, $__interval), device AS metric, avg(value) AS value\nFROM readings\nWHERE $__timeFilter(time) AND site IN ($site) AND protocol IN ($protocol) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device)) AND property = 'battery' AND value IS NOT NULL\nGROUP BY 1, 2\nORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "custom": {
+            "spanNulls": true,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 8
+    },
+    {
+      "type": "timeseries",
+      "title": "링크 품질 (LQI)",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "timescaledb"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 23,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(time, $__interval), device AS metric, avg(value) AS value\nFROM readings\nWHERE $__timeFilter(time) AND site IN ($site) AND protocol IN ($protocol) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device)) AND property = 'linkquality' AND value IS NOT NULL\nGROUP BY 1, 2\nORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "spanNulls": true,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 9
+    },
+    {
+      "type": "timeseries",
+      "title": "CO2",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "timescaledb"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 31,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(time, $__interval), device AS metric, avg(value) AS value\nFROM readings\nWHERE $__timeFilter(time) AND site IN ($site) AND protocol IN ($protocol) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device)) AND property = 'carbon_dioxide' AND value IS NOT NULL\nGROUP BY 1, 2\nORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ppm",
+          "custom": {
+            "spanNulls": true,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 10
+    },
+    {
+      "type": "timeseries",
+      "title": "미세먼지",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "timescaledb"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 31,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(time, $__interval), device || ' ' || replace(property, 'pm25', 'pm2.5') AS metric, avg(value) AS value\nFROM readings\nWHERE $__timeFilter(time) AND site IN ($site) AND protocol IN ($protocol) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device)) AND property IN ('pm1', 'pm25', 'pm10') AND value IS NOT NULL\nGROUP BY 1, 2\nORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "conμgm3",
+          "custom": {
+            "spanNulls": true,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 11
+    },
+    {
+      "type": "row",
+      "title": "속성·실물 기기",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 39,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [],
+      "id": 12
+    },
+    {
+      "type": "timeseries",
+      "title": "선택한 속성",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "timescaledb"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 40,
+        "w": 24,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(time, $__interval), device || ' ' || replace(property, 'pm25', 'pm2.5') AS metric, avg(value) AS value\nFROM readings\nWHERE $__timeFilter(time) AND site IN ($site) AND protocol IN ($protocol) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device)) AND ('__all__' IN ($property) OR property IN ($property)) AND value IS NOT NULL\nGROUP BY 1, 2\nORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "spanNulls": true,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 13
+    },
+    {
+      "type": "table",
+      "title": "실물 기기",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "timescaledb"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 49,
+        "w": 24,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT max(time) AS \"마지막 기록\", site AS \"지역\", protocol AS \"프로토콜\", source AS \"수집기\", hw_id AS \"실물 ID\",\n  model AS \"모델\", vendor AS \"제조사\", last(node, time) AS \"Matter 노드 ID\",\n  last(device, time) AS \"현재 이름\", string_agg(DISTINCT device, ', ') AS \"쓴 이름\", count(DISTINCT property) AS \"속성 수\"\nFROM readings\nWHERE $__timeFilter(time) AND site IN ($site) AND protocol IN ($protocol) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device)) AND hw_id IS NOT NULL\nGROUP BY site, protocol, source, hw_id, model, vendor\nORDER BY site, protocol, 9"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "filterable": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "id": 14,
+      "description": "실물 기기별 정보입니다. 실물 ID 는 Zigbee IEEE 주소나 Matter 시리얼로, 기기 이름을 바꾸거나 다시 페어링해도 바뀌지 않습니다. Matter 노드 ID 는 다시 커미셔닝하면 바뀝니다."
+    },
+    {
+      "type": "table",
+      "title": "최근 기록",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "timescaledb"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 56,
+        "w": 24,
+        "h": 10
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT time, site, protocol, source, room, device, replace(property, 'pm25', 'pm2.5') AS property, value, value_text, hw_id\nFROM readings\nWHERE $__timeFilter(time) AND site IN ($site) AND protocol IN ($protocol) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device)) AND ('__all__' IN ($property) OR property IN ($property))\nORDER BY time DESC\nLIMIT 200"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "filterable": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "id": 15,
+      "description": "선택한 기간의 원본 행 최근 200개입니다. 속성 변수로 거를 수 있습니다."
+    }
+  ]
+}

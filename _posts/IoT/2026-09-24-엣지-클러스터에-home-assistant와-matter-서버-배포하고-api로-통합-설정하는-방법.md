@@ -7,7 +7,7 @@ tags: [iot, home-assistant, matter, thread, mqtt, telegraf, kubernetes, argo-cd,
 permalink: /posts/48/
 ---
 
-엣지 클러스터에 **Home Assistant**(HA)와 **matterjs-server**(Matter 컨트롤러)를 배포하고, HA 의 통합 설정을 스크립트로 넣은 뒤 밖에서 `ha-[SITE_CODE].[DOMAIN]` 으로 엽니다. HA 는 Matter 기기 등록 화면과 제어·자동화 대시보드로만 쓰고 수집 경로에는 두지 않습니다. Zigbee 는 [Zigbee2MQTT](/posts/44/)가 브로커로 바로 보내고, Matter 기기 상태만 HA 의 `mqtt_statestream` 이 브로커로 다시 발행해 [수집 파이프라인](/posts/43/)을 탑니다. 통합 추가, Thread 기본 네트워크 지정, 역방향 프록시 신뢰 설정은 모두 HA API 로 하므로 새 서버에서도 같은 명령 한 번이면 됩니다.
+엣지 클러스터에 **Home Assistant**(HA)와 **matterjs-server**(Matter 컨트롤러)를 배포하고, HA 의 통합 설정을 스크립트로 넣은 뒤 밖에서 `ha-[SITE_CODE].[DOMAIN]` 으로 엽니다. HA 는 Matter 기기 등록 화면과 제어·자동화 대시보드로만 쓰고 수집 경로에는 두지 않습니다. Zigbee 는 [Zigbee2MQTT](/posts/44/)가 브로커로 바로 보내고, Matter 기기 상태만 HA 자동화가 브로커로 다시 발행해 [수집 파이프라인](/posts/43/)을 탑니다. 통합 추가, Thread 기본 네트워크 지정, 역방향 프록시 신뢰 설정은 모두 HA API 로 하므로 새 서버에서도 같은 명령 한 번이면 됩니다.
 
 1. 매니페스트 추가와 배포
 2. 온보딩과 장기 액세스 토큰
@@ -39,34 +39,71 @@ permalink: /posts/48/
 
 ## 1. 매니페스트 추가와 배포
 
-HA 와 Matter 서버는 기기 탐색(mDNS)과 IPv6 로 LAN 의 기기와 직접 통신해야 해서 `hostNetwork` 로 띄웁니다. 파드 네트워크(Flannel)는 IPv4 만 다루기 때문입니다. HA 는 `configuration.yaml` 을 스스로 만들고 고치므로 PVC 에 두고, `mqtt_statestream` 블록만 initContainer 가 한 번 덧붙입니다. 이름이 `matter_` 로 시작하는 엔티티만 내보내는 이유는 Zigbee 기기도 HA 에 보이지만 이미 Zigbee2MQTT 경로로 수집되기 때문입니다. Matter 기기를 등록할 때 이름을 이 규칙으로 붙입니다.
+HA 와 Matter 서버는 기기 탐색(mDNS)과 IPv6 로 LAN 의 기기와 직접 통신해야 해서 `hostNetwork` 로 띄웁니다. 파드 네트워크(Flannel)는 IPv4 만 다루기 때문입니다. HA 는 `configuration.yaml` 을 스스로 만들고 고치므로 PVC 에 두고, initContainer 가 재발행 자동화 파일을 복사하고 그 파일을 읽는 줄만 한 번 덧붙입니다. 자동화는 **Matter 통합에 속한 엔티티**(`integration_entities('matter')`)의 상태가 바뀔 때만 발행합니다. Zigbee 기기도 HA 에 보이지만 MQTT 통합 소속이고 이미 Zigbee2MQTT 경로로 수집되므로 걸리지 않습니다. 기기 이름과 무관하게 거르므로 Matter 기기를 등록할 때 이름 규칙을 지킬 필요가 없습니다.
+
+> HA 의 `mqtt_statestream` 도 같은 토픽 형식으로 발행하지만 도메인·엔티티 이름으로만 거를 수 있고 통합 단위로는 거르지 못합니다. 그래서 `matter_*` 같은 이름 규칙이 필요해지고, 기기 이름에서 자동으로 만들어진 엔티티는 빠집니다.
+{: .prompt-info }
 
 ```yaml
 # 엣지의 Home Assistant. Matter 커미셔닝 UI 와 제어·자동화 대시보드로만 쓰고, 수집 경로에는 두지 않습니다.
-# Matter 기기 상태만 mqtt_statestream 으로 브로커에 재발행해 Telegraf 가 받게 합니다 (설정은 initContainer 가 configuration.yaml 에 한 번 덧붙임).
+# Matter 통합의 엔티티 상태만 자동화(matter-statestream.yaml)로 브로커에 재발행해 Telegraf 가 받게 합니다 (initContainer 가 /config 로 복사하고 configuration.yaml 에 include 를 한 번 덧붙임).
 resources:
   - deployment.yaml
   - pvc.yaml
 configMapGenerator:
   - name: home-assistant-seed
     files:
-      - statestream.yaml
+      - matter-statestream.yaml
 ```
 {: file="iot/edge/home-assistant/kustomization.yaml" }
 
+{% raw %}
 ```yaml
-# --- iot/edge/home-assistant 가 덧붙인 설정. Matter 기기 상태를 MQTT 로 재발행해 Telegraf 가 허브 DB 에 넣습니다 ---
-# base_topic 을 homeassistant 로 두면 Zigbee2MQTT 의 MQTT 디스커버리 접두사와 겹칩니다.
-# Zigbee 기기는 이미 zigbee2mqtt/ 토픽으로 수집되므로, 이중 저장을 막기 위해 이름이 matter_ 로 시작하는 엔티티만 내보냅니다 (Matter 기기 이름 규칙).
-mqtt_statestream:
-  base_topic: hass
-  publish_attributes: false
-  publish_timestamps: false
-  include:
-    entity_globs:
-      - "*.matter_*"
+# Matter 통합의 엔티티 상태를 MQTT 로 재발행해 Telegraf 가 허브 DB 에 넣습니다. initContainer 가 매 기동 /config 로 복사합니다.
+# mqtt_statestream 은 통합 단위로 거르지 못해 엔티티 이름 규칙이 필요했으므로, 소속 통합(integration_entities)으로 거르는 자동화로 대신합니다.
+# Zigbee 기기는 MQTT 통합 소속이라 여기 걸리지 않고 zigbee2mqtt/ 토픽으로 따로 수집됩니다. 토픽은 mqtt_statestream 과 같습니다.
+# 값은 JSON 입니다. Telegraf 가 Zigbee 와 같은 테이블(readings)에 "기기 하나의 속성 하나" 로 넣도록 상태(state)에 다음을 붙입니다:
+#   device(HA 기기 이름, <방>-<용도>), property(엔티티 ID 에서 기기 이름을 뗀 측정 항목, 예: pm25), unit(엔티티의 unit_of_measurement, 예: µg/m³)
+#   node(패브릭-노드 ID, 다시 커미셔닝하면 바뀜), serial(기기 시리얼, 바뀌지 않음), model, vendor
+# 측정값이 아닌 button(식별)·update(펌웨어) 도메인은 발행하지 않습니다.
+- id: matter_statestream
+  alias: Matter 상태를 MQTT 로 재발행
+  mode: parallel
+  max: 100
+  triggers:
+    - trigger: event
+      event_type: state_changed
+  conditions:
+    - condition: template
+      value_template: >-
+        {{ trigger.event.data.new_state is not none
+           and (trigger.event.data.old_state is none
+                or trigger.event.data.old_state.state != trigger.event.data.new_state.state)
+           and trigger.event.data.entity_id.split('.')[0] not in ['button', 'update']
+           and trigger.event.data.entity_id in integration_entities('matter') }}
+  actions:
+    - action: mqtt.publish
+      data:
+        topic: "hass/{{ trigger.event.data.entity_id | replace('.', '/') }}/state"
+        payload: >-
+          {%- set did = device_id(trigger.event.data.entity_id) %}
+          {%- set ids = (device_attr(did, 'identifiers') or []) | map('last') | select('match', 'deviceid_') | list %}
+          {%- set name = device_attr(did, 'name_by_user') or device_attr(did, 'name') or '' %}
+          {%- set object_id = trigger.event.data.entity_id.split('.')[1] %}
+          {%- set prefix = (name | slugify) ~ '_' %}
+          {{ {'state': trigger.event.data.new_state.state,
+              'device': name or object_id,
+              'property': object_id[prefix | length:] if name and object_id.startswith(prefix) else object_id,
+              'unit': state_attr(trigger.event.data.entity_id, 'unit_of_measurement') or '',
+              'node': ids[0][9:] | replace('-MatterNodeDevice', '') if ids else '',
+              'serial': device_attr(did, 'serial_number') or '',
+              'model': device_attr(did, 'model') or '',
+              'vendor': device_attr(did, 'manufacturer') or ''} | to_json }}
+        qos: 1
+        retain: true
 ```
-{: file="iot/edge/home-assistant/statestream.yaml" }
+{: file="iot/edge/home-assistant/matter-statestream.yaml" }
+{% endraw %}
 
 ```yaml
 apiVersion: apps/v1
@@ -85,7 +122,8 @@ spec:
     spec:
       hostNetwork: true                    # 기기 탐색(mDNS·SSDP)과 Matter 서버·OTBR 접근을 노드 네트워크에서 직접 합니다
       dnsPolicy: ClusterFirstWithHostNet   # hostNetwork 에서도 mosquitto.mosquitto.svc 같은 클러스터 이름을 풉니다
-      # 첫 기동에 HA 가 만든 configuration.yaml 에 mqtt_statestream 블록이 없으면 덧붙입니다. 파일이 아직 없으면(최초 기동) 건너뛰고 다음 기동에 붙입니다.
+      # 첫 기동에 HA 가 만든 configuration.yaml 에 Matter 재발행 자동화 include 가 없으면 덧붙입니다. 파일이 아직 없으면(최초 기동) 건너뛰고 다음 기동에 붙입니다.
+      # 자동화 파일은 매 기동 복사해 이 저장소의 수정이 재기동으로 반영됩니다.
       # 프록시 신뢰(http)는 HA 2026 부터 YAML 이 아니라 .storage 에서 관리하므로 setup-home-assistant.sh 가 API 로 설정합니다.
       initContainers:
         - name: seed-config
@@ -96,7 +134,8 @@ spec:
             - |
               f=/config/configuration.yaml
               [ -f $f ] || exit 0
-              grep -q '^mqtt_statestream:' $f || cat /seed/statestream.yaml >> $f
+              cp /seed/matter-statestream.yaml /config/matter-statestream.yaml
+              grep -q '^automation matter:' $f || printf '\n# --- iot/edge/home-assistant 가 덧붙인 설정. Matter 통합 엔티티 상태를 MQTT 로 재발행합니다 (자동화는 initContainer 가 복사) ---\nautomation matter: !include matter-statestream.yaml\n' >> $f
           volumeMounts:
             - { name: config, mountPath: /config }
             - { name: seed, mountPath: /seed }
@@ -261,6 +300,8 @@ unset T
 
 HA 2026 부터는 역방향 프록시 설정(`http:`)을 `configuration.yaml` 이 아니라 HA 내부 저장소에서 관리합니다. 첫 기동 때 YAML 을 한 번 옮기고 나면 YAML 의 `http:` 는 무시되므로, 스크립트가 WebSocket API(`http/config/configure`)로 새 설정을 넣습니다. HA 는 새 설정을 "대기(pending)" 상태로 두고 재시작해 적용하며, 정상적으로 다시 뜬 것을 확인하고 확정(`http/config/promote`)해야 남습니다. 확정하지 않으면 5분 뒤 이전 설정으로 되돌아가므로 잘못된 설정으로 HA 에 못 들어가는 일이 없습니다.
 
+변수 블록의 `REMOTES` 는 여러 지역 HA 를 모아 보는 중앙 HA 에서만 씁니다([중앙 Home Assistant로 여러 지역 Home Assistant 모아 보는 방법](/posts/49/)). 지역 HA 에서는 비워 둡니다.
+
 ```bash
 # control plane 에서 스크립트 내려받기
 wget https://eu4ng.github.io/assets/scripts/iot/setup-home-assistant.sh
@@ -275,6 +316,7 @@ wget https://eu4ng.github.io/assets/scripts/iot/setup-home-assistant.sh
 # Home Assistant 에 IoT 스택용 통합(MQTT, Matter, OpenThread Border Router)을 API 로 추가합니다. 웹 UI 의
 # "기기 및 서비스 > 통합구성요소 추가" 와 같은 설정 흐름(config flow)을 순서대로 밟습니다. 이미 있는 통합은 건너뜁니다.
 # 역방향 프록시(허브 Traefik) 뒤에서 접속받도록 HA 의 HTTP 설정(프록시 신뢰, 로그인 실패 차단)도 API 로 바꿉니다.
+# 중앙 HA 에서는 MQTT·Matter·OTBR 을 비우고 REMOTES 에 지역 HA 를 적으면 Remote Home Assistant 로 지역 엔티티를 모읍니다.
 # HA 에 접속할 수 있는 곳에서 실행합니다: bash setup-home-assistant.sh [HA_URL]   (예: http://[EDGE_IP]:8123)
 # 준비: HA 프로필 > 보안 > 장기 액세스 토큰 에서 토큰을 만들어 엣지 클러스터 Secret 에 넣어 둡니다(아래 HA_TOKEN_SECRET).
 #       kubectl 로 그 Secret 을 읽을 수 없으면 실행 중 토큰을 입력받습니다. MQTT 비밀번호는 실행 중 입력받습니다.
@@ -287,10 +329,16 @@ MQTT_PORT=1883
 MQTT_USER=homeassistant
 MATTER_URL=ws://127.0.0.1:5580/ws                   # 같은 노드의 hostNetwork 파드(matter-server)
 OTBR_URL=http://127.0.0.1:8081                      # 같은 노드의 hostNetwork 파드(otbr). OTBR 이 없으면 비워 둡니다
-TRUSTED_PROXIES="[HUB_NODE_IP_1] [HUB_NODE_IP_2]"   # HA 앞 역방향 프록시의 주소(허브 파드 요청은 허브 노드 주소로 들어옴). 비우면 HTTP 설정 생략
+# Cloudflare 프록시 대역(https://www.cloudflare.com/ips-v4). 밖에서 Cloudflare 를 거쳐 오면 이 대역까지 신뢰해야 HA 가 실제 접속자 IP 를 보고,
+# 로그인 실패 차단도 Cloudflare 주소가 아니라 그 접속자에게 겁니다.
+CLOUDFLARE_IPV4="173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22"
+TRUSTED_PROXIES="[HUB_NODE_IP_1] [HUB_NODE_IP_2] $CLOUDFLARE_IPV4"   # HA 앞 역방향 프록시 주소(허브 파드 요청은 허브 노드 주소로 들어옴)와 Cloudflare. 비우면 HTTP 설정 생략
 LOGIN_ATTEMPTS=5                                    # 로그인 실패가 이 횟수면 그 IP 를 차단
 HA_TOKEN_SECRET=home-assistant/ha-api-token         # 토큰을 담은 Secret (네임스페이스/이름, 키 token)
-KUBECTL="kubectl --kubeconfig $HOME/k3s-[SITE].yaml"   # 엣지 클러스터에 접근하는 kubectl
+KUBECTL="kubectl --kubeconfig $HOME/k3s-[SITE].yaml"   # 이 HA 가 있는 클러스터에 접근하는 kubectl
+# 중앙 HA 전용: 모아 볼 지역 HA. "엔티티접두사|주소:포트|지역클러스터 kubeconfig|표시이름접두사" 를 공백으로 구분.
+# 지역 HA 의 토큰은 그 클러스터의 HA_TOKEN_SECRET 에서 읽습니다. 지역 HA 에도 Remote Home Assistant 가 설치돼 있어야 합니다.
+REMOTES=""                                          # 예: "dj_|[EDGE_IP]:8123|$HOME/k3s-[SITE].yaml|대전 "
 # --------------------------------------
 
 log() { echo -e "\n\033[1;32m==>\033[0m $*"; }
@@ -304,9 +352,18 @@ HA_URL=${1:-}
 command -v python3 >/dev/null || die "python3 이 필요합니다."
 HA_TOKEN=$($KUBECTL -n "${HA_TOKEN_SECRET%%/*}" get secret "${HA_TOKEN_SECRET#*/}" -o jsonpath='{.data.token}' 2>/dev/null | base64 -d || true)
 if [ -n "$HA_TOKEN" ]; then echo "HA 토큰: Secret $HA_TOKEN_SECRET 에서 읽음"; else read -rsp "HA 장기 액세스 토큰: " HA_TOKEN; echo; fi
-read -rsp "MQTT 비밀번호 ($MQTT_USER): " MQTT_PASSWORD; echo
-[ -n "$HA_TOKEN" ] && [ -n "$MQTT_PASSWORD" ] || die "값이 비어 있습니다."
-export HA_URL HA_TOKEN MQTT_BROKER MQTT_PORT MQTT_USER MQTT_PASSWORD MATTER_URL OTBR_URL TRUSTED_PROXIES LOGIN_ATTEMPTS
+MQTT_PASSWORD=""
+[ -z "$MQTT_BROKER" ] || { read -rsp "MQTT 비밀번호 ($MQTT_USER): " MQTT_PASSWORD; echo; [ -n "$MQTT_PASSWORD" ] || die "MQTT 비밀번호가 비어 있습니다."; }
+[ -n "$HA_TOKEN" ] || die "HA 토큰이 비어 있습니다."
+# 지역 HA 토큰을 각 클러스터에서 읽어 JSON 으로 넘깁니다.
+REMOTES_JSON="[]"
+for r in $REMOTES; do
+  IFS='|' read -r prefix hostport kcfg fname <<<"$r"
+  rt=$(kubectl --kubeconfig "$kcfg" -n "${HA_TOKEN_SECRET%%/*}" get secret "${HA_TOKEN_SECRET#*/}" -o jsonpath='{.data.token}' | base64 -d)
+  [ -n "$rt" ] || die "지역 HA 토큰을 읽지 못했습니다: $kcfg"
+  REMOTES_JSON=$(python3 -c 'import json,sys; l=json.loads(sys.argv[1]); h,p=sys.argv[3].rsplit(":",1); l.append({"prefix":sys.argv[2],"host":h,"port":int(p),"token":sys.argv[4],"fname":sys.argv[5]}); print(json.dumps(l))' "$REMOTES_JSON" "$prefix" "$hostport" "$rt" "${fname:-}")
+done
+export HA_URL HA_TOKEN MQTT_BROKER MQTT_PORT MQTT_USER MQTT_PASSWORD MATTER_URL OTBR_URL TRUSTED_PROXIES LOGIN_ATTEMPTS REMOTES_JSON
 
 # ---------- 2. 통합 추가 ----------
 # 설정 흐름은 단계마다 폼(data_schema)을 돌려줍니다. 폼의 필드 이름을 보고 아는 값을 채워 다음 단계로 넘기고,
@@ -345,7 +402,7 @@ menus = {"mqtt": "broker"}          # MQTT 첫 단계가 메뉴일 때: 브로�
 skips = {"matter": {"install_addon": False, "use_addon": False}}   # 애드온(HAOS 전용) 대신 기존 서버 사용
 
 for domain in ["mqtt", "matter", "otbr"]:
-    if not values[domain].get("url", True):
+    if not (values[domain].get("url") if domain != "mqtt" else values[domain]["broker"]):
         print(f"- {domain}: 주소가 비어 있어 건너뜀"); continue
     if domain in entries:
         print(f"- {domain}: 이미 있음, 건너뜀"); continue
@@ -386,9 +443,35 @@ for domain in ["mqtt", "matter", "otbr"]:
     else:
         sys.exit(f"{domain}: 단계가 끝나지 않습니다")
 
+# 지역 HA 연결 (중앙 HA). 같은 지역을 이미 연결했으면 흐름이 already_configured 로 끝나므로 건너뜁니다.
+def run_flow(step, answer, path):
+    for _ in range(8):
+        t = step.get("type")
+        if t in ("create_entry", "abort"): return step
+        if t != "form": sys.exit(f"예상하지 못한 단계 {t}")
+        step = api("POST", f"{path}/{step['flow_id']}", answer(step))
+    sys.exit("단계가 끝나지 않습니다")
+for rm in json.loads(os.environ.get("REMOTES_JSON") or "[]"):
+    def conn(step):
+        if step.get("step_id") == "user": return {"type": "Add a remote node"}
+        d = {f["name"]: f.get("default") for f in step.get("data_schema", [])}
+        return {"host": rm["host"], "port": rm["port"], "access_token": rm["token"],
+                "max_message_size": d.get("max_message_size"), "secure": False, "verify_ssl": False}
+    r = run_flow(api("POST", "/api/config/config_entries/flow", {"handler": "remote_homeassistant"}), conn, "/api/config/config_entries/flow")
+    if r["type"] == "abort":
+        print(f"- 원격 {rm['host']}: {r.get('reason')}, 건너뜀"); continue
+    eid = r["result"]["entry_id"]
+    # 옵션: 엔티티·표시 이름·서비스 접두사로 지역을 구분합니다. 이후 단계(필터 등)는 기본값.
+    def opts(step):
+        if step.get("step_id") == "init":
+            return {"entity_prefix": rm["prefix"], "entity_friendly_name_prefix": rm["fname"], "service_prefix": rm["prefix"].rstrip("_")}
+        return {f["name"]: f["default"] for f in step.get("data_schema", []) if "default" in f}
+    run_flow(api("POST", "/api/config/config_entries/options/flow", {"handler": eid}), opts, "/api/config/config_entries/options/flow")
+    print(f"- 원격 {rm['host']}: 추가됨 (엔티티 접두사 {rm['prefix']})")
+
 print("\n통합 상태:")
 for e in api("GET", "/api/config/config_entries/entry"):
-    if e["domain"] in ("mqtt", "matter", "otbr", "thread"):
+    if e["domain"] in ("mqtt", "matter", "otbr", "thread", "remote_homeassistant"):
         print(f"  {e['domain']:7} {e['state']:12} {e['title']}")
 PY
 
@@ -412,7 +495,10 @@ class WS:  # 표준 라이브러리만 쓰는 최소 WebSocket 클라이언트 (
         self.s.sendall((f"GET /api/websocket HTTP/1.1\r\nHost: {u.netloc}\r\nUpgrade: websocket\r\n"
                         f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode())
         resp = b""
-        while b"\r\n\r\n" not in resp: resp += self.s.recv(1)
+        while b"\r\n\r\n" not in resp:
+            c = self.s.recv(1)
+            if not c: raise ConnectionError("closed")   # 닫힌 소켓의 recv 는 b"" 를 곧바로 돌려줘 무한 루프가 됩니다
+            resp += c
         if b" 101 " not in resp.split(b"\r\n")[0]: sys.exit("WebSocket 연결 실패: " + resp.decode(errors="replace")[:200])
         self.n = 0
         assert self.recv()["type"] == "auth_required"
@@ -442,7 +528,10 @@ class WS:  # 표준 라이브러리만 쓰는 최소 WebSocket 클라이언트 (
                 if not r["success"]: sys.exit(f"{cmd['type']} 실패: {r.get('error')}")
                 return r.get("result")
 
-ds = WS().call(type="thread/list_datasets")["datasets"]
+try:
+    ds = WS().call(type="thread/list_datasets")["datasets"]
+except SystemExit:
+    ds = []   # Thread 통합이 없는 HA(중앙 HA 등)
 otbr = [d for d in ds if d.get("source") == "otbr"]
 if len(otbr) == 1 and not otbr[0].get("preferred"):
     WS().call(type="thread/set_preferred_dataset", dataset_id=otbr[0]["dataset_id"])
@@ -460,7 +549,8 @@ base = dict(cur["pending"] or cur["stable"] or cur["default"])
 for k in ("created_at", "error", "error_message"): base.pop(k, None)
 if all(base.get(k) == v for k, v in want.items()) and cur["pending"] is None:
     print("- 이미 같은 설정, 건너뜀"); sys.exit(0)
-if not (cur["pending"] and all(base.get(k) == v for k, v in want.items())):
+# 같은 설정이 pending 으로 이미 적용돼 돌고 있으면 확정만 합니다. pending 이 남아 있어도 되돌려진 상태(stable 로 동작)면 다시 넣습니다.
+if not (cur["pending"] and cur["active_config_type"] == "pending" and all(base.get(k) == v for k, v in want.items())):
     base.update(want)
     r = WS().call(type="http/config/configure", config=base)
     print(f"- pending 으로 저장, 재시작: {r.get('restart')}")
@@ -484,7 +574,7 @@ log "완료. 상태가 loaded 가 아니면 HA 로그를 확인합니다."
 
 </details>
 
-스크립트 위쪽의 `TRUSTED_PROXIES` 에 HA 앞에 올 역방향 프록시의 주소를 넣습니다. 5단계처럼 허브 Traefik 을 거치면 허브 파드의 요청이 허브 노드 주소로 바뀌어 엣지에 도착하므로 허브 노드 IP 들을 적습니다. `KUBECTL` 에는 엣지 kubeconfig 를 적습니다.
+스크립트 위쪽의 `TRUSTED_PROXIES` 에 HA 앞에 올 역방향 프록시의 주소를 넣습니다. 5단계처럼 허브 Traefik 을 거치면 허브 파드의 요청이 허브 노드 주소로 바뀌어 엣지에 도착하므로 허브 노드 IP 들을 적습니다. 밖에서 오는 요청은 그 앞에 Cloudflare 를 거치므로, 기본값처럼 스크립트의 Cloudflare 대역(`$CLOUDFLARE_IPV4`)도 남겨 둡니다. 빼면 HA 가 Cloudflare 주소를 접속자로 보고 로그인 실패 차단도 그 주소에 겁니다. `KUBECTL` 에는 엣지 kubeconfig 를 적습니다.
 
 ```bash
 # 실행. MQTT 비밀번호(homeassistant 계정)는 실행 중 입력합니다
@@ -495,12 +585,24 @@ bash setup-home-assistant.sh http://[EDGE_IP]:8123
 
 ## 4. Matter 상태를 수집 파이프라인에 연결
 
-`mqtt_statestream` 은 엔티티 상태가 바뀔 때마다 `hass/[도메인]/[엔티티]/state` 토픽에 값을 **평문**으로 발행합니다(`21.5`, `on`, `off`, `unavailable`). Telegraf 에 이 토픽을 받는 입력을 추가하고, 숫자는 `value`, 그 외는 `value_text` 로 나누는 프로세서를 둡니다. `on`/`off` 는 그래프를 그릴 수 있게 1/0 도 넣고, 빈 메시지(유지 메시지 지우기)는 버립니다.
+1단계의 자동화는 Matter 엔티티 상태가 바뀔 때마다 `hass/[도메인]/[엔티티]/state` 토픽에 JSON 을 발행합니다. `state` 는 상태값(`21.5`, `on`, `off`, `unavailable`)이고, 나머지는 Zigbee 기기와 같은 `readings` 테이블에 넣기 위한 기기 이름·측정 항목과 HA 기기 레지스트리에서 가져온 실물 기기 정보입니다. 측정값이 아닌 `button`(식별), `update`(펌웨어) 엔티티는 발행하지 않습니다.
+
+| 키 | 예 | 내용 |
+|---|---|---|
+| `device` | `bedroom2-air-quality` | HA 기기 이름. Zigbee 기기처럼 `[방]-[종류]` 로 지어야 기록되고, DB 에는 `room`(`bedroom2`)과 `device`(`air-quality`)로 나뉘어 들어갑니다 |
+| `property` | `pm25` | 엔티티 ID 에서 기기 이름을 뗀 측정 항목 |
+| `unit` | `μg/m³` | 엔티티의 단위(`unit_of_measurement`). 단위가 없는 엔티티는 빈 값입니다 |
+| `node` | `CFEE358179DBE7B6-0000000000000001` | 패브릭 ID 와 노드 ID. 기기를 다시 커미셔닝하면 바뀝니다 |
+| `serial` | `602EPDJ02346` | 기기 시리얼. Zigbee 의 IEEE 주소처럼 바뀌지 않습니다. `hw_id` 컬럼으로 들어갑니다 |
+| `model`, `vendor` | `LG Air Quality Sensor`, `LG Electronics` | 모델과 제조사 |
+
+Telegraf 에 이 토픽을 받는 입력을 Zigbee2MQTT 입력 바로 아래에 추가합니다. 입력은 JSON 의 기기 정보를 태그로 받고 `protocol = "matter"`, `source = "hass"` 를 붙이기만 합니다. `state` 를 `value`(숫자, `on`/`off` 는 1/0)와 `value_text` 로 나누는 일은 [Telegraf 글](/posts/43/)에서 둔 공통 starlark 프로세서가 그대로 맡습니다.
 
 {% raw %}
 ```toml
-# Home Assistant 의 mqtt_statestream(Matter 기기). 토픽 hass/<도메인>/<엔티티>/state, 값은 평문(21.5, on, off, unavailable).
-# HA 설정에서 이름이 matter_ 로 시작하는 엔티티만 발행하므로 Zigbee 기기와 중복되지 않습니다. 시각은 수신 시각입니다.
+# Home Assistant 가 재발행한 Matter 기기 상태. 토픽 hass/<도메인>/<엔티티>/state, 값은 JSON
+#   {"state": "21.5"|"on"|"unavailable", "device", "property", "unit", "node", "serial", "model", "vendor"}
+# HA 자동화가 Matter 통합 소속 엔티티만 발행하므로 Zigbee 기기와 중복되지 않습니다. 시각은 수신 시각입니다.
 [[inputs.mqtt_consumer]]
   servers = ["tcp://mosquitto.mosquitto.svc.cluster.local:1883"]
   topics = ["hass/+/+/state"]
@@ -510,35 +612,13 @@ bash setup-home-assistant.sh http://[EDGE_IP]:8123
   persistent_session = true
   qos = 1
   topic_tag = ""
-  data_format = "value"
-  data_type = "string"                # 숫자·문자가 섞여 있어 문자열로 받고 아래 프로세서가 나눕니다
-  [[inputs.mqtt_consumer.topic_parsing]]
-    topic = "hass/+/+/state"
-    measurement = "measurement/_/_/_" # 테이블 이름 = hass
-    tags = "_/domain/device/_"        # 도메인(sensor, light …)과 엔티티 이름 → domain, device 컬럼
-
-# hass 의 문자열 값을 숫자(value)와 문자(value_text)로 나눕니다. on/off 는 그래프용으로 1/0 도 넣습니다.
-[[processors.starlark]]
-  namepass = ["hass"]
-  source = '''
-def is_number(s):
-    if not s or s.count(".") > 1:
-        return False
-    body = s[1:] if s[0] in "+-" else s
-    return len(body) > 0 and all([c in "0123456789." for c in body.elems()]) and body != "."
-
-def apply(metric):
-    s = str(metric.fields.pop("value", "")).strip()
-    if s == "":
-        return None                   # 빈 메시지(유지 메시지 지우기)는 버립니다
-    if is_number(s):
-        metric.fields["value"] = float(s)
-    else:
-        metric.fields["value_text"] = s
-        if s in ("on", "off"):
-            metric.fields["value"] = 1.0 if s == "on" else 0.0
-    return metric
-'''
+  name_override = "readings"
+  data_format = "json"
+  json_string_fields = ["state"]      # 상태는 숫자·문자가 섞여 있어 문자열로 받고 아래 starlark 가 나눕니다
+  tag_keys = ["device", "property", "unit", "node", "serial", "model", "vendor"]
+  [inputs.mqtt_consumer.tags]
+    protocol = "matter"
+    source = "hass"
 ```
 {: file="iot/edge/telegraf/telegraf.conf (추가 부분)" }
 {% endraw %}
@@ -546,13 +626,16 @@ def apply(metric):
 ```bash
 # 커밋하고 push
 git add iot/edge/telegraf/telegraf.conf
-git commit -m "feat(iot): Telegraf 에 Home Assistant statestream(Matter 기기) 입력 추가"
+git commit -m "feat(iot): Telegraf 에 Home Assistant 재발행(Matter 기기) 입력 추가"
 git push
 ```
 
-Matter 기기가 아직 없어도 이름이 `matter_` 로 시작하는 HA 헬퍼(예: 숫자 입력 `input_number.matter_test`)를 만들어 값을 바꿔 보면 경로 전체를 확인할 수 있습니다. 확인 뒤 헬퍼는 지웁니다.
+Telegraf 는 기기 이름이 `[방]-[종류]` 규칙(영문 소문자·숫자)에 맞는 값만 기록하므로, 등록 직후의 기본 이름(`Air Quality Sensor` 등)으로 보낸 값은 DB 에 남지 않습니다. Matter 기기를 하나 등록하고 이름을 규칙대로 바꾼 뒤 **개발자 도구** > **상태** 에서 그 기기의 센서 엔티티 상태를 임의 값으로 바꿔 보면, 실제 값이 바뀔 때까지 기다리지 않고 경로 전체를 확인할 수 있습니다.
 
-- **확인:** 허브에서 `kubectl -n timescaledb exec deploy/timescaledb -- psql -U iot -d iot -c "select time, site, domain, device, value, value_text from hass order by time desc limit 5;"` 에 `site` 가 `[SITE]`, `device` 가 엔티티 이름인 행이 보이고, 숫자 상태는 `value`, `on` 은 `value` 1 과 `value_text` `on` 으로 들어갑니다. Telegraf 가 다시 붙을 때 브로커가 유지 메시지를 다시 보내므로 재시작 직후 각 엔티티의 마지막 값이 한 번 더 들어올 수 있습니다.
+- **확인:** 허브에서 `kubectl -n timescaledb exec deploy/timescaledb -- psql -U iot -d iot -c "select time, site, room, device, property, value, value_text, hw_id, node from readings where protocol = 'matter' order by time desc limit 5;"` 에 `site` 가 `[SITE]`, `room`·`device` 가 HA 기기 이름을 나눈 방과 종류, `property` 가 측정 항목인 행이 보이고, 숫자 상태는 `value`, `on` 은 `value` 1 과 `value_text` `on` 으로 들어갑니다. `hw_id` 에는 시리얼, `node` 에는 노드 ID 가 들어갑니다. Telegraf 가 다시 붙을 때 브로커가 유지 메시지를 다시 보내므로 재시작 직후 각 엔티티의 마지막 값이 한 번 더 들어올 수 있습니다.
+
+> `property` 는 엔티티 ID 에서 기기 이름을 떼어 만듭니다. 한국어 HA 는 기기 이름을 바꾸고 방을 지정할 때 엔티티 ID 를 `방 + 기기 이름 + 엔티티 이름` 의 로마자로 다시 만듭니다(`sensor.cimsil2_bedroom2_air_quality_ondo`). 기기를 등록하고 이름을 정한 직후 [중앙 HA 글](/posts/49/)의 `ha-registry.py --rename-matter --assign-areas` 를 실행해 `sensor.bedroom2_air_quality_temperature` 처럼 영문 ID 로 맞추고 영역도 이름의 방으로 지정합니다. 영문 ID 여야 `property` 가 `temperature` 처럼 깔끔하게 남습니다. 화면의 표시 이름은 한국어 그대로입니다. 엔티티 ID 가 바뀌어도 `hw_id`(시리얼)는 그대로이므로, 옛 ID 로 쌓인 기록도 `hw_id` 로 같은 기기에 묶어 볼 수 있습니다.
+{: .prompt-tip }
 
 ## 5. 밖에서 열기와 2단계 인증
 
@@ -666,13 +749,13 @@ HA 휴대폰 앱에서는 **내부 URL** 을 `http://[EDGE_IP]:8123`(집 Wi-Fi �
 ```bash
 # 엣지 kubeconfig 로 HA 로그의 오류와 통합 상태
 E="--kubeconfig ~/k3s-[SITE].yaml"
-kubectl $E -n home-assistant logs deploy/home-assistant | grep -E "mqtt_statestream|reverse proxy" | tail -3
+kubectl $E -n home-assistant logs deploy/home-assistant | grep -E "automation|reverse proxy" | tail -3
 
 # Thread 보더 라우터 상태 (OTBR 을 쓰는 경우)
 curl -s http://[EDGE_IP]:8081/node/state
 ```
 
-- **확인:** HA 로그에 `mqtt_statestream` 설정 실패나 reverse proxy 오류가 없습니다. OTBR 상태는 `"leader"` 입니다. HA 의 **설정 > 기기 및 서비스**에 MQTT 아래 Zigbee2MQTT 브리지와 기기들이 자동으로 보입니다.
+- **확인:** HA 로그에 자동화 설정 오류나 reverse proxy 오류가 없고, **설정 > 자동화 및 장면** 에 `Matter 상태를 MQTT 로 재발행` 이 보입니다. OTBR 상태는 `"leader"` 입니다. HA 의 **설정 > 기기 및 서비스**에 MQTT 아래 Zigbee2MQTT 브리지와 기기들이 자동으로 보입니다.
 
 ## 트러블슈팅
 
@@ -692,6 +775,14 @@ curl -s http://[EDGE_IP]:8081/node/state
 
 </details>
 
+<details markdown="1">
+<summary><code>Login attempt or request with invalid authentication from 172.69.…</code> — 로그의 접속자가 Cloudflare 주소일 때</summary>
+
+- **원인:** HA 가 앞단 Traefik 만 신뢰하고 그 앞의 Cloudflare 는 신뢰하지 않아, `X-Forwarded-For` 를 따라가다 Cloudflare 주소에서 멈춥니다. 이 상태에서는 로그인 실패 차단이 실제 접속자가 아니라 Cloudflare 주소에 걸려, 같은 Cloudflare 경로로 들어오는 다른 접속까지 막힐 수 있습니다.
+- **해결:** `TRUSTED_PROXIES` 에 스크립트의 `$CLOUDFLARE_IPV4` 를 함께 넣고 다시 실행합니다. 이후 로그에는 접속자의 공인 IP 가 찍힙니다.
+
+</details>
+
 ## 마무리
 
 엣지 클러스터에 HA 와 Matter 서버를 배포하고, 통합 추가와 Thread 기본 네트워크 지정, 역방향 프록시 설정을 API 스크립트로 넣어, Matter 기기 상태가 Zigbee 와 같은 경로로 허브 DB 에 모이게 했습니다. HA 는 설정과 대시보드만 맡으므로 HA 가 멈춰도 Zigbee 수집은 계속되고, Matter 패브릭은 별도 볼륨에 있어 HA 를 다시 만들어도 기기를 다시 등록하지 않습니다. Thread 보더 라우터는 [다음 글](/posts/47/)에서 다룹니다.
@@ -699,7 +790,8 @@ curl -s http://[EDGE_IP]:8081/node/state
 ## 참고 자료
 
 - [Home Assistant - Matter](https://www.home-assistant.io/integrations/matter/)
-- [Home Assistant - MQTT Statestream](https://www.home-assistant.io/integrations/mqtt_statestream/)
+- [Home Assistant - Templating (integration_entities)](https://www.home-assistant.io/docs/configuration/templating/)
+- [Home Assistant - MQTT (Publish action)](https://www.home-assistant.io/integrations/mqtt/)
 - [Home Assistant - HTTP](https://www.home-assistant.io/integrations/http/)
 - [Home Assistant - Multi-factor authentication](https://www.home-assistant.io/docs/authentication/multi-factor-auth/)
 - [Home Assistant - WebSocket API](https://developers.home-assistant.io/docs/api/websocket/)
