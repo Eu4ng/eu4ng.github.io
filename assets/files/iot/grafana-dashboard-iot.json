@@ -434,6 +434,77 @@
       "id": 6
     },
     {
+      "type": "state-timeline",
+      "title": "연결 상태 (Zigbee)",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "timescaledb"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 23,
+        "w": 24,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT time, concat_ws('-', room, device, NULLIF(position, '')) AS metric, value\nFROM readings\nWHERE $__timeFilter(time) AND site IN ($site) AND protocol IN ($protocol) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device)) AND property = 'availability' AND value IS NOT NULL\nORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": "online",
+                  "color": "green",
+                  "index": 0
+                },
+                "0": {
+                  "text": "offline",
+                  "color": "red",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "transparent",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "mergeValues": true,
+        "showValue": "auto",
+        "rowHeight": 0.8,
+        "legend": {
+          "showLegend": false
+        }
+      },
+      "id": 16,
+      "description": "Zigbee2MQTT 가 알리는 기기 연결 상태(property = availability). offline 은 마지막 메시지에서 기기별 제한 시간이 지난 시각에 찍힙니다."
+    },
+    {
       "type": "timeseries",
       "title": "조도",
       "datasource": {
@@ -442,7 +513,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 23,
+        "y": 29,
         "w": 8,
         "h": 8
       },
@@ -490,7 +561,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 23,
+        "y": 29,
         "w": 8,
         "h": 8
       },
@@ -538,7 +609,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 23,
+        "y": 29,
         "w": 8,
         "h": 8
       },
@@ -586,7 +657,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 31,
+        "y": 37,
         "w": 12,
         "h": 8
       },
@@ -634,7 +705,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 31,
+        "y": 37,
         "w": 12,
         "h": 8
       },
@@ -679,7 +750,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 39,
+        "y": 45,
         "w": 24,
         "h": 1
       },
@@ -695,7 +766,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 40,
+        "y": 46,
         "w": 24,
         "h": 9
       },
@@ -743,7 +814,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 49,
+        "y": 55,
         "w": 24,
         "h": 7
       },
@@ -784,7 +855,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 56,
+        "y": 62,
         "w": 24,
         "h": 10
       },

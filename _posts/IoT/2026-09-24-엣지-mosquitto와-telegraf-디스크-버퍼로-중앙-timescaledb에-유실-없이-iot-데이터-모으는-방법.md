@@ -406,10 +406,11 @@ Telegraf 설정 하나를 모든 지역이 공유합니다. 지역 이름과 허
 #   컬럼 순서: time, site, room, device, position, property, value, unit, value_text, protocol, source, vendor, model, hw_id, node (아래 create_templates)
 #   기기 이름 <방>-<종류>[-<위치>][번호] 는 - 에서 나눠 room(방), device(종류), position(위치, 없으면 비움)에 넣습니다. 번호는 마지막 칸에 붙어 들어갑니다.
 #   device 는 방마다 겹칠 수 있고 실물 식별은 hw_id 가 맡습니다
-#   필드(컬럼): value(숫자. on/off·true/false 는 1/0), value_text(문자열 원문)
+#   필드(컬럼): value(숫자. on/off·true/false·online/offline 은 1/0), value_text(문자열 원문)
+#   기기 연결 상태는 property 가 availability 인 행입니다(Zigbee2MQTT 가 알리는 online/offline)
 #   unit 은 기기 정의의 단위입니다(Zigbee2MQTT bridge/devices 의 exposes, HA 의 unit_of_measurement). 단위가 없는 값(presence 등)은 비어 있습니다
 
-# Zigbee2MQTT 기기 메시지. 한 단계(+)만 구독하면 bridge/#, <기기>/set|get|availability 는 자연히 빠집니다 (friendly_name 에 / 를 쓰지 않는 전제).
+# Zigbee2MQTT 기기 메시지. 한 단계(+)만 구독하면 bridge/#, <기기>/set|get|availability 는 자연히 빠집니다 (friendly_name 에 / 를 쓰지 않는 전제). availability 는 아래 입력이 받습니다.
 [[inputs.mqtt_consumer]]
   servers = ["tcp://mosquitto.mosquitto.svc.cluster.local:1883"]
   topics = ["zigbee2mqtt/+"]
@@ -438,8 +439,9 @@ Telegraf 설정 하나를 모든 지역이 공유합니다. 지역 이름과 허
   [inputs.mqtt_consumer.tagdrop]
     device = ["bridge"]
 
-# Zigbee2MQTT 기기 정의(유지 메시지). 아래 starlark 가 기기·속성별 단위를 기억해 두고 기기 메시지에 unit 으로 붙이며, 이 메시지 자체는 버립니다.
-# 기기를 추가하거나 이름을 바꾸면 Zigbee2MQTT 가 다시 발행합니다. Telegraf 재시작 직후 이보다 먼저 온 기기 메시지 몇 개는 unit 이 비어 있을 수 있습니다.
+# Zigbee2MQTT 기기 정의(유지 메시지). 아래 starlark 가 기기·속성별 단위와 실물 정보(IEEE 주소, 모델, 제조사)를 기억해 두고
+# 기기 메시지에 unit 으로, 연결 상태 메시지에 hw_id·model·vendor 로 붙이며, 이 메시지 자체는 버립니다.
+# 기기를 추가하거나 이름을 바꾸면 Zigbee2MQTT 가 다시 발행합니다. Telegraf 재시작 직후 이보다 먼저 온 메시지 몇 개는 이 값들이 비어 있을 수 있습니다.
 [[inputs.mqtt_consumer]]
   servers = ["tcp://mosquitto.mosquitto.svc.cluster.local:1883"]
   topics = ["zigbee2mqtt/bridge/devices"]
@@ -452,9 +454,33 @@ Telegraf 설정 하나를 모든 지역이 공유합니다. 지역 이름과 허
   data_format = "value"
   data_type = "string"                # JSON 전체를 문자열 필드 value 하나로 받아 starlark 가 풉니다
 
+# Zigbee2MQTT 기기 연결 상태(유지 메시지 {"state": "online"|"offline"}). 속성 availability 인 행 하나가 됩니다.
+# 기기 시각이 없어 수신 시각으로 남습니다. offline 은 마지막 메시지에서 제한 시간(availability timeout)이 지난 시각입니다.
+# 유지 메시지라 Telegraf 가 다시 접속하면 지금 상태가 한 번 더 들어옵니다. 기기 정보가 없어 hw_id·model·vendor 는 starlark 가 기기 정의에서 채웁니다.
+[[inputs.mqtt_consumer]]
+  servers = ["tcp://mosquitto.mosquitto.svc.cluster.local:1883"]
+  topics = ["zigbee2mqtt/+/availability"]
+  username = "${MQTT_USER}"
+  password = "${MQTT_PASSWORD}"
+  client_id = "telegraf-z2m-availability"
+  persistent_session = true
+  qos = 1
+  topic_tag = ""
+  name_override = "readings"
+  data_format = "json"
+  json_string_fields = ["state"]
+  [inputs.mqtt_consumer.tags]
+    protocol = "zigbee"
+    source = "z2m"
+    property = "availability"
+  [[inputs.mqtt_consumer.topic_parsing]]
+    topic = "zigbee2mqtt/+/availability"
+    tags = "_/device/_"
+
 # 필드 하나를 행 하나로 쪼개고 값을 value(숫자)와 value_text(문자열)로 나눕니다. 실물 기기 태그 이름도 여기서 통일합니다.
 # 메시지에 property 태그가 있으면(HA) 그 값이 속성 이름이고, 없으면(Zigbee2MQTT) 필드 이름이 속성 이름입니다.
 # 단위는 HA 메시지에는 unit 태그로 실려 오고, Zigbee2MQTT 는 기기 정의(z2m_devices)에서 기억해 둔 값을 붙입니다.
+# Zigbee2MQTT 연결 상태 메시지처럼 실물 정보가 없는 메시지에도 기기 정의에서 기억해 둔 hw_id·model·vendor 를 붙입니다.
 [[processors.starlark]]
   namepass = ["readings", "z2m_devices"]
   order = 1
@@ -462,7 +488,7 @@ Telegraf 설정 하나를 모든 지역이 공유합니다. 지역 이름과 허
 load("json.star", "json")
 
 HW_TAGS = {"device_ieeeAddr": "hw_id", "serial": "hw_id", "device_model": "model", "device_manufacturerName": "vendor"}
-ON_OFF = {"on": 1.0, "off": 0.0, "true": 1.0, "false": 0.0}
+ON_OFF = {"on": 1.0, "off": 0.0, "true": 1.0, "false": 0.0, "online": 1.0, "offline": 0.0}
 NAME_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789_"
 
 def valid_name(name):
@@ -486,18 +512,23 @@ def collect_units(expose, units):
     for f in expose.get("features", []):
         collect_units(f, units)
 
-def remember_units(metric):
-    units = {}
+def remember_devices(metric):
+    # 태그 값은 기기 메시지의 device{…}와 같게 맞춥니다: model 은 기기 정의의 모델, vendor 는 기기가 알리는 제조사
+    units, hw = {}, {}
     for d in json.decode(metric.fields["value"]):
+        name = d.get("friendly_name", "")
+        definition = d.get("definition") or {}
         u = {}
-        for e in (d.get("definition") or {}).get("exposes", []):
+        for e in definition.get("exposes", []):
             collect_units(e, u)
-        units[d.get("friendly_name", "")] = u
+        units[name] = u
+        hw[name] = {"hw_id": d.get("ieee_address") or "", "model": definition.get("model") or "", "vendor": d.get("manufacturer") or ""}
     state["units"] = units
+    state["hw"] = hw
 
 def apply(metric):
     if metric.name == "z2m_devices":
-        remember_units(metric)
+        remember_devices(metric)
         return []
     tags = {}
     for k, v in metric.tags.items():
@@ -507,6 +538,10 @@ def apply(metric):
         return []                     # 이름이 없거나(옛 형식의 유지 메시지 등) 이름 규칙에 맞지 않는 기기는 버립니다
     name = tags["device"]
     units = state.get("units", {}).get(name, {})
+    if tags.get("source") == "z2m" and "hw_id" not in tags:
+        for k, v in state.get("hw", {}).get(name, {}).items():
+            if v != "":
+                tags[k] = v
     parts = name.split("-")           # bedroom2-th-door → room bedroom2, device th, position door
     tags["room"] = parts[0]
     tags["device"] = parts[1]
@@ -651,13 +686,13 @@ spec:
 
 | 컬럼 | 예 | 내용 |
 |---|---|---|
-| `time` | `2026-09-25 15:51:04+00` | 기록 시각. Zigbee 는 기기 시각(`last_seen`), Matter 는 수신 시각 |
+| `time` | `2026-09-25 15:51:04+00` | 기록 시각. Zigbee 는 기기 시각(`last_seen`, 연결 상태만 수신 시각), Matter 는 수신 시각 |
 | `site` | `daejeon` | 지역 |
 | `room` | `bedroom2` | 방. 기기 이름 `<방>-<종류>[-<위치>][번호]` 의 첫 칸 |
 | `device` | `th`, `motion2` | 기기 종류. 위치가 없으면 번호까지 들어갑니다. 방마다 겹칠 수 있고, 실물 식별은 `hw_id` 가 맡습니다 |
 | `position` | `door`, `ceil` | 방 안의 위치. 이름에 위치 칸이 없으면 비어 있습니다 |
-| `property` | `temperature`, `presence` | 측정 항목 |
-| `value` | `26.3`, `1` | 숫자 값. `on`/`off`, `true`/`false` 는 1/0 |
+| `property` | `temperature`, `presence`, `availability` | 측정 항목. `availability` 는 Zigbee 기기의 연결 상태(`online`/`offline`)로, 기기 시각이 없어 수신 시각으로 남습니다 |
+| `value` | `26.3`, `1` | 숫자 값. `on`/`off`, `true`/`false`, `online`/`offline` 은 1/0 |
 | `unit` | `°C`, `mV`, `μg/m³` | 단위. Zigbee 는 Zigbee2MQTT 기기 정의(`bridge/devices`), Matter 는 HA 의 `unit_of_measurement` 에서 가져옵니다. 단위가 없는 값(`presence` 등)은 비어 있습니다 |
 | `value_text` | `ON`, `false` | 문자열 원문 |
 | `protocol` | `zigbee`, `matter` | 기기 통신 방식 |
@@ -787,6 +822,7 @@ configMapGenerator:
 | 기기별 최신 값 | 기기마다 속성별 마지막 값(온도, 습도, 재실, 닫힘, 조도, CO2, PM2.5, 배터리, LQI) |
 | 온도, 습도, 조도, 배터리, 링크 품질, CO2, 미세먼지 | 기기별 시계열. Zigbee 와 Matter 기기가 한 그래프에 함께 그려집니다 |
 | 재실, 닫힘 (문·창문) | 켜짐/꺼짐 구간 타임라인 |
+| 연결 상태 (Zigbee) | 기기별 `online`/`offline` 구간 타임라인 |
 | 선택한 속성 | **속성** 변수로 고른 속성의 시계열 |
 | 실물 기기 | 실물 ID(`hw_id`)별 프로토콜, 수집기, 모델, 제조사, 지금 이름과 거쳐 간 이름 |
 | 최근 기록 | `readings` 테이블의 원본 행 최근 200개 |

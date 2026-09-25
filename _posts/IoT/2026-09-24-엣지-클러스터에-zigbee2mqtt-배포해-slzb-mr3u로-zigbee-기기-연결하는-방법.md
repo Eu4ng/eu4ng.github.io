@@ -137,6 +137,8 @@ spec:
             # 배터리 기기는 잠들어 ping 에 답하지 못하므로 active 방식을 쓸 수 없고, 제한 시간 동안 메시지가 없으면 offline 으로 봅니다(passive).
             - { name: ZIGBEE2MQTT_CONFIG_AVAILABILITY_ENABLED, value: "true" }
             - { name: ZIGBEE2MQTT_CONFIG_AVAILABILITY_PASSIVE_TIMEOUT, value: "60" }   # 분. 기본 1500. 온습도계가 값이 안 바뀌면 30분까지 조용하므로 그 두 배
+            # 생존 신호 간격이 이보다 긴 기기(문·창문 센서는 상태가 안 바뀌면 약 3시간마다 배터리만 보냄)는 기기별 availability.timeout 을 줍니다.
+            # 기기별 값은 PVC 의 configuration.yaml(devices)에 저장되므로 bridge/request/device/options 요청이나 프런트엔드로 바꿉니다
             # 모든 기기의 기본 옵션입니다. 기기별로 같은 키를 주면 이 값이 가려집니다.
             #   qos 1: 기본 0 이면 Telegraf 가 QoS1 로 구독해도 전달이 QoS0 이 되어, Telegraf 가 내려간 동안 브로커가 메시지를 보관하지 않고 버립니다
             #   linkquality: HA 가 LQI 엔티티를 비활성으로 등록하지 않게 합니다(처음 등록될 때만 적용)
@@ -257,6 +259,18 @@ kubectl $E -n mosquitto run mq-sub --rm -i -q --restart=Never --image=eclipse-mo
   --command -- mosquitto_sub -h mosquitto -u telegraf -P "$PW" -t 'zigbee2mqtt/+' -v
 ```
 
+배터리 기기는 값이 바뀔 때와 주기적인 생존 신호(배터리·링크 품질 보고) 때만 메시지를 보내고, 제한 시간(`availability.passive.timeout`, 여기서는 60분) 동안 아무 메시지도 없으면 `offline` 이 됩니다. 문 열림 센서는 문을 계속 열어 두거나 닫아 두면 3시간쯤마다 생존 신호만 보내므로 60분 제한에서는 멀쩡해도 `offline` 으로 표시됩니다. 이런 기기는 기기별 제한 시간을 생존 신호 간격보다 길게 줍니다. 값은 PVC 의 `configuration.yaml` 에 저장되어 재시작해도 유지됩니다.
+
+```bash
+# control plane: 문 열림 센서의 연결 상태 제한 시간을 240분으로 (기기마다 반복)
+kubectl $E -n mosquitto run mq-opt --rm -i -q --restart=Never --image=eclipse-mosquitto:2.0.22 --env="PW=$PW" \
+  --command -- mosquitto_pub -h mosquitto -u telegraf -P "$PW" -t zigbee2mqtt/bridge/request/device/options \
+  -m '{"id": "[기기 이름]", "options": {"availability": {"timeout": 240}}}'
+kubectl $E -n zigbee2mqtt exec deploy/zigbee2mqtt -c zigbee2mqtt -- sed -n '/^devices:/,/^[a-z]/p' /app/data/configuration.yaml
+```
+
+- **확인:** `configuration.yaml` 의 `devices:` 아래 그 기기 항목에 `availability:` `timeout: 240` 이 보입니다. 브로커의 `zigbee2mqtt/[기기 이름]/availability` 는 `{"state":"online"}` 이고, 생존 신호 간격보다 오래 조용해도 `offline` 으로 바뀌지 않습니다.
+
 ## 5. 허브 DB 에서 확인
 
 Telegraf 는 기기 메시지의 필드 하나를 `readings` 테이블의 행 하나(`property`, `value`, `value_text`)로 넣습니다. 기기 설정값(보정값, 감도, 표시등 등)은 버립니다. 허브에서 기기별로 들어온 속성을 봅니다.
@@ -264,11 +278,12 @@ Telegraf 는 기기 메시지의 필드 하나를 `readings` 테이블의 행 �
 ```bash
 # 허브 control plane
 kubectl -n timescaledb exec deploy/timescaledb -- psql -U iot -d iot \
-  -c "select room, device, position, hw_id, model, string_agg(distinct property, ', ') as properties, max(time)
+  -c "select room, device, position, hw_id, model, string_agg(distinct property, ', ') as properties,
+             max(time) filter (where property <> 'availability') as last_seen
       from readings where protocol = 'zigbee' group by 1,2,3,4,5 order by 1,2,3;"
 ```
 
-- **확인:** `room`·`device`·`position` 에 규칙에 맞는 기기 이름을 나눈 방·종류·위치가 있고 `hw_id`·`model` 에 실물 기기가 보이고 `max(time)` 이 기기가 마지막으로 보고한 시각(`last_seen`)과 같습니다. `properties` 에 기기가 보내는 측정 항목(`temperature`, `battery`, `linkquality` 등)이 보입니다.
+- **확인:** `room`·`device`·`position` 에 규칙에 맞는 기기 이름을 나눈 방·종류·위치가 있고 `hw_id`·`model` 에 실물 기기가 보이고 `last_seen` 이 기기가 마지막으로 보고한 시각과 같습니다. `properties` 에 기기가 보내는 측정 항목(`temperature`, `battery`, `linkquality` 등)과 연결 상태(`availability`)가 보입니다. 연결 상태는 기기 시각이 없어 Telegraf 가 받은 시각으로 남으므로 `last_seen` 계산에서 뺍니다.
 
 ## 마무리
 
