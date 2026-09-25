@@ -182,7 +182,10 @@ class WS:  # 표준 라이브러리만 쓰는 최소 WebSocket 클라이언트 (
         self.s.sendall((f"GET /api/websocket HTTP/1.1\r\nHost: {u.netloc}\r\nUpgrade: websocket\r\n"
                         f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode())
         resp = b""
-        while b"\r\n\r\n" not in resp: resp += self.s.recv(1)
+        while b"\r\n\r\n" not in resp:
+            c = self.s.recv(1)
+            if not c: raise ConnectionError("closed")   # 닫힌 소켓의 recv 는 b"" 를 곧바로 돌려줘 무한 루프가 됩니다
+            resp += c
         if b" 101 " not in resp.split(b"\r\n")[0]: sys.exit("WebSocket 연결 실패: " + resp.decode(errors="replace")[:200])
         self.n = 0
         assert self.recv()["type"] == "auth_required"
