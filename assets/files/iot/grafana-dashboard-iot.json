@@ -155,7 +155,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT max(time) AS \"마지막 기록\", site AS \"지역\", room AS \"방\", device AS \"기기\",\n  last(temperature, time) FILTER (WHERE temperature IS NOT NULL) AS \"온도\",\n  last(humidity, time) FILTER (WHERE humidity IS NOT NULL) AS \"습도\",\n  last(presence, time) FILTER (WHERE presence IS NOT NULL) AS \"재실\",\n  last(contact, time) FILTER (WHERE contact IS NOT NULL) AS \"닫힘\",\n  last(illuminance, time) FILTER (WHERE illuminance IS NOT NULL) AS \"조도\",\n  last(battery, time) FILTER (WHERE battery IS NOT NULL) AS \"배터리\",\n  last(linkquality, time) FILTER (WHERE linkquality IS NOT NULL) AS \"LQI\",\n  last(model, time) FILTER (WHERE model IS NOT NULL) AS \"모델\"\nFROM zigbee2mqtt\nWHERE $__timeFilter(time) AND site IN ($site) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device))\nGROUP BY site, room, device\nORDER BY site, room, device"
+          "rawSql": "SELECT max(time) AS \"마지막 기록\", site AS \"지역\", room AS \"방\", device AS \"기기\",\n  last(temperature, time) FILTER (WHERE temperature IS NOT NULL) AS \"온도\",\n  last(humidity, time) FILTER (WHERE humidity IS NOT NULL) AS \"습도\",\n  last(presence, time) FILTER (WHERE presence IS NOT NULL) AS \"재실\",\n  last(contact, time) FILTER (WHERE contact IS NOT NULL) AS \"닫힘\",\n  last(illuminance, time) FILTER (WHERE illuminance IS NOT NULL) AS \"조도\",\n  last(battery, time) FILTER (WHERE battery IS NOT NULL) AS \"배터리\",\n  last(linkquality, time) FILTER (WHERE linkquality IS NOT NULL) AS \"LQI\",\n  last(model, time) FILTER (WHERE model IS NOT NULL) AS \"모델\",\n  last(vendor, time) FILTER (WHERE vendor IS NOT NULL) AS \"제조사\",\n  last(ieee, time) FILTER (WHERE ieee IS NOT NULL) AS \"IEEE\"\nFROM zigbee2mqtt\nWHERE $__timeFilter(time) AND site IN ($site) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device))\nGROUP BY site, room, device\nORDER BY site, room, device"
         }
       ],
       "fieldConfig": {
@@ -576,7 +576,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT time, site, room, device, temperature, humidity, presence, contact, illuminance, battery, linkquality, state\nFROM zigbee2mqtt\nWHERE $__timeFilter(time) AND site IN ($site) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device))\nORDER BY time DESC\nLIMIT 200"
+          "rawSql": "SELECT time, site, room, device, temperature, humidity, presence, contact, illuminance, battery, linkquality, state, ieee\nFROM zigbee2mqtt\nWHERE $__timeFilter(time) AND site IN ($site) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device))\nORDER BY time DESC\nLIMIT 200"
         }
       ],
       "fieldConfig": {
@@ -608,6 +608,47 @@
       "id": 11
     },
     {
+      "type": "table",
+      "title": "Matter 기기",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "timescaledb"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 42,
+        "w": 24,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT max(time) AS \"마지막 기록\", site AS \"지역\", model AS \"모델\", vendor AS \"제조사\", serial AS \"시리얼\", node AS \"노드 ID\",\n  count(DISTINCT device) AS \"엔티티 수\"\nFROM hass\nWHERE $__timeFilter(time) AND site IN ($site) AND serial IS NOT NULL AND serial <> ''\nGROUP BY site, model, vendor, serial, node\nORDER BY site, model, serial"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "filterable": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "description": "실물 기기별 정보입니다. 시리얼(serial)은 바뀌지 않고, 노드 ID(node)는 기기를 다시 커미셔닝하면 바뀝니다. 엔티티 ID 를 바꿔도 같은 기기로 묶입니다.",
+      "id": 14
+    },
+    {
       "type": "timeseries",
       "title": "센서 값",
       "datasource": {
@@ -616,7 +657,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 42,
+        "y": 48,
         "w": 24,
         "h": 9
       },
@@ -664,7 +705,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 51,
+        "y": 57,
         "w": 24,
         "h": 10
       },
@@ -678,7 +719,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT time, site, domain, regexp_replace(device, '_pm25$', '_pm2.5') AS device, value, value_text\nFROM hass\nWHERE $__timeFilter(time) AND site IN ($site) AND ('__all__' IN ($entity) OR device IN ($entity))\nORDER BY time DESC\nLIMIT 200"
+          "rawSql": "SELECT time, site, domain, regexp_replace(device, '_pm25$', '_pm2.5') AS device, value, value_text, node, serial\nFROM hass\nWHERE $__timeFilter(time) AND site IN ($site) AND ('__all__' IN ($entity) OR device IN ($entity))\nORDER BY time DESC\nLIMIT 200"
         }
       ],
       "fieldConfig": {
