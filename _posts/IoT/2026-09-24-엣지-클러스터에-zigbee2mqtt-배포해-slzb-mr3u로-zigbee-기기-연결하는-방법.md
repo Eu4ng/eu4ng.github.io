@@ -263,11 +263,11 @@ Telegraf 는 기기 메시지의 필드 하나를 `readings` 테이블의 행 �
 ```bash
 # 허브 control plane
 kubectl -n timescaledb exec deploy/timescaledb -- psql -U iot -d iot \
-  -c "select device, split_part(device, '-', 1) as room, hw_id, model, string_agg(distinct property, ', ') as properties, max(time)
-      from readings where protocol = 'zigbee' group by 1,2,3,4 order by 1;"
+  -c "select device, hw_id, model, string_agg(distinct property, ', ') as properties, max(time)
+      from readings where protocol = 'zigbee' group by 1,2,3 order by 1;"
 ```
 
-- **확인:** `device` 에 규칙에 맞는 기기 이름만 있고 `room` 에 이름의 방, `hw_id`·`model` 에 실물 기기가 보이고 `max(time)` 이 기기가 마지막으로 보고한 시각(`last_seen`)과 같습니다. `properties` 에 기기가 보내는 측정 항목(`temperature`, `battery`, `linkquality` 등)이 보입니다.
+- **확인:** `device` 에 규칙에 맞는 기기 이름만 있고 `hw_id`·`model` 에 실물 기기가 보이고 `max(time)` 이 기기가 마지막으로 보고한 시각(`last_seen`)과 같습니다. `properties` 에 기기가 보내는 측정 항목(`temperature`, `battery`, `linkquality` 등)이 보입니다.
 
 ## 마무리
 
