@@ -31,7 +31,6 @@
         "sort": 1,
         "multi": true,
         "includeAll": true,
-        "allValue": "'__all__'",
         "current": {
           "selected": true,
           "text": [
@@ -56,7 +55,6 @@
         "sort": 1,
         "multi": true,
         "includeAll": true,
-        "allValue": "'__all__'",
         "current": {
           "selected": true,
           "text": [
@@ -65,7 +63,8 @@
           "value": [
             "$__all"
           ]
-        }
+        },
+        "allValue": "'__all__'"
       },
       {
         "type": "query",
@@ -81,7 +80,6 @@
         "sort": 1,
         "multi": true,
         "includeAll": true,
-        "allValue": "'__all__'",
         "current": {
           "selected": true,
           "text": [
@@ -90,7 +88,8 @@
           "value": [
             "$__all"
           ]
-        }
+        },
+        "allValue": "'__all__'"
       },
       {
         "type": "query",
@@ -106,7 +105,6 @@
         "sort": 1,
         "multi": true,
         "includeAll": true,
-        "allValue": "'__all__'",
         "current": {
           "selected": true,
           "text": [
@@ -115,7 +113,8 @@
           "value": [
             "$__all"
           ]
-        }
+        },
+        "allValue": "'__all__'"
       }
     ]
   },
