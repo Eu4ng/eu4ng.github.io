@@ -412,12 +412,35 @@ Telegraf 설정 하나를 모든 지역이 공유합니다. 지역 이름과 허
   json_string_fields = ["*"]          # 기본은 숫자만 저장. 문자열(state)·불리언(contact, occupancy)도 컬럼으로 넣습니다
   json_time_key = "last_seen"         # 기기 시각(Zigbee2MQTT advanced.last_seen: ISO_8601). 수신 시각 대신 써서 지연 도착해도 시각이 맞습니다
   json_time_format = "2006-01-02T15:04:05Z07:00"   # RFC 3339. 소수점 초가 있어도 파싱됩니다
+  # Zigbee2MQTT mqtt.include_device_information 이 넣는 device{…} 는 device_<키> 필드로 펼쳐집니다. 실물 식별에 필요한 것만 남깁니다
+  fieldexclude = ["device_friendlyName", "device_networkAddress", "device_type", "device_manufacturerID",
+                  "device_powerSource", "device_*Version", "device_dateCode", "device_softwareBuildID"]
   [[inputs.mqtt_consumer.topic_parsing]]
     topic = "zigbee2mqtt/+"
     measurement = "measurement/_"     # 테이블 이름 = zigbee2mqtt
     tags = "_/device"                 # friendly_name → device 컬럼
   [inputs.mqtt_consumer.tagdrop]
     device = ["bridge"]
+
+# 실물 기기 정보 필드 이름을 짧게: ieee(기기 고유 주소), model, vendor
+[[processors.rename]]
+  namepass = ["zigbee2mqtt"]
+  [[processors.rename.replace]]
+    field = "device_ieeeAddr"
+    dest = "ieee"
+  [[processors.rename.replace]]
+    field = "device_model"
+    dest = "model"
+  [[processors.rename.replace]]
+    field = "device_manufacturerName"
+    dest = "vendor"
+
+# 기기 이름 <방>-<용도> 를 첫 - 에서 잘라 room, purpose 컬럼으로. 규칙에 맞지 않는 이름은 두 컬럼이 비어 있을 뿐 그대로 저장됩니다
+[[processors.regex]]
+  namepass = ["zigbee2mqtt"]
+  [[processors.regex.tags]]
+    key = "device"
+    pattern = '^(?P<room>[^-]+)-(?P<purpose>.+)$'
 
 # 허브 TimescaleDB. 태그를 외래 키 테이블로 빼지 않고 컬럼(site, device)으로 두어 지역 간 병합과 중복 제거가 쉽게 합니다.
 [[outputs.postgresql]]
