@@ -14,7 +14,9 @@ permalink: /posts/49/
 3. 온보딩과 장기 액세스 토큰
 4. 지역 연결과 프록시 설정
 5. 2단계 인증과 휴대폰 앱
-6. 확인
+6. 지역 대시보드
+7. 방과 잔재 엔티티 정리
+8. 확인
 
 ## 사전 준비
 
@@ -572,7 +574,326 @@ log "완료. 상태가 loaded 가 아니면 HA 로그를 확인합니다."
 
 - **확인:** 휴대폰 데이터망에서 `https://ha.[DOMAIN]` 에 로그인하면 OTP 코드를 묻고, 로그인 뒤 지역 엔티티가 보입니다.
 
-## 6. 확인
+## 6. 지역 대시보드
+
+Remote Home Assistant 는 지역 HA 의 엔티티 상태만 복제하고 기기와 방(area)은 가져오지 않습니다. 그래서 중앙 HA 의 기록 화면이나 기본 대시보드에서는 지역의 방 단위로 고를 수 없습니다. 중앙에는 방을 만들지 않고, 사이드바에 **지역** 대시보드를 따로 둡니다. 탭 하나가 지역이고, 탭 안의 카드 하나가 방입니다. 카드는 커뮤니티 카드 **auto-entities** 가 템플릿으로 만듭니다. 방은 기기 이름 규칙 `<방>-<종류>[번호]`(예: `bedroom2-th2`)에서 자르므로, 기기를 추가하거나 이름을 바꿔 방을 옮겨도 YAML 을 고치지 않아도 됩니다.
+
+- 방 카드에는 현재 값과 24시간 기록 그래프가 함께 나옵니다. 그래프는 단위별로 나뉘고, 재실·문은 타임라인으로 그려집니다.
+- 맨 위 **주의** 카드에는 오프라인 기기, 배터리 20% 미만, LQI 50 미만, Zigbee2MQTT 브리지 끊김만 모입니다. 해당하는 게 없으면 카드가 숨습니다.
+
+auto-entities 도 Remote Home Assistant 처럼 initContainer 가 버전을 고정해 받습니다.
+
+```python
+# auto-entities(커뮤니티 대시보드 카드)를 /config/www/community 에 받습니다. 버전이 같으면 건너뜁니다.
+# lovelace.yaml 이 /local/community/... 로 리소스를 등록하고, dashboards/regions.yaml 이 이 카드로 방 카드를 자동으로 만듭니다.
+# 인터넷이 없어 받지 못해도 HA 기동을 막지 않습니다.
+import os, sys, urllib.request
+
+ver = os.environ.get("AUTO_ENTITIES_VERSION", "1.16.1")
+dst = "/config/www/community/lovelace-auto-entities"
+stamp = os.path.join(dst, "VERSION")
+try:
+    cur = open(stamp).read().strip()
+except Exception:
+    cur = None
+if cur == ver:
+    print(f"auto-entities {ver}: 이미 설치됨"); sys.exit(0)
+url = f"https://raw.githubusercontent.com/thomasloven/lovelace-auto-entities/v{ver}/auto-entities.js"
+try:
+    data = urllib.request.urlopen(url, timeout=60).read()
+except Exception as e:
+    print(f"경고: {url} 를 받지 못했습니다({e}). 현재 버전({cur}) 그대로 둡니다."); sys.exit(0)
+os.makedirs(dst, exist_ok=True)
+with open(os.path.join(dst, "auto-entities.js.new"), "wb") as f:
+    f.write(data)
+os.replace(os.path.join(dst, "auto-entities.js.new"), os.path.join(dst, "auto-entities.js"))
+open(stamp, "w").write(ver)
+print(f"auto-entities {ver}: 설치함 (이전 {cur})")
+```
+{: file="iot/hub/home-assistant/install-frontend.py" }
+
+`configuration.yaml` 에 한 번 덧붙이는 대시보드 등록입니다. 대시보드 키에는 `-` 가 있어야 합니다.
+
+```yaml
+# --- iot/hub/home-assistant 가 덧붙인 설정. 지역 대시보드(dashboards/regions.yaml)와 그 카드(auto-entities)를 등록합니다 ---
+# 리소스를 YAML 로 관리하므로 UI 의 리소스 편집은 막힙니다. 카드 추가는 install-frontend.py 와 여기에 함께 넣습니다.
+lovelace:
+  resource_mode: yaml
+  resources:
+    - { url: /local/community/lovelace-auto-entities/auto-entities.js?v=1.16.1, type: module }   # install-frontend.py 의 버전과 맞춥니다
+  dashboards:
+    dashboard-regions:           # 대시보드 키에는 - 가 있어야 합니다
+      mode: yaml
+      filename: dashboards/regions.yaml
+      title: 지역
+      icon: mdi:map-marker
+      show_in_sidebar: true
+```
+{: file="iot/hub/home-assistant/lovelace.yaml" }
+
+대시보드 원본입니다. `[SITE_NAME]` 은 4단계 `REMOTES` 의 마지막 칸(엔티티 표시 이름 접두사), `[SITE]` 는 탭 주소입니다. 지역을 추가할 때는 탭 하나를 복사해 이 두 값만 바꿉니다.
+
+{% raw %}
+```yaml
+# 지역 대시보드(사이드바 "지역"). 탭 = 지역, 탭 안의 카드 = 방. initContainer 가 기동마다 /config/dashboards/regions.yaml 로 덮어쓰므로 여기가 원본입니다.
+# 중앙 HA 에는 방·기기가 없으므로(Remote Home Assistant 는 엔티티만 복제) 방은 이름 규칙에서 자릅니다:
+#   엔티티 friendly_name = <지역 접두사><방>-<종류>[번호] <항목>  예) "[SITE_NAME]bedroom2-th2 온도"  (iot/README.md 의 기기 이름 규칙)
+# 기기 추가·방 이동(이름 변경)·새 방은 YAML 수정 없이 반영됩니다. 규칙에 없는 종류를 쓰면 아래 두 정규식의 (th|multi|door|motion) 에 추가합니다.
+# 지역 추가: 탭 하나를 복사해 title·path 와 템플릿의 region(Remote Home Assistant 의 entity_friendly_name_prefix)을 바꿉니다.
+# 기록 그래프는 중앙 HA 레코더(기본 10일 보관)에서 그립니다. 그보다 긴 기간은 Grafana(허브 TimescaleDB)에서 봅니다.
+title: 지역
+views:
+  - title: "[SITE_NAME]"
+    path: "[SITE]"
+    icon: mdi:home-city
+    cards:
+      # 주의: 오프라인(가용성 60분 초과·지역 연결 끊김), 배터리 20% 미만, LQI 50 미만, Zigbee2MQTT 브리지 끊김. 해당이 없으면 숨습니다.
+      - type: custom:auto-entities
+        show_empty: false
+        card:
+          type: entities
+          title: 주의
+        filter:
+          template: |
+            {%- set region = '[SITE_NAME]' -%}
+            {%- set ns = namespace(rows=[]) -%}
+            {%- for s in (states.sensor | list) + (states.binary_sensor | list) -%}
+              {%- set fn = s.attributes.friendly_name | default('', true) -%}
+              {%- set label = fn[region | length:] if fn.startswith(region) else '' -%}
+              {%- set dev = label.split(' ')[0] -%}
+              {%- set reason = '' -%}
+              {%- if dev is match('[a-z0-9]+-(th|multi|door|motion)[0-9]*$') -%}
+                {%- if s.state == 'unavailable' -%}{%- set reason = '오프라인' -%}
+                {%- elif s.attributes.device_class == 'battery' and s.state | int(100) < 20 -%}{%- set reason = '배터리 ' ~ s.state ~ '%' -%}
+                {%- elif s.attributes.unit_of_measurement == 'lqi' and s.state | int(255) < 50 -%}{%- set reason = '신호 약함 ' ~ s.state -%}
+                {%- endif -%}
+              {%- elif label.startswith('Zigbee2MQTT Bridge') and s.attributes.device_class == 'connectivity' and s.state != 'on' -%}
+                {%- set reason = '브리지 끊김' -%}
+              {%- endif -%}
+              {%- if reason -%}
+                {%- set ns.rows = ns.rows + [{'entity': s.entity_id, 'name': label ~ ' — ' ~ reason}] -%}
+              {%- endif -%}
+            {%- endfor -%}
+            {{ ns.rows | sort(attribute='name') | tojson }}
+      # 방마다 현재 값 카드와 24시간 기록 그래프(단위별로 나뉘고 재실·문은 타임라인)를 한 묶음으로 둡니다.
+      # 상태 항목(온도·습도·조도·재실·문)만 보이고, 배터리·전압·LQI 같은 진단값은 위 주의 카드에서만 봅니다.
+      - type: custom:auto-entities
+        card_param: cards
+        card:
+          type: grid
+          columns: 1                 # 그래프가 좁아지지 않게 방 하나가 한 줄을 씁니다
+          square: false
+        filter:
+          template: |
+            {%- set region = '[SITE_NAME]' -%}
+            {%- set shown = ['temperature', 'humidity', 'illuminance', 'occupancy', 'motion', 'presence', 'door', 'window', 'opening'] -%}
+            {%- set ns = namespace(rows=[], cards=[]) -%}
+            {%- for s in (states.sensor | list) + (states.binary_sensor | list) -%}
+              {%- set fn = s.attributes.friendly_name | default('', true) -%}
+              {%- set label = fn[region | length:] if fn.startswith(region) else '' -%}
+              {%- set dev = label.split(' ')[0] -%}
+              {%- if dev is match('[a-z0-9]+-(th|multi|door|motion)[0-9]*$') and s.attributes.device_class | default('', true) in shown -%}
+                {%- set ns.rows = ns.rows + [{'room': dev.split('-')[0], 'row': {'entity': s.entity_id, 'name': label}}] -%}
+              {%- endif -%}
+            {%- endfor -%}
+            {%- for room in ns.rows | map(attribute='room') | unique | sort -%}
+              {%- set ents = ns.rows | selectattr('room', 'eq', room) | map(attribute='row') | sort(attribute='name') | list -%}
+              {%- set ns.cards = ns.cards + [{'type': 'vertical-stack', 'cards': [
+                    {'type': 'entities', 'title': room, 'entities': ents},
+                    {'type': 'history-graph', 'hours_to_show': 24, 'entities': ents}]}] -%}
+            {%- endfor -%}
+            {{ ns.cards | tojson }}
+```
+{: file="iot/hub/home-assistant/regions.yaml" }
+{% endraw %}
+
+2단계의 `kustomization.yaml` 에 세 파일을 추가합니다.
+
+```yaml
+# 중앙 Home Assistant(ha.[DOMAIN]). 기기·방은 두지 않고, Remote Home Assistant 로 각 지역 HA 의 엔티티를 모아 "지역" 대시보드(regions.yaml)로 봅니다.
+# 기기 연결과 자동화는 계속 지역 HA 가 맡으므로, 중앙이 멈추거나 WAN 이 끊겨도 지역은 그대로 동작합니다.
+resources:
+  - deployment.yaml
+  - service.yaml
+  - pvc.yaml
+  - ingressroute.yaml
+configMapGenerator:
+  - name: home-assistant-seed
+    files:
+      - install-remote.py      # iot/edge/home-assistant 와 같은 파일
+      - install-frontend.py    # 대시보드 카드(auto-entities)
+      - lovelace.yaml          # configuration.yaml 에 한 번 덧붙이는 대시보드 등록
+      - regions.yaml           # 지역 대시보드 원본
+```
+{: file="iot/hub/home-assistant/kustomization.yaml" }
+
+`deployment.yaml` 의 initContainer 를 아래처럼 바꿉니다. 대시보드 파일은 기동할 때마다 저장소 내용으로 덮어쓰고, 설정 블록은 없을 때만 덧붙입니다.
+
+```yaml
+# 기기 탐색이 필요 없어 hostNetwork 를 쓰지 않습니다. 지역 HA 에는 노드 주소·도메인으로 붙습니다.
+# Remote Home Assistant 와 auto-entities 를 받고, 지역 대시보드를 기동마다 저장소 내용으로 덮어씁니다.
+# 대시보드 등록(lovelace 블록)은 HA 가 만든 configuration.yaml 에 없을 때만 덧붙입니다. 파일이 아직 없으면(최초 기동) 다음 기동에 붙입니다.
+initContainers:
+  - name: install-remote
+    image: ghcr.io/home-assistant/home-assistant:2026.9.3
+    command:
+      - /bin/sh
+      - -c
+      - |
+        python3 /seed/install-remote.py
+        python3 /seed/install-frontend.py
+        mkdir -p /config/dashboards && cp /seed/regions.yaml /config/dashboards/regions.yaml
+        f=/config/configuration.yaml
+        [ -f $f ] || exit 0
+        grep -q '^lovelace:' $f || cat /seed/lovelace.yaml >> $f
+    env:
+      - { name: REMOTE_HA_VERSION, value: "4.6" }   # custom-components/remote_homeassistant 태그. 지역 HA 와 같은 버전
+      - { name: AUTO_ENTITIES_VERSION, value: "1.16.1" }   # thomasloven/lovelace-auto-entities 태그. lovelace.yaml 의 ?v= 와 맞춥니다
+    volumeMounts:
+      - { name: config, mountPath: /config }
+      - { name: seed, mountPath: /seed }
+```
+{: file="iot/hub/home-assistant/deployment.yaml" }
+
+- **확인:** push 뒤 initContainer 로그에 `auto-entities 1.16.1: 설치함` 이 보이고, 사이드바의 **지역** 을 열면 지역 탭 안에 방 카드와 기록 그래프가 나옵니다.
+
+## 7. 방과 잔재 엔티티 정리
+
+두 가지를 정리합니다. 하나는 중앙 HA 를 온보딩할 때 자동으로 생긴 빈 방(거실·주방·침실 등)입니다. 다른 하나는 지역에서 사라진 엔티티로, 이름에 `_2` 가 붙은 중복본이나 기기 이름을 바꾸기 전의 ID 가 값 없이 중앙 레지스트리에 남은 것입니다. HA 파드 안에서 WebSocket API 로 정리하는 스크립트를 씁니다. 토큰은 3단계의 Secret 에서 읽어 넘기므로 화면에 찍히지 않습니다.
+
+```bash
+# control plane 에서 스크립트 내려받기
+wget https://eu4ng.github.io/assets/scripts/iot/ha-registry.py
+```
+
+<details markdown="1">
+<summary>ha-registry.py 전문</summary>
+
+```python
+# Home Assistant 엔티티·방 레지스트리를 WebSocket API 로 정리합니다. aiohttp 가 있는 HA 파드 안에서 실행합니다.
+#   kubectl -n home-assistant exec -i <HA 파드> -c home-assistant -- env HA_TOKEN=<토큰> python3 - <작업> [--dry-run] < scripts/ha-registry.py
+# 토큰은 대상 HA 의 장기 액세스 토큰(관리자)입니다. HA_TOKEN 이 없으면 입력받습니다. 저장소·파일에 남기지 않습니다.
+#
+# 작업(여러 개 가능):
+#   --enable-platform <플랫폼>   통합이 꺼 둔(disabled_by=integration) 엔티티를 켭니다. 사용자가 끈 것(user)은 두고요. 예) mqtt
+#   --delete-empty-areas         기기·엔티티가 하나도 없는 방을 지웁니다 (중앙 HA 의 온보딩 기본 방)
+#   --prune-remote-orphans       Remote Home Assistant 엔티티 중 원격에서 사라져 상태가 없는 것을 지웁니다 (지역에서 이름을 바꾼 잔재).
+#                                연결된 엔티티가 하나도 없는 지역(지역 HA 가 내려감)은 건너뜁니다
+#   --rename-ieee                엔티티 ID 가 IEEE 주소(0x…)로 남은 mqtt 엔티티를 기기 이름으로 바꿉니다
+#                                예) sensor.0xa4c138f95fdbf3ad_linkquality → sensor.bedroom2_motion_linkquality. 기록은 HA 가 새 ID 로 옮깁니다
+import asyncio, getpass, os, re, sys
+
+import aiohttp
+
+URL = os.environ.get("HA_URL", "ws://127.0.0.1:8123/api/websocket")
+
+
+async def main(args):
+    dry = "--dry-run" in args
+    token = os.environ.get("HA_TOKEN") or getpass.getpass("HA 장기 액세스 토큰: ")
+    async with aiohttp.ClientSession() as s, s.ws_connect(URL) as ws:
+        await ws.receive_json()
+        await ws.send_json({"type": "auth", "access_token": token})
+        if (await ws.receive_json())["type"] != "auth_ok":
+            sys.exit("인증 실패: 토큰을 확인하세요")
+        n = 0
+
+        async def call(**msg):
+            nonlocal n
+            n += 1
+            await ws.send_json({"id": n, **msg})
+            while True:
+                r = await ws.receive_json()
+                if r.get("id") == n:
+                    if not r["success"]:
+                        raise RuntimeError(f"{msg['type']}: {r['error']}")
+                    return r["result"]
+
+        ents = await call(type="config/entity_registry/list")
+        tag = "[dry-run] " if dry else ""
+
+        if "--enable-platform" in args:
+            plat = args[args.index("--enable-platform") + 1]
+            for e in ents:
+                if e["platform"] == plat and e["disabled_by"] == "integration":
+                    print(f"{tag}활성화 {e['entity_id']}")
+                    if not dry:
+                        await call(type="config/entity_registry/update", entity_id=e["entity_id"], disabled_by=None)
+
+        if "--delete-empty-areas" in args:
+            devs = await call(type="config/device_registry/list")
+            used = {e["area_id"] for e in ents} | {d["area_id"] for d in devs}
+            for a in await call(type="config/area_registry/list"):
+                if a["area_id"] not in used:
+                    print(f"{tag}방 삭제 {a['name']} ({a['area_id']})")
+                    if not dry:
+                        await call(type="config/area_registry/delete", area_id=a["area_id"])
+
+        if "--rename-ieee" in args:
+            devs = {d["id"]: d.get("name_by_user") or d.get("name") for d in await call(type="config/device_registry/list")}
+            taken = {e["entity_id"] for e in ents}
+            for e in ents:
+                domain, obj = e["entity_id"].split(".", 1)
+                m = re.match(r"0x[0-9a-f]{16}(_.+)?$", obj)
+                name = devs.get(e["device_id"])
+                if e["platform"] != "mqtt" or not m or not name:
+                    continue
+                new = f"{domain}.{re.sub(r'[^a-z0-9]+', '_', name.lower()).strip('_')}{m.group(1) or ''}"
+                if new in taken:
+                    print(f"건너뜀 {e['entity_id']}: {new} 가 이미 있습니다")
+                    continue
+                print(f"{tag}이름 변경 {e['entity_id']} → {new}")
+                if not dry:
+                    await call(type="config/entity_registry/update", entity_id=e["entity_id"], new_entity_id=new)
+                taken.add(new)
+
+        if "--prune-remote-orphans" in args:
+            # 통합이 더는 제공하지 않는 엔티티는 상태가 없거나, HA 가 자리만 채운 restored 상태(unavailable)로 남습니다
+            live = {st["entity_id"] for st in await call(type="get_states") if not st["attributes"].get("restored")}
+            # 지역 HA 가 내려가 있으면 그 지역 엔티티가 모두 상태 없음으로 보이므로, 살아 있는 엔티티가 하나도 없는 지역은 건너뜁니다
+            up = {e["config_entry_id"] for e in ents if e["platform"] == "remote_homeassistant" and e["entity_id"] in live}
+            for e in ents:
+                if e["platform"] != "remote_homeassistant" or e["entity_id"] in live:
+                    continue
+                if e["config_entry_id"] not in up:
+                    print(f"건너뜀 {e['entity_id']}: 이 지역에 연결된 엔티티가 없습니다(지역 HA 가 내려가 있을 수 있음)")
+                else:
+                    print(f"{tag}엔티티 삭제 {e['entity_id']}")
+                    if not dry:
+                        await call(type="config/entity_registry/remove", entity_id=e["entity_id"])
+
+
+asyncio.run(main(sys.argv[1:]))
+```
+{: file="ha-registry.py" }
+
+</details>
+
+```bash
+# control plane. 중앙 HA: 먼저 --dry-run 으로 대상을 확인하고, 괜찮으면 빼고 다시 실행합니다
+T=$(kubectl -n home-assistant get secret ha-api-token -o jsonpath='{.data.token}' | base64 -d)
+kubectl -n home-assistant exec -i deploy/home-assistant -c home-assistant -- \
+  env HA_TOKEN="$T" python3 - --delete-empty-areas --prune-remote-orphans --dry-run < ha-registry.py
+unset T
+```
+
+지역 HA 에서는 Zigbee2MQTT 가 꺼 둔 채 등록한 진단 엔티티(LQI 등)를 켜고, 페어링 직후 IEEE 주소(`0x…`)로 잡힌 엔티티 ID 를 기기 이름으로 바꿉니다. 이름을 바꾸면 중앙에는 새 ID 가 올라오고 옛 ID 는 잔재가 되므로, 새 엔티티가 보인 뒤 위의 중앙 명령을 한 번 더 실행합니다.
+
+```bash
+# control plane. 지역 HA
+K="kubectl --kubeconfig $HOME/k3s-[SITE].yaml -n home-assistant"
+T=$($K get secret ha-api-token -o jsonpath='{.data.token}' | base64 -d)
+$K exec -i deploy/home-assistant -c home-assistant -- \
+  env HA_TOKEN="$T" python3 - --enable-platform mqtt --rename-ieee --dry-run < ha-registry.py
+unset T
+```
+
+> 지역 HA 가 내려가 있으면 그 지역 엔티티가 모두 상태가 없는 것으로 보입니다. 이때 `--prune-remote-orphans` 가 전부 지우지 않도록, 연결된 엔티티가 하나도 없는 지역은 `건너뜀` 으로 표시하고 두게 했습니다. 이 표시가 나오면 지역 HA 가 다시 뜬 뒤 실행합니다.
+{: .prompt-warning }
+
+- **확인:** `--dry-run` 없이 실행한 출력에 `방 삭제`, `엔티티 삭제`, `활성화`, `이름 변경` 줄이 나오고, 다시 `--dry-run` 으로 실행하면 아무것도 나오지 않습니다.
+
+## 8. 확인
 
 ```bash
 # control plane. 중앙 HA 에 들어온 지역 엔티티
@@ -603,9 +924,17 @@ unset T
 
 </details>
 
+<details markdown="1">
+<summary>기록의 대상 추가 > 기기 에 지역 HA 이름 하나만 보이고 지역의 기기·방이 없을 때</summary>
+
+- **원인:** Remote Home Assistant 는 지역 HA 의 엔티티 상태만 복제합니다. 기기와 방은 가져오지 않고, 지역 HA 전체를 나타내는 기기 하나만 중앙에 만듭니다.
+- **해결:** 방 단위 기록은 6단계의 지역 대시보드에서 봅니다. 기록 화면에서는 **대상 추가 > 엔티티** 를 고르고 `[SITE_CODE]_` 나 지역 이름으로 검색합니다.
+
+</details>
+
 ## 마무리
 
-허브에 기기 없는 중앙 HA 를 두고 Remote Home Assistant 로 지역 HA 의 엔티티를 모아, `ha.[DOMAIN]` 한 곳에서 모든 지역을 보고 제어하게 했습니다. 기기와 자동화는 계속 지역 HA 가 맡으므로 중앙 HA 가 멈추거나 지역의 인터넷이 끊겨도 지역은 그대로 동작하고, 중앙에서는 연결이 끊긴 지역의 엔티티만 빠집니다. 새 지역은 1단계 매니페스트를 그 지역 폴더에 두고 `REMOTES` 에 한 줄을 더해 스크립트를 다시 실행하면 붙습니다.
+허브에 기기 없는 중앙 HA 를 두고 Remote Home Assistant 로 지역 HA 의 엔티티를 모아, `ha.[DOMAIN]` 한 곳에서 모든 지역을 보고 제어하게 했습니다. 기기와 자동화는 계속 지역 HA 가 맡으므로 중앙 HA 가 멈추거나 지역의 인터넷이 끊겨도 지역은 그대로 동작하고, 중앙에서는 연결이 끊긴 지역의 엔티티만 빠집니다. 사이드바의 **지역** 대시보드는 기기 이름 규칙으로 방을 자동으로 나눠, 지역·방별 현재 값과 기록을 따로 손대지 않고 보여 줍니다. 새 지역은 1단계 매니페스트를 그 지역 폴더에 두고 `REMOTES` 에 한 줄을 더해 스크립트를 다시 실행하면 붙습니다.
 
 ## 참고 자료
 
@@ -613,3 +942,7 @@ unset T
 - [Home Assistant - HTTP](https://www.home-assistant.io/integrations/http/)
 - [Home Assistant - Multi-factor authentication](https://www.home-assistant.io/docs/authentication/multi-factor-auth/)
 - [Home Assistant - Authentication API](https://developers.home-assistant.io/docs/auth_api/)
+- [Home Assistant - Dashboards (YAML mode)](https://www.home-assistant.io/dashboards/dashboards/)
+- [Home Assistant - History graph card](https://www.home-assistant.io/dashboards/history-graph/)
+- [Home Assistant - WebSocket API](https://developers.home-assistant.io/docs/api/websocket/)
+- [thomasloven/lovelace-auto-entities](https://github.com/thomasloven/lovelace-auto-entities)
