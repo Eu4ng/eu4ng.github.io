@@ -14,7 +14,8 @@ permalink: /posts/43/
 3. 엣지: Mosquitto 와 Telegraf 베이스
 4. 지역 오버레이 추가와 배포
 5. 테스트 메시지로 확인
-6. 단절 드릴
+6. Grafana 대시보드로 기록 보기
+7. 단절 드릴
 
 ## 사전 준비
 
@@ -627,7 +628,59 @@ kubectl -n timescaledb exec deploy/timescaledb -- psql -U iot -d iot \
 
 - **확인:** 익명 발행은 `Connection error: Connection Refused: not authorised` 로 끝납니다. 조회에 하이퍼테이블 `zigbee2mqtt` 와 행 한 줄이 보이고, `time` 이 발행한 `TS` 와 같고 `site` 가 `[SITE]`, `device` 가 `test_sensor` 입니다. 문자열 `ON` 은 `text`, `true` 는 `boolean` 컬럼으로 들어갑니다.
 
-## 6. 단절 드릴
+## 6. Grafana 대시보드로 기록 보기
+
+SQL 을 쓰지 않고 웹에서 기록을 보도록 Grafana 대시보드를 함께 배포합니다. kube-prometheus-stack 의 Grafana 에는 `grafana_dashboard: "1"` 라벨이 붙은 ConfigMap 을 모든 네임스페이스에서 찾아 불러오는 sidecar 가 기본으로 켜져 있습니다. 그래서 대시보드 JSON 을 `iot/hub/timescaledb/` 폴더에 두고 `configMapGenerator` 로 라벨을 붙이기만 하면 됩니다.
+
+```bash
+# 저장소 루트에서 대시보드 JSON 내려받기
+mkdir -p iot/hub/timescaledb/dashboards
+wget -O iot/hub/timescaledb/dashboards/iot.json https://eu4ng.github.io/assets/files/iot/grafana-dashboard-iot.json
+```
+
+```yaml
+# 중앙 시계열 저장소. 모든 지역의 엣지 Telegraf 가 여기로 씁니다. initdb 스크립트는 PGDATA 가 비어 있는 첫 기동에만 실행됩니다.
+resources:
+  - deployment.yaml
+  - service.yaml
+  - pvc.yaml
+configMapGenerator:
+  - name: timescaledb-initdb
+    files:
+      - initdb/10-iot.sh
+  # Grafana 대시보드. sidecar 가 모든 네임스페이스에서 이 라벨의 ConfigMap 을 찾아 불러옵니다(kube-prometheus-stack 기본값)
+  - name: grafana-dashboard-iot
+    files:
+      - dashboards/iot.json
+    options:
+      labels: { grafana_dashboard: "1" }
+      disableNameSuffixHash: true   # 이름이 바뀌면 sidecar 가 옛 파일을 지우고 새로 불러오는 사이 대시보드가 잠시 사라집니다
+```
+{: file="iot/hub/timescaledb/kustomization.yaml" }
+
+대시보드(uid `iot-records`)는 2단계에서 만든 `TimescaleDB` 데이터소스로 읽기 전용 조회만 합니다. 위쪽의 **지역**, **방**, **기기**, **HA 엔티티** 변수로 범위를 좁히고, 오른쪽 위 시간 범위가 모든 패널에 적용됩니다.
+
+| 패널 | 내용 |
+|---|---|
+| 기기별 최신 값 | 기기마다 항목별 마지막 값(온도, 습도, 재실, 닫힘, 조도, 배터리, LQI, 모델) |
+| 온도, 습도, 조도, 배터리, 링크 품질 | 기기별 시계열 |
+| 재실, 닫힘 (문·창문) | 켜짐/꺼짐 구간 타임라인 |
+| 최근 기록 | `zigbee2mqtt`, `hass` 테이블의 원본 행 최근 200개 |
+| 센서 값 | `hass` 테이블의 숫자 값 시계열 |
+
+> **Home Assistant (hass)** 줄의 패널은 `hass` 테이블을 읽습니다. 이 테이블은 [Home Assistant 글](/posts/48/)에서 Telegraf 입력을 추가한 뒤에 생기므로, 그 전에는 해당 패널에 `relation "hass" does not exist` 오류가 보입니다.
+{: .prompt-info }
+
+```bash
+# 커밋하고 push
+git add iot/hub/timescaledb
+git commit -m "feat(iot): 허브 TimescaleDB 기록을 보는 Grafana 대시보드 추가"
+git push
+```
+
+- **확인:** `kubectl -n timescaledb get cm -l grafana_dashboard=1` 에 `grafana-dashboard-iot` 가 보입니다. Grafana(`http://[HUB_NODE_IP]:30082`)의 **Dashboards** 에 **IoT 기록** 이 생기고, 5단계에서 발행한 `test_sensor` 가 **기기별 최신 값** 표와 **온도**, **습도** 패널에 나타납니다.
+
+## 7. 단절 드릴
 
 허브가 끊긴 상황을 만들어 버퍼가 실제로 동작하는지 봅니다. 엣지 노드에서 파드가 허브 DB 포트로 나가는 패킷을 막고, 그 동안 메시지를 여러 건 발행하고, 도중에 Telegraf 파드까지 지운 뒤, 차단을 풀고 허브에 무엇이 들어왔는지 확인합니다.
 
@@ -673,7 +726,7 @@ kubectl $E -n mosquitto delete pod mq-drill
 
 ## 마무리
 
-엣지의 Mosquitto 와 Telegraf, 허브의 TimescaleDB 와 Grafana 데이터소스를 GitOps 폴더로 배포해, 기기 메시지가 엣지에서 허브로 모이고 허브가 끊긴 동안은 엣지 디스크에 쌓였다가 원래 시각으로 들어가는 파이프라인을 완성했습니다. 지역을 추가할 때는 `iot/clusters/[SITE]/` 아래에 같은 오버레이 두 개를 만들고 시크릿 스크립트를 그 엣지에 실행하면 됩니다. 로컬에도 DB 를 두는 지역은 `telegraf-site` ConfigMap 을 오버레이에서 교체해 두 번째 출력을 넣는 자리를 남겨 두었습니다. 다음 글에서는 이 브로커에 Zigbee2MQTT 를 붙여 실제 Zigbee 기기 데이터를 흘립니다.
+엣지의 Mosquitto 와 Telegraf, 허브의 TimescaleDB 와 Grafana 데이터소스·대시보드를 GitOps 폴더로 배포해, 기기 메시지가 엣지에서 허브로 모이고 허브가 끊긴 동안은 엣지 디스크에 쌓였다가 원래 시각으로 들어가는 파이프라인을 완성했습니다. 지역을 추가할 때는 `iot/clusters/[SITE]/` 아래에 같은 오버레이 두 개를 만들고 시크릿 스크립트를 그 엣지에 실행하면 됩니다. 로컬에도 DB 를 두는 지역은 `telegraf-site` ConfigMap 을 오버레이에서 교체해 두 번째 출력을 넣는 자리를 남겨 두었습니다. 다음 글에서는 이 브로커에 Zigbee2MQTT 를 붙여 실제 Zigbee 기기 데이터를 흘립니다.
 
 ## 참고 자료
 
@@ -685,5 +738,7 @@ kubectl $E -n mosquitto delete pod mq-drill
 - [TimescaleDB - Hypertables](https://docs.timescale.com/use-timescale/latest/hypertables/)
 - [Eclipse Mosquitto - mosquitto.conf](https://mosquitto.org/man/mosquitto-conf-5.html)
 - [Grafana - Provision data sources](https://grafana.com/docs/grafana/latest/administration/provisioning/#data-sources)
+- [Grafana Helm chart - Sidecar for dashboards](https://github.com/grafana/helm-charts/tree/main/charts/grafana#sidecar-for-dashboards)
+- [Grafana - PostgreSQL data source (매크로와 템플릿 변수)](https://grafana.com/docs/grafana/latest/datasources/postgres/)
 - [k3s - Networking (ServiceLB)](https://docs.k3s.io/networking/networking-services)
 - [Kustomize - configMapGenerator](https://kubectl.docs.kubernetes.io/references/kustomize/kustomization/configmapgenerator/)

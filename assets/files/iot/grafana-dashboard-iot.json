@@ -1,0 +1,701 @@
+{
+  "uid": "iot-records",
+  "title": "IoT 기록",
+  "tags": [
+    "iot",
+    "timescaledb"
+  ],
+  "timezone": "Asia/Seoul",
+  "editable": true,
+  "graphTooltip": 1,
+  "refresh": "1m",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "schemaVersion": 39,
+  "version": 1,
+  "templating": {
+    "list": [
+      {
+        "type": "query",
+        "name": "site",
+        "label": "지역",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "timescaledb"
+        },
+        "query": "SELECT DISTINCT site FROM zigbee2mqtt WHERE $__timeFilter(time) AND site IS NOT NULL",
+        "definition": "SELECT DISTINCT site FROM zigbee2mqtt WHERE $__timeFilter(time) AND site IS NOT NULL",
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": "'__all__'",
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      },
+      {
+        "type": "query",
+        "name": "room",
+        "label": "방",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "timescaledb"
+        },
+        "query": "SELECT DISTINCT room FROM zigbee2mqtt WHERE $__timeFilter(time) AND room IS NOT NULL AND site IN ($site)",
+        "definition": "SELECT DISTINCT room FROM zigbee2mqtt WHERE $__timeFilter(time) AND room IS NOT NULL AND site IN ($site)",
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": "'__all__'",
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      },
+      {
+        "type": "query",
+        "name": "device",
+        "label": "기기",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "timescaledb"
+        },
+        "query": "SELECT DISTINCT device FROM zigbee2mqtt WHERE $__timeFilter(time) AND site IN ($site) AND ('__all__' IN ($room) OR room IN ($room))",
+        "definition": "SELECT DISTINCT device FROM zigbee2mqtt WHERE $__timeFilter(time) AND site IN ($site) AND ('__all__' IN ($room) OR room IN ($room))",
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": "'__all__'",
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      },
+      {
+        "type": "query",
+        "name": "entity",
+        "label": "HA 엔티티",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "timescaledb"
+        },
+        "query": "SELECT DISTINCT device FROM hass WHERE $__timeFilter(time) AND value IS NOT NULL AND site IN ($site)",
+        "definition": "SELECT DISTINCT device FROM hass WHERE $__timeFilter(time) AND value IS NOT NULL AND site IN ($site)",
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": "'__all__'",
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Zigbee 기기 (zigbee2mqtt)",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [],
+      "id": 1
+    },
+    {
+      "type": "table",
+      "title": "기기별 최신 값",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "timescaledb"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT max(time) AS \"마지막 기록\", site AS \"지역\", room AS \"방\", device AS \"기기\",\n  last(temperature, time) FILTER (WHERE temperature IS NOT NULL) AS \"온도\",\n  last(humidity, time) FILTER (WHERE humidity IS NOT NULL) AS \"습도\",\n  last(presence, time) FILTER (WHERE presence IS NOT NULL) AS \"재실\",\n  last(contact, time) FILTER (WHERE contact IS NOT NULL) AS \"닫힘\",\n  last(illuminance, time) FILTER (WHERE illuminance IS NOT NULL) AS \"조도\",\n  last(battery, time) FILTER (WHERE battery IS NOT NULL) AS \"배터리\",\n  last(linkquality, time) FILTER (WHERE linkquality IS NOT NULL) AS \"LQI\",\n  last(model, time) FILTER (WHERE model IS NOT NULL) AS \"모델\"\nFROM zigbee2mqtt\nWHERE $__timeFilter(time) AND site IN ($site) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device))\nGROUP BY site, room, device\nORDER BY site, room, device"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "filterable": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "description": "선택한 기간에서 기기마다 항목별 마지막 값입니다.",
+      "id": 2
+    },
+    {
+      "type": "timeseries",
+      "title": "온도",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "timescaledb"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 9,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(time, $__interval), device AS metric, avg(temperature) AS value\nFROM zigbee2mqtt\nWHERE $__timeFilter(time) AND temperature IS NOT NULL AND site IN ($site) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device))\nGROUP BY 1, 2\nORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "celsius",
+          "custom": {
+            "spanNulls": true,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 3
+    },
+    {
+      "type": "timeseries",
+      "title": "습도",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "timescaledb"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 9,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(time, $__interval), device AS metric, avg(humidity) AS value\nFROM zigbee2mqtt\nWHERE $__timeFilter(time) AND humidity IS NOT NULL AND site IN ($site) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device))\nGROUP BY 1, 2\nORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "humidity",
+          "custom": {
+            "spanNulls": true,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 4
+    },
+    {
+      "type": "state-timeline",
+      "title": "재실",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "timescaledb"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 17,
+        "w": 12,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT time, device AS metric, CASE WHEN presence THEN 1 ELSE 0 END AS value\nFROM zigbee2mqtt\nWHERE $__timeFilter(time) AND presence IS NOT NULL AND site IN ($site) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device))\nORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": "재실",
+                  "color": "green",
+                  "index": 0
+                },
+                "0": {
+                  "text": "없음",
+                  "color": "transparent",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "transparent",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "mergeValues": true,
+        "showValue": "never",
+        "rowHeight": 0.8,
+        "legend": {
+          "showLegend": false
+        }
+      },
+      "id": 5
+    },
+    {
+      "type": "state-timeline",
+      "title": "닫힘 (문·창문)",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "timescaledb"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 17,
+        "w": 12,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT time, device AS metric, CASE WHEN contact THEN 1 ELSE 0 END AS value\nFROM zigbee2mqtt\nWHERE $__timeFilter(time) AND contact IS NOT NULL AND site IN ($site) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device))\nORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": "닫힘",
+                  "color": "green",
+                  "index": 0
+                },
+                "0": {
+                  "text": "열림",
+                  "color": "transparent",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "transparent",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "mergeValues": true,
+        "showValue": "never",
+        "rowHeight": 0.8,
+        "legend": {
+          "showLegend": false
+        }
+      },
+      "id": 6
+    },
+    {
+      "type": "timeseries",
+      "title": "조도",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "timescaledb"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 23,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(time, $__interval), device AS metric, avg(illuminance) AS value\nFROM zigbee2mqtt\nWHERE $__timeFilter(time) AND illuminance IS NOT NULL AND site IN ($site) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device))\nGROUP BY 1, 2\nORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "lux",
+          "custom": {
+            "spanNulls": true,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 7
+    },
+    {
+      "type": "timeseries",
+      "title": "배터리",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "timescaledb"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 23,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(time, $__interval), device AS metric, avg(battery) AS value\nFROM zigbee2mqtt\nWHERE $__timeFilter(time) AND battery IS NOT NULL AND site IN ($site) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device))\nGROUP BY 1, 2\nORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "custom": {
+            "spanNulls": true,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 8
+    },
+    {
+      "type": "timeseries",
+      "title": "링크 품질 (LQI)",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "timescaledb"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 23,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(time, $__interval), device AS metric, avg(linkquality) AS value\nFROM zigbee2mqtt\nWHERE $__timeFilter(time) AND linkquality IS NOT NULL AND site IN ($site) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device))\nGROUP BY 1, 2\nORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "spanNulls": true,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 9
+    },
+    {
+      "type": "table",
+      "title": "최근 기록",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "timescaledb"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 31,
+        "w": 24,
+        "h": 10
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT time, site, room, device, temperature, humidity, presence, contact, illuminance, battery, linkquality, state\nFROM zigbee2mqtt\nWHERE $__timeFilter(time) AND site IN ($site) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device))\nORDER BY time DESC\nLIMIT 200"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "filterable": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "description": "선택한 기간의 원본 행 최근 200개입니다.",
+      "id": 10
+    },
+    {
+      "type": "row",
+      "title": "Home Assistant (hass)",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 41,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [],
+      "id": 11
+    },
+    {
+      "type": "timeseries",
+      "title": "센서 값",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "timescaledb"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 42,
+        "w": 24,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(time, $__interval), device AS metric, avg(value) AS value\nFROM hass\nWHERE $__timeFilter(time) AND value IS NOT NULL AND site IN ($site) AND ('__all__' IN ($entity) OR device IN ($entity))\nGROUP BY 1, 2\nORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "spanNulls": true,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 12
+    },
+    {
+      "type": "table",
+      "title": "최근 기록",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "timescaledb"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 51,
+        "w": 24,
+        "h": 10
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT time, site, domain, device, value, value_text\nFROM hass\nWHERE $__timeFilter(time) AND site IN ($site) AND ('__all__' IN ($entity) OR device IN ($entity))\nORDER BY time DESC\nLIMIT 200"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "filterable": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "description": "선택한 기간의 원본 행 최근 200개입니다.",
+      "id": 13
+    }
+  ]
+}
