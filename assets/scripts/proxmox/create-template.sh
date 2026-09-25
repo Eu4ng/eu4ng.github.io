@@ -84,7 +84,7 @@ fi
 # ---------- 5. 템플릿 VM ----------
 log "템플릿 $TEMPLATE_ID 생성"
 qm create "$TEMPLATE_ID" --name "$TEMPLATE_NAME" --ostype l26 \
-  --cpu host --cores 2 --memory 2048 --balloon 0 --agent 1 \
+  --cpu host --cores 2 --memory 2048 --agent 1 \
   --net0 "virtio,bridge=$BRIDGE" --scsihw virtio-scsi-single \
   --serial0 socket --vga serial0
 qm set "$TEMPLATE_ID" --scsi0 "$STORAGE:0,import-from=$IMAGE_PATH,iothread=1,discard=on,ssd=1"

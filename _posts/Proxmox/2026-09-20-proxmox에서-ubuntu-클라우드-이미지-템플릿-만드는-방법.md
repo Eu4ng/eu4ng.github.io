@@ -135,7 +135,7 @@ fi
 # ---------- 5. 템플릿 VM ----------
 log "템플릿 $TEMPLATE_ID 생성"
 qm create "$TEMPLATE_ID" --name "$TEMPLATE_NAME" --ostype l26 \
-  --cpu host --cores 2 --memory 2048 --balloon 0 --agent 1 \
+  --cpu host --cores 2 --memory 2048 --agent 1 \
   --net0 "virtio,bridge=$BRIDGE" --scsihw virtio-scsi-single \
   --serial0 socket --vga serial0
 qm set "$TEMPLATE_ID" --scsi0 "$STORAGE:0,import-from=$IMAGE_PATH,iothread=1,discard=on,ssd=1"
@@ -188,6 +188,8 @@ bash create-template.sh
 
 `ONBOOT`을 `1`로 두면 이 템플릿을 복제한 모든 VM이 Proxmox 호스트가 부팅할 때 함께 켜집니다. 특정 VM만 끄려면 `qm set [VM_ID] --onboot 0`을 실행합니다.
 
+메모리 balloon 장치는 Proxmox 기본값대로 켜 둡니다. 최소 메모리를 따로 정하지 않으므로 VM 메모리가 줄어들지는 않고, 게스트가 비운 메모리만 호스트로 돌려줍니다(free page reporting). `--balloon 0`으로 장치를 끄면 게스트가 한 번 쓴 메모리가 VM을 끌 때까지 호스트에 잡혀 있어, 게스트 안은 한가해도 호스트 메모리가 가득 찹니다.
+
 > 이 템플릿을 복제한 VM은 Proxmox의 `authorized_keys`에 있는 모든 키와 Proxmox 호스트의 root 키로 접속할 수 있습니다. 키는 템플릿을 만든 시점의 값으로 고정되므로, `authorized_keys`를 바꿨다면 템플릿을 지우고 다시 만듭니다.
 {: .prompt-warning }
 
@@ -222,6 +224,20 @@ ssh ubuntu@[VM_IP]
 ```bash
 # 템플릿 삭제
 qm destroy 9000 --purge
+```
+
+</details>
+
+<details markdown="1">
+<summary>VM 안에서는 메모리가 비어 있는데 호스트에서는 VM 메모리가 전부 사용 중으로 보임</summary>
+
+- **원인:** `balloon: 0`으로 만든 VM이라 게스트가 비운 메모리를 호스트에 돌려주지 못함 (`qm config [VM_ID]`에 `balloon: 0` 표시)
+- **해결:** balloon 최소값을 VM 메모리와 같게 지정하고 VM을 껐다 켬. 장치가 새로 붙어야 하므로 게스트 안에서 재부팅하는 것으로는 반영되지 않음
+
+```bash
+# balloon 장치 켜기 (최소값 = VM 메모리, MiB)
+qm set [VM_ID] --balloon [MEMORY_MB]
+qm shutdown [VM_ID] && qm start [VM_ID]
 ```
 
 </details>
