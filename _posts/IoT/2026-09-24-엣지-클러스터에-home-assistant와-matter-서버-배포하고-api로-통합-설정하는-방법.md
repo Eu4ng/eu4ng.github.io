@@ -589,7 +589,7 @@ bash setup-home-assistant.sh http://[EDGE_IP]:8123
 
 | 키 | 예 | 내용 |
 |---|---|---|
-| `device` | `bedroom2-air-quality` | HA 기기 이름. Zigbee 기기처럼 `[방]-[용도]` 로 지으면 `room`, `purpose` 가 채워집니다 |
+| `device` | `bedroom2-air-quality` | HA 기기 이름. Zigbee 기기처럼 `[방]-[종류]` 로 지어야 기록됩니다 |
 | `property` | `pm25` | 엔티티 ID 에서 기기 이름을 뗀 측정 항목 |
 | `entity` | `sensor.bedroom2_air_quality_pm25` | 엔티티 ID |
 | `node` | `CFEE358179DBE7B6-0000000000000001` | 패브릭 ID 와 노드 ID. 기기를 다시 커미셔닝하면 바뀝니다 |
@@ -630,7 +630,7 @@ git commit -m "feat(iot): Telegraf 에 Home Assistant 재발행(Matter 기기) �
 git push
 ```
 
-Matter 기기를 하나 등록한 뒤 **개발자 도구** > **상태** 에서 그 기기의 센서 엔티티 상태를 임의 값으로 바꿔 보면, 실제 값이 바뀔 때까지 기다리지 않고 경로 전체를 확인할 수 있습니다.
+Telegraf 는 기기 이름이 `[방]-[종류]` 규칙(영문 소문자·숫자)에 맞는 값만 기록하므로, 등록 직후의 기본 이름(`Air Quality Sensor` 등)으로 보낸 값은 DB 에 남지 않습니다. Matter 기기를 하나 등록하고 이름을 규칙대로 바꾼 뒤 **개발자 도구** > **상태** 에서 그 기기의 센서 엔티티 상태를 임의 값으로 바꿔 보면, 실제 값이 바뀔 때까지 기다리지 않고 경로 전체를 확인할 수 있습니다.
 
 - **확인:** 허브에서 `kubectl -n timescaledb exec deploy/timescaledb -- psql -U iot -d iot -c "select time, site, device, property, value, value_text, hw_id, node from readings where protocol = 'matter' order by time desc limit 5;"` 에 `site` 가 `[SITE]`, `device` 가 HA 기기 이름, `property` 가 측정 항목인 행이 보이고, 숫자 상태는 `value`, `on` 은 `value` 1 과 `value_text` `on` 으로 들어갑니다. `hw_id` 에는 시리얼, `node` 에는 노드 ID 가 들어갑니다. Telegraf 가 다시 붙을 때 브로커가 유지 메시지를 다시 보내므로 재시작 직후 각 엔티티의 마지막 값이 한 번 더 들어올 수 있습니다.
 

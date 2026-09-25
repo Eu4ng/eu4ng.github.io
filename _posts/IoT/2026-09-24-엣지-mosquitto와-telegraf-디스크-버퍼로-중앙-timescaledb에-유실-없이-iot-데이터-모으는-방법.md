@@ -403,7 +403,8 @@ Telegraf 설정 하나를 모든 지역이 공유합니다. 지역 이름과 허
 
 # 모든 기기 값은 테이블 readings 하나에 "행 하나 = 기기 하나의 속성 하나" 로 들어갑니다.
 # 수집기(Zigbee2MQTT, Home Assistant …)마다 다른 메시지 모양은 입력과 아래 starlark 에서만 흡수하므로, 수집기를 바꿔도 입력 블록만 새로 쓰면 됩니다.
-#   태그(컬럼): site, protocol(zigbee, matter …), source(z2m, hass …), device, room, purpose, property, hw_id, model, vendor, (Matter) node, entity
+#   태그(컬럼): site, protocol(zigbee, matter …), source(z2m, hass …), device, property, hw_id, model, vendor, (Matter) node, entity
+#   방은 따로 두지 않고 기기 이름 <방>-<종류>[번호] 의 첫 - 앞을 조회할 때 자릅니다 (split_part(device, '-', 1))
 #   필드(컬럼): value(숫자. on/off·true/false 는 1/0), value_text(문자열 원문)
 
 # Zigbee2MQTT 기기 메시지. 한 단계(+)만 구독하면 bridge/#, <기기>/set|get|availability 는 자연히 빠집니다 (friendly_name 에 / 를 쓰지 않는 전제).
@@ -443,6 +444,14 @@ Telegraf 설정 하나를 모든 지역이 공유합니다. 지역 이름과 허
   source = '''
 HW_TAGS = {"device_ieeeAddr": "hw_id", "serial": "hw_id", "device_model": "model", "device_manufacturerName": "vendor"}
 ON_OFF = {"on": 1.0, "off": 0.0, "true": 1.0, "false": 0.0}
+NAME_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789-"
+
+def valid_name(name):
+    # <방>-<종류>[번호] 영문 소문자·숫자. 페어링 직후 이름(0x…)과 HA 기본 이름(공백·대문자), 교체한 옛 기기(retired-…)는 기록하지 않습니다
+    i = name.find("-")
+    if i <= 0 or name.endswith("-") or name.startswith("retired-"):
+        return False
+    return all([c in NAME_CHARS for c in name.elems()])
 
 def is_number(s):
     if not s or s.count(".") > 1:
@@ -455,8 +464,8 @@ def apply(metric):
     for k, v in metric.tags.items():
         if v != "":
             tags[HW_TAGS.get(k, k)] = v
-    if "device" not in tags:
-        return []                     # 기기 이름이 없는 메시지(옛 형식의 유지 메시지 등)는 버립니다
+    if not valid_name(tags.get("device", "")):
+        return []                     # 이름이 없거나(옛 형식의 유지 메시지 등) 이름 규칙에 맞지 않는 기기는 버립니다
     prop = tags.pop("property", None)
     out = []
     for k, v in metric.fields.items():
@@ -483,14 +492,6 @@ def apply(metric):
         out.append(m)
     return out
 '''
-
-# 기기 이름 <방>-<용도> 를 첫 - 에서 잘라 room, purpose 컬럼으로. 규칙에 맞지 않는 이름은 두 컬럼이 비어 있을 뿐 그대로 저장됩니다
-[[processors.regex]]
-  namepass = ["readings"]
-  order = 2
-  [[processors.regex.tags]]
-    key = "device"
-    pattern = '^(?P<room>[^-]+)-(?P<purpose>.+)$'
 
 # 허브 TimescaleDB. 태그를 외래 키 테이블로 빼지 않고 컬럼으로 두어 지역 간 병합과 중복 제거가 쉽게 합니다.
 # 압축은 시계열 하나(site, device, property)끼리 묶어 값이 비슷한 것끼리 모이게 합니다.
@@ -603,11 +604,13 @@ spec:
 | `site` | `daejeon` | 지역 |
 | `protocol` | `zigbee`, `matter` | 기기 통신 방식 |
 | `source` | `z2m`, `hass` | 수집기. 수집기를 바꿔도 `protocol` 은 그대로입니다 |
-| `device`, `room`, `purpose` | `bedroom2-motion`, `bedroom2`, `motion` | 기기 이름과 이름을 첫 `-` 에서 자른 값 |
+| `device` | `bedroom2-motion` | 기기 이름. 방은 컬럼으로 두지 않고 조회할 때 첫 `-` 앞을 자릅니다(`split_part(device, '-', 1)`) |
 | `property` | `temperature`, `presence` | 측정 항목 |
 | `value` | `26.3`, `1` | 숫자 값. `on`/`off`, `true`/`false` 는 1/0 |
 | `value_text` | `ON`, `false` | 문자열 원문 |
 | `hw_id`, `model`, `vendor` | `0xa4c138f95fdbf3ad`, `ZG-204ZV` | 실물 기기. Zigbee 는 IEEE 주소, Matter 는 시리얼 |
+
+기기 이름이 `<방>-<종류>[번호]` 규칙(영문 소문자·숫자)에 맞지 않으면 starlark 가 그 메시지를 버립니다. 페어링 직후 Zigbee 기기의 `0x…` 이름, 이름을 정하기 전 Matter 기기의 HA 기본 이름, 교체한 옛 기기의 `retired-…` 이름이 여기에 걸리므로 기기를 추가하면 바로 이름을 붙입니다.
 
 압축은 `site, device, property` 가 같은 행끼리 묶습니다. 묶음 하나가 시계열 하나(예: 한 기기의 온도)가 되어 값이 비슷한 것끼리 모이므로 압축이 잘 되고, 조회할 때도 필요한 묶음만 풉니다.
 
