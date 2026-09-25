@@ -626,6 +626,9 @@ Matter 기기를 하나 등록한 뒤 **개발자 도구** > **상태** 에서 �
 
 - **확인:** 허브에서 `kubectl -n timescaledb exec deploy/timescaledb -- psql -U iot -d iot -c "select time, site, domain, device, value, value_text from hass order by time desc limit 5;"` 에 `site` 가 `[SITE]`, `device` 가 엔티티 이름인 행이 보이고, 숫자 상태는 `value`, `on` 은 `value` 1 과 `value_text` `on` 으로 들어갑니다. Telegraf 가 다시 붙을 때 브로커가 유지 메시지를 다시 보내므로 재시작 직후 각 엔티티의 마지막 값이 한 번 더 들어올 수 있습니다.
 
+> 토픽과 DB 의 `device` 는 엔티티 ID 입니다. 한국어 HA 는 기기 이름을 바꾸고 방을 지정할 때 엔티티 ID 를 `방 + 기기 이름 + 엔티티 이름` 의 로마자로 다시 만듭니다(`sensor.cimsil2_bedroom2_air_quality_ondo`). 기기를 등록하고 이름과 방을 정한 직후 [중앙 HA 글](/posts/49/)의 `ha-registry.py --rename-matter` 로 `sensor.bedroom2_air_quality_temperature` 처럼 영문 ID 로 맞춥니다. 화면의 표시 이름은 한국어 그대로입니다.
+{: .prompt-tip }
+
 ## 5. 밖에서 열기와 2단계 인증
 
 지역 서비스는 `<서비스>-<지역약자>.[DOMAIN]` 으로 엽니다. 무료 Cloudflare 인증서가 한 단계 하위 도메인만 덮기 때문에 `ha.[SITE].[DOMAIN]` 같은 계층 대신 평면 이름을 씁니다. 엣지 노드는 허브와 같은 LAN 에 있으므로 허브 Traefik 이 엣지 노드 주소로 중계합니다. Zigbee2MQTT 와 Matter 대시보드는 다른 관리 화면처럼 밖에서 Google 로그인(oauth2-proxy)을 거치게 하고, HA 는 휴대폰 앱이 로그인 페이지 리디렉트를 처리하지 못하므로 oauth2-proxy 없이 HA 자체 로그인과 2단계 인증으로 보호합니다.
