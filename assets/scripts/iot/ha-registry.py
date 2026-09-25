@@ -9,6 +9,8 @@
 #                                연결된 엔티티가 하나도 없는 지역(지역 HA 가 내려감)은 건너뜁니다
 #   --rename-ieee                엔티티 ID 가 IEEE 주소(0x…)로 남은 mqtt 엔티티를 기기 이름으로 바꿉니다
 #                                예) sensor.0xa4c138f95fdbf3ad_linkquality → sensor.bedroom2_motion_linkquality. 기록은 HA 가 새 ID 로 옮깁니다
+#   --rename-matter              matter 엔티티 ID 를 <기기 이름>_<측정 항목(device_class 등)> 영문으로 바꿉니다. 표시 이름(온도 등)은 그대로입니다
+#                                예) sensor.cimsil2_bedroom2_air_quality_ondo → sensor.bedroom2_air_quality_temperature. 기록은 HA 가 새 ID 로 옮깁니다
 import asyncio, getpass, os, re, sys
 
 import aiohttp
@@ -73,6 +75,35 @@ async def main(args):
                 print(f"{tag}이름 변경 {e['entity_id']} → {new}")
                 if not dry:
                     await call(type="config/entity_registry/update", entity_id=e["entity_id"], new_entity_id=new)
+                taken.add(new)
+
+        if "--rename-matter" in args:
+            # 한국어 HA 는 엔티티 이름(온도)을 로마자(ondo)로, 방 이름까지 붙여 ID 를 만듭니다. 방은 기기 이름(<방>-<종류>)에 이미 있습니다
+            devs = {d["id"]: d.get("name_by_user") or d.get("name") for d in await call(type="config/device_registry/list")}
+            ids = [e["entity_id"] for e in ents if e["platform"] == "matter"]
+            full = await call(type="config/entity_registry/get_entries", entity_ids=ids) if ids else {}
+            taken = {e["entity_id"] for e in ents}
+            slug = lambda s: re.sub(r"[^a-z0-9]+", "_", s.lower()).strip("_")
+            for eid, e in full.items():
+                name = devs.get(e and e["device_id"])
+                if not name:
+                    continue
+                # 측정 항목: device_class(enum 같은 일반 값 제외) → translation_key → 영문 원래 이름
+                dc = e.get("original_device_class")
+                on = e.get("original_name") or ""
+                what = (dc if dc and dc != "enum" else None) or e.get("translation_key") or (slug(on) if on.isascii() else "")
+                if not what:
+                    print(f"건너뜀 {eid}: 측정 항목을 알 수 없습니다")
+                    continue
+                new = f"{eid.split('.', 1)[0]}.{slug(name)}_{what}"
+                if new == eid:
+                    continue
+                if new in taken:
+                    print(f"건너뜀 {eid}: {new} 가 이미 있습니다")
+                    continue
+                print(f"{tag}이름 변경 {eid} → {new}")
+                if not dry:
+                    await call(type="config/entity_registry/update", entity_id=eid, new_entity_id=new)
                 taken.add(new)
 
         if "--prune-remote-orphans" in args:

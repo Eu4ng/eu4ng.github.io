@@ -782,6 +782,8 @@ wget https://eu4ng.github.io/assets/scripts/iot/ha-registry.py
 #                                연결된 엔티티가 하나도 없는 지역(지역 HA 가 내려감)은 건너뜁니다
 #   --rename-ieee                엔티티 ID 가 IEEE 주소(0x…)로 남은 mqtt 엔티티를 기기 이름으로 바꿉니다
 #                                예) sensor.0xa4c138f95fdbf3ad_linkquality → sensor.bedroom2_motion_linkquality. 기록은 HA 가 새 ID 로 옮깁니다
+#   --rename-matter              matter 엔티티 ID 를 <기기 이름>_<측정 항목(device_class 등)> 영문으로 바꿉니다. 표시 이름(온도 등)은 그대로입니다
+#                                예) sensor.cimsil2_bedroom2_air_quality_ondo → sensor.bedroom2_air_quality_temperature. 기록은 HA 가 새 ID 로 옮깁니다
 import asyncio, getpass, os, re, sys
 
 import aiohttp
@@ -848,6 +850,35 @@ async def main(args):
                     await call(type="config/entity_registry/update", entity_id=e["entity_id"], new_entity_id=new)
                 taken.add(new)
 
+        if "--rename-matter" in args:
+            # 한국어 HA 는 엔티티 이름(온도)을 로마자(ondo)로, 방 이름까지 붙여 ID 를 만듭니다. 방은 기기 이름(<방>-<종류>)에 이미 있습니다
+            devs = {d["id"]: d.get("name_by_user") or d.get("name") for d in await call(type="config/device_registry/list")}
+            ids = [e["entity_id"] for e in ents if e["platform"] == "matter"]
+            full = await call(type="config/entity_registry/get_entries", entity_ids=ids) if ids else {}
+            taken = {e["entity_id"] for e in ents}
+            slug = lambda s: re.sub(r"[^a-z0-9]+", "_", s.lower()).strip("_")
+            for eid, e in full.items():
+                name = devs.get(e and e["device_id"])
+                if not name:
+                    continue
+                # 측정 항목: device_class(enum 같은 일반 값 제외) → translation_key → 영문 원래 이름
+                dc = e.get("original_device_class")
+                on = e.get("original_name") or ""
+                what = (dc if dc and dc != "enum" else None) or e.get("translation_key") or (slug(on) if on.isascii() else "")
+                if not what:
+                    print(f"건너뜀 {eid}: 측정 항목을 알 수 없습니다")
+                    continue
+                new = f"{eid.split('.', 1)[0]}.{slug(name)}_{what}"
+                if new == eid:
+                    continue
+                if new in taken:
+                    print(f"건너뜀 {eid}: {new} 가 이미 있습니다")
+                    continue
+                print(f"{tag}이름 변경 {eid} → {new}")
+                if not dry:
+                    await call(type="config/entity_registry/update", entity_id=eid, new_entity_id=new)
+                taken.add(new)
+
         if "--prune-remote-orphans" in args:
             # 통합이 더는 제공하지 않는 엔티티는 상태가 없거나, HA 가 자리만 채운 restored 상태(unavailable)로 남습니다
             live = {st["entity_id"] for st in await call(type="get_states") if not st["attributes"].get("restored")}
@@ -878,14 +909,14 @@ kubectl -n home-assistant exec -i deploy/home-assistant -c home-assistant -- \
 unset T
 ```
 
-지역 HA 에서는 Zigbee2MQTT 가 꺼 둔 채 등록한 진단 엔티티(LQI 등)를 켜고, 페어링 직후 IEEE 주소(`0x…`)로 잡힌 엔티티 ID 를 기기 이름으로 바꿉니다. 이름을 바꾸면 중앙에는 새 ID 가 올라오고 옛 ID 는 잔재가 되므로, 새 엔티티가 보인 뒤 위의 중앙 명령을 한 번 더 실행합니다.
+지역 HA 에서는 Zigbee2MQTT 가 꺼 둔 채 등록한 진단 엔티티(LQI 등)를 켜고, 페어링 직후 IEEE 주소(`0x…`)로 잡힌 엔티티 ID 를 기기 이름으로 바꿉니다. Matter 기기는 한국어 HA 가 엔티티 이름(`온도`)을 로마자로 옮기고 방 이름까지 붙여 `sensor.cimsil2_bedroom2_air_quality_ondo` 같은 ID 를 만드므로, `--rename-matter` 로 `sensor.bedroom2_air_quality_temperature` 처럼 기기 이름과 측정 항목의 영문으로 바꿉니다. 표시 이름은 한국어 그대로이고, 허브 DB 의 `hass.device` 에는 바꾼 ID 가 들어갑니다. 이름을 바꾸면 중앙에는 새 ID 가 올라오고 옛 ID 는 잔재가 되므로, 새 엔티티가 보인 뒤 위의 중앙 명령을 한 번 더 실행합니다.
 
 ```bash
 # control plane. 지역 HA
 K="kubectl --kubeconfig $HOME/k3s-[SITE].yaml -n home-assistant"
 T=$($K get secret ha-api-token -o jsonpath='{.data.token}' | base64 -d)
 $K exec -i deploy/home-assistant -c home-assistant -- \
-  env HA_TOKEN="$T" python3 - --enable-platform mqtt --rename-ieee --dry-run < ha-registry.py
+  env HA_TOKEN="$T" python3 - --enable-platform mqtt --rename-ieee --rename-matter --dry-run < ha-registry.py
 unset T
 ```
 
