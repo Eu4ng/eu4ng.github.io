@@ -634,7 +634,7 @@ Matter 기기를 하나 등록한 뒤 **개발자 도구** > **상태** 에서 �
 
 - **확인:** 허브에서 `kubectl -n timescaledb exec deploy/timescaledb -- psql -U iot -d iot -c "select time, site, device, property, value, value_text, hw_id, node from readings where protocol = 'matter' order by time desc limit 5;"` 에 `site` 가 `[SITE]`, `device` 가 HA 기기 이름, `property` 가 측정 항목인 행이 보이고, 숫자 상태는 `value`, `on` 은 `value` 1 과 `value_text` `on` 으로 들어갑니다. `hw_id` 에는 시리얼, `node` 에는 노드 ID 가 들어갑니다. Telegraf 가 다시 붙을 때 브로커가 유지 메시지를 다시 보내므로 재시작 직후 각 엔티티의 마지막 값이 한 번 더 들어올 수 있습니다.
 
-> `property` 는 엔티티 ID 에서 기기 이름을 떼어 만듭니다. 한국어 HA 는 기기 이름을 바꾸고 방을 지정할 때 엔티티 ID 를 `방 + 기기 이름 + 엔티티 이름` 의 로마자로 다시 만듭니다(`sensor.cimsil2_bedroom2_air_quality_ondo`). 기기를 등록하고 이름과 방을 정한 직후 [중앙 HA 글](/posts/49/)의 `ha-registry.py --rename-matter` 로 `sensor.bedroom2_air_quality_temperature` 처럼 영문 ID 로 맞춰야 `property` 가 `temperature` 처럼 깔끔하게 남습니다. 화면의 표시 이름은 한국어 그대로입니다. 엔티티 ID 가 바뀌어도 `hw_id`(시리얼)는 그대로이므로, 옛 ID 로 쌓인 기록도 `hw_id` 로 같은 기기에 묶어 볼 수 있습니다.
+> `property` 는 엔티티 ID 에서 기기 이름을 떼어 만듭니다. 한국어 HA 는 기기 이름을 바꾸고 방을 지정할 때 엔티티 ID 를 `방 + 기기 이름 + 엔티티 이름` 의 로마자로 다시 만듭니다(`sensor.cimsil2_bedroom2_air_quality_ondo`). 기기를 등록하고 이름을 정한 직후 [중앙 HA 글](/posts/49/)의 `ha-registry.py --rename-matter --assign-areas` 를 실행해 `sensor.bedroom2_air_quality_temperature` 처럼 영문 ID 로 맞추고 영역도 이름의 방으로 지정합니다. 영문 ID 여야 `property` 가 `temperature` 처럼 깔끔하게 남습니다. 화면의 표시 이름은 한국어 그대로입니다. 엔티티 ID 가 바뀌어도 `hw_id`(시리얼)는 그대로이므로, 옛 ID 로 쌓인 기록도 `hw_id` 로 같은 기기에 묶어 볼 수 있습니다.
 {: .prompt-tip }
 
 ## 5. 밖에서 열기와 2단계 인증
