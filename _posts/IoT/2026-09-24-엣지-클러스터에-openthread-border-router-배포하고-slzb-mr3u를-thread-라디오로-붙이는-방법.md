@@ -305,6 +305,20 @@ otbr-agent exited with code 1
 
 </details>
 
+<details markdown="1">
+<summary>Android HA 앱으로 Matter 기기를 추가할 때 "Thread 보더 라우터가 감지되지 않음"</summary>
+
+```bash
+# 내 PC: 서버 쪽은 정상인지 (리더이고 HA 망 이름이 보이면 정상)
+curl -s http://[EDGE_IP]:8081/node/state
+curl -s http://[EDGE_IP]:8081/node/network-name
+```
+
+- **원인:** 휴대폰에 HA Thread 망의 자격 증명이 없습니다. Android 는 Google Play 서비스에 자격 증명이 저장된 Thread 망의 보더 라우터만 인식하므로, OTBR 이 LAN 에 정상적으로 광고되고 있어도 이 메시지가 뜹니다. 같은 LAN 에 다른 제조사 보더 라우터(SmartThings Station 등)가 있어도 망이 다르면 인식하지 않습니다.
+- **해결:** 휴대폰을 엣지와 같은 Wi-Fi 에 연결하고 HA 앱의 **설정** > **컴패니언 앱** > **문제 해결** > **Thread 자격 증명 동기화** 를 실행한 뒤 기기를 다시 추가합니다. 4단계에서 기본 네트워크로 지정한 망이 휴대폰으로 넘어갑니다.
+
+</details>
+
 ## 마무리
 
 SLZB-MR3U 의 Thread 라디오를 RCP 로 두고 엣지 클러스터의 OTBR 파드로 Thread 망을 만들어, 데이터셋이 클러스터 볼륨에 남고 라디오를 바꿔도 망이 이어지는 보더 라우터를 구성했습니다. 이제 Home Assistant 앱으로 Matter over Thread 기기를 등록할 수 있습니다. 볼륨에는 Zigbee 네트워크 키, Matter 패브릭, Thread 데이터셋처럼 다시 만들 수 없는 상태가 모여 있으므로 원격 백업을 함께 두는 것이 좋습니다.
