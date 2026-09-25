@@ -784,11 +784,19 @@ wget https://eu4ng.github.io/assets/scripts/iot/ha-registry.py
 #                                예) sensor.0xa4c138f95fdbf3ad_linkquality → sensor.bedroom2_motion_linkquality. 기록은 HA 가 새 ID 로 옮깁니다
 #   --rename-matter              matter 엔티티 ID 를 <기기 이름>_<측정 항목(device_class 등)> 영문으로 바꿉니다. 표시 이름(온도 등)은 그대로입니다
 #                                예) sensor.cimsil2_bedroom2_air_quality_ondo → sensor.bedroom2_air_quality_temperature. 기록은 HA 가 새 ID 로 옮깁니다
+#   --assign-areas               Zigbee·Matter 기기를 이름(<방>-<종류>[번호])의 방에 해당하는 영역으로 옮깁니다. 영역이 없으면 만듭니다
+#                                예) bedroom2-th → 침실2 (방 코드는 영역 별칭으로 붙습니다). ROOMS 에 없는 방은 코드 그대로(garage)를 이름으로 씁니다
 import asyncio, getpass, os, re, sys
 
 import aiohttp
 
 URL = os.environ.get("HA_URL", "ws://127.0.0.1:8123/api/websocket")
+
+# --assign-areas 의 방 코드 → 영역 이름. 뒤에 붙은 번호는 그대로 이어 붙입니다 (bedroom2 → 침실2)
+ROOMS = {
+    "livingroom": "거실", "kitchen": "주방", "bedroom": "침실", "room": "방", "office": "서재", "bathroom": "욕실",
+    "laundry": "세탁실", "dressroom": "드레스룸", "utility": "다용도실", "entrance": "현관", "balcony": "베란다",
+}
 
 
 async def main(args):
@@ -879,6 +887,34 @@ async def main(args):
                     await call(type="config/entity_registry/update", entity_id=eid, new_entity_id=new)
                 taken.add(new)
 
+        if "--assign-areas" in args:
+            # 방은 기기 이름의 첫 - 앞입니다. 이름이 원본이므로 손으로 고른 영역도 이름에 맞춰 바꿉니다
+            areas = await call(type="config/area_registry/list")
+            label = {a["area_id"]: a["name"] for a in areas}
+            find = {k: a["area_id"] for a in areas for k in [a["area_id"], a["name"], *a.get("aliases", [])]}
+            for d in await call(type="config/device_registry/list"):
+                # 이름 규칙은 Zigbee2MQTT(mqtt)·Matter 기기에만 있습니다. 휴대폰(mobile_app) 등은 건너뜁니다
+                if not {i[0] for i in d["identifiers"]} & {"mqtt", "matter"}:
+                    continue
+                name = d.get("name_by_user") or d.get("name") or ""
+                m = re.match(r"([a-z0-9]+)-", name)
+                if not m or m.group(1) == "retired":
+                    continue
+                room = m.group(1)
+                r = re.fullmatch(r"([a-z]+)(\d*)", room)
+                want = ROOMS[r.group(1)] + r.group(2) if r and r.group(1) in ROOMS else room
+                aid = find.get(room) or find.get(want)
+                if not aid:
+                    print(f"{tag}영역 생성 {want} (별칭 {room})")
+                    a = {"area_id": want, "name": want} if dry else await call(type="config/area_registry/create", name=want, aliases=[room])
+                    aid = find[room] = find[want] = a["area_id"]
+                    label[aid] = a["name"]
+                if d["area_id"] == aid:
+                    continue
+                print(f"{tag}영역 지정 {name}: {label.get(d['area_id'], '없음')} → {label[aid]}")
+                if not dry:
+                    await call(type="config/device_registry/update", device_id=d["id"], area_id=aid)
+
         if "--prune-remote-orphans" in args:
             # 통합이 더는 제공하지 않는 엔티티는 상태가 없거나, HA 가 자리만 채운 restored 상태(unavailable)로 남습니다
             live = {st["entity_id"] for st in await call(type="get_states") if not st["attributes"].get("restored")}
@@ -909,21 +945,21 @@ kubectl -n home-assistant exec -i deploy/home-assistant -c home-assistant -- \
 unset T
 ```
 
-지역 HA 에서는 Zigbee2MQTT 가 꺼 둔 채 등록한 진단 엔티티(LQI 등)를 켜고, 페어링 직후 IEEE 주소(`0x…`)로 잡힌 엔티티 ID 를 기기 이름으로 바꿉니다. Matter 기기는 한국어 HA 가 엔티티 이름(`온도`)을 로마자로 옮기고 방 이름까지 붙여 `sensor.cimsil2_bedroom2_air_quality_ondo` 같은 ID 를 만드므로, `--rename-matter` 로 `sensor.bedroom2_air_quality_temperature` 처럼 기기 이름과 측정 항목의 영문으로 바꿉니다. 표시 이름은 한국어 그대로이고, 허브 DB 의 `hass.device` 에는 바꾼 ID 가 들어갑니다. 이름을 바꾸면 중앙에는 새 ID 가 올라오고 옛 ID 는 잔재가 되므로, 새 엔티티가 보인 뒤 위의 중앙 명령을 한 번 더 실행합니다.
+지역 HA 에서는 Zigbee2MQTT 가 꺼 둔 채 등록한 진단 엔티티(LQI 등)를 켜고, 페어링 직후 IEEE 주소(`0x…`)로 잡힌 엔티티 ID 를 기기 이름으로 바꿉니다. Matter 기기는 한국어 HA 가 엔티티 이름(`온도`)을 로마자로 옮기고 방 이름까지 붙여 `sensor.cimsil2_bedroom2_air_quality_ondo` 같은 ID 를 만드므로, `--rename-matter` 로 `sensor.bedroom2_air_quality_temperature` 처럼 기기 이름과 측정 항목의 영문으로 바꿉니다. 표시 이름은 한국어 그대로이고, 허브 DB 의 `hass.device` 에는 바꾼 ID 가 들어갑니다. `--assign-areas` 는 Zigbee·Matter 기기를 이름의 방 부분(`bedroom2-th` 의 `bedroom2`)에 맞는 영역으로 옮깁니다. 방 코드는 스크립트의 `ROOMS` 로 한국어 영역 이름(`침실2`)이 되고, 그 영역이 없으면 방 코드를 별칭으로 붙여 새로 만듭니다. 그래서 기기를 추가하거나 다른 방으로 옮길 때는 이름만 바꾸고 이 명령을 실행하면 됩니다. 이름을 바꾸면 중앙에는 새 ID 가 올라오고 옛 ID 는 잔재가 되므로, 새 엔티티가 보인 뒤 위의 중앙 명령을 한 번 더 실행합니다.
 
 ```bash
 # control plane. 지역 HA
 K="kubectl --kubeconfig $HOME/k3s-[SITE].yaml -n home-assistant"
 T=$($K get secret ha-api-token -o jsonpath='{.data.token}' | base64 -d)
 $K exec -i deploy/home-assistant -c home-assistant -- \
-  env HA_TOKEN="$T" python3 - --enable-platform mqtt --rename-ieee --rename-matter --dry-run < ha-registry.py
+  env HA_TOKEN="$T" python3 - --enable-platform mqtt --rename-ieee --rename-matter --assign-areas --dry-run < ha-registry.py
 unset T
 ```
 
 > 지역 HA 가 내려가 있으면 그 지역 엔티티가 모두 상태가 없는 것으로 보입니다. 이때 `--prune-remote-orphans` 가 전부 지우지 않도록, 연결된 엔티티가 하나도 없는 지역은 `건너뜀` 으로 표시하고 두게 했습니다. 이 표시가 나오면 지역 HA 가 다시 뜬 뒤 실행합니다.
 {: .prompt-warning }
 
-- **확인:** `--dry-run` 없이 실행한 출력에 `방 삭제`, `엔티티 삭제`, `활성화`, `이름 변경` 줄이 나오고, 다시 `--dry-run` 으로 실행하면 아무것도 나오지 않습니다.
+- **확인:** `--dry-run` 없이 실행한 출력에 `방 삭제`, `엔티티 삭제`, `활성화`, `이름 변경`, `영역 지정` 줄이 나오고, 다시 `--dry-run` 으로 실행하면 아무것도 나오지 않습니다.
 
 ## 8. 확인
 
