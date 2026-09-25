@@ -63,7 +63,7 @@ configMapGenerator:
 # mqtt_statestream 은 통합 단위로 거르지 못해 엔티티 이름 규칙이 필요했으므로, 소속 통합(integration_entities)으로 거르는 자동화로 대신합니다.
 # Zigbee 기기는 MQTT 통합 소속이라 여기 걸리지 않고 zigbee2mqtt/ 토픽으로 따로 수집됩니다. 토픽은 mqtt_statestream 과 같습니다.
 # 값은 JSON 입니다. Telegraf 가 Zigbee 와 같은 테이블(readings)에 "기기 하나의 속성 하나" 로 넣도록 상태(state)에 다음을 붙입니다:
-#   device(HA 기기 이름, <방>-<용도>), property(엔티티 ID 에서 기기 이름을 뗀 측정 항목, 예: pm25), unit(엔티티의 unit_of_measurement, 예: µg/m³)
+#   device(HA 기기 이름, <방>-<종류>[-<위치>][번호]), property(엔티티 ID 에서 기기 이름을 뗀 측정 항목, 예: pm25), unit(엔티티의 unit_of_measurement, 예: µg/m³)
 #   node(패브릭-노드 ID, 다시 커미셔닝하면 바뀜), serial(기기 시리얼, 바뀌지 않음), model, vendor
 # 측정값이 아닌 button(식별)·update(펌웨어) 도메인은 발행하지 않습니다.
 - id: matter_statestream
@@ -589,7 +589,7 @@ bash setup-home-assistant.sh http://[EDGE_IP]:8123
 
 | 키 | 예 | 내용 |
 |---|---|---|
-| `device` | `bedroom2-air-quality` | HA 기기 이름. Zigbee 기기처럼 `[방]-[종류]` 로 지어야 기록되고, DB 에는 `room`(`bedroom2`)과 `device`(`air-quality`)로 나뉘어 들어갑니다 |
+| `device` | `bedroom2-air_quality` | HA 기기 이름. Zigbee 기기처럼 `<방>-<종류>[-<위치>][번호]` 로 지어야 기록되고, DB 에는 `room`(`bedroom2`), `device`(`air_quality`), `position`(위치가 있을 때)으로 나뉘어 들어갑니다 |
 | `property` | `pm25` | 엔티티 ID 에서 기기 이름을 뗀 측정 항목 |
 | `unit` | `μg/m³` | 엔티티의 단위(`unit_of_measurement`). 단위가 없는 엔티티는 빈 값입니다 |
 | `node` | `CFEE358179DBE7B6-0000000000000001` | 패브릭 ID 와 노드 ID. 기기를 다시 커미셔닝하면 바뀝니다 |
@@ -630,9 +630,9 @@ git commit -m "feat(iot): Telegraf 에 Home Assistant 재발행(Matter 기기) �
 git push
 ```
 
-Telegraf 는 기기 이름이 `[방]-[종류]` 규칙(영문 소문자·숫자)에 맞는 값만 기록하므로, 등록 직후의 기본 이름(`Air Quality Sensor` 등)으로 보낸 값은 DB 에 남지 않습니다. Matter 기기를 하나 등록하고 이름을 규칙대로 바꾼 뒤 **개발자 도구** > **상태** 에서 그 기기의 센서 엔티티 상태를 임의 값으로 바꿔 보면, 실제 값이 바뀔 때까지 기다리지 않고 경로 전체를 확인할 수 있습니다.
+Telegraf 는 기기 이름이 `<방>-<종류>[-<위치>][번호]` 규칙(칸은 `-` 로 나누고 칸 안의 단어는 `_` 로 잇는 영문 소문자·숫자)에 맞는 값만 기록하므로, 등록 직후의 기본 이름(`Air Quality Sensor` 등)으로 보낸 값은 DB 에 남지 않습니다. Matter 기기를 하나 등록하고 이름을 규칙대로 바꾼 뒤 **개발자 도구** > **상태** 에서 그 기기의 센서 엔티티 상태를 임의 값으로 바꿔 보면, 실제 값이 바뀔 때까지 기다리지 않고 경로 전체를 확인할 수 있습니다.
 
-- **확인:** 허브에서 `kubectl -n timescaledb exec deploy/timescaledb -- psql -U iot -d iot -c "select time, site, room, device, property, value, value_text, hw_id, node from readings where protocol = 'matter' order by time desc limit 5;"` 에 `site` 가 `[SITE]`, `room`·`device` 가 HA 기기 이름을 나눈 방과 종류, `property` 가 측정 항목인 행이 보이고, 숫자 상태는 `value`, `on` 은 `value` 1 과 `value_text` `on` 으로 들어갑니다. `hw_id` 에는 시리얼, `node` 에는 노드 ID 가 들어갑니다. Telegraf 가 다시 붙을 때 브로커가 유지 메시지를 다시 보내므로 재시작 직후 각 엔티티의 마지막 값이 한 번 더 들어올 수 있습니다.
+- **확인:** 허브에서 `kubectl -n timescaledb exec deploy/timescaledb -- psql -U iot -d iot -c "select time, site, room, device, position, property, value, value_text, hw_id, node from readings where protocol = 'matter' order by time desc limit 5;"` 에 `site` 가 `[SITE]`, `room`·`device`·`position` 이 HA 기기 이름을 나눈 방·종류·위치, `property` 가 측정 항목인 행이 보이고, 숫자 상태는 `value`, `on` 은 `value` 1 과 `value_text` `on` 으로 들어갑니다. `hw_id` 에는 시리얼, `node` 에는 노드 ID 가 들어갑니다. Telegraf 가 다시 붙을 때 브로커가 유지 메시지를 다시 보내므로 재시작 직후 각 엔티티의 마지막 값이 한 번 더 들어올 수 있습니다.
 
 > `property` 는 엔티티 ID 에서 기기 이름을 떼어 만듭니다. 한국어 HA 는 기기 이름을 바꾸고 방을 지정할 때 엔티티 ID 를 `방 + 기기 이름 + 엔티티 이름` 의 로마자로 다시 만듭니다(`sensor.cimsil2_bedroom2_air_quality_ondo`). 기기를 등록하고 이름을 정한 직후 [중앙 HA 글](/posts/49/)의 `ha-registry.py --rename-matter --assign-areas` 를 실행해 `sensor.bedroom2_air_quality_temperature` 처럼 영문 ID 로 맞추고 영역도 이름의 방으로 지정합니다. 영문 ID 여야 `property` 가 `temperature` 처럼 깔끔하게 남습니다. 화면의 표시 이름은 한국어 그대로입니다. 엔티티 ID 가 바뀌어도 `hw_id`(시리얼)는 그대로이므로, 옛 ID 로 쌓인 기록도 `hw_id` 로 같은 기기에 묶어 볼 수 있습니다.
 {: .prompt-tip }

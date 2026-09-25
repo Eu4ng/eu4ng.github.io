@@ -577,7 +577,7 @@ log "완료. 상태가 loaded 가 아니면 HA 로그를 확인합니다."
 
 ## 6. 지역 대시보드
 
-Remote Home Assistant 는 지역 HA 의 엔티티 상태만 복제하고 기기와 방(area)은 가져오지 않습니다. 그래서 중앙 HA 의 기록 화면이나 기본 대시보드에서는 지역의 방 단위로 고를 수 없습니다. 중앙에는 방을 만들지 않고, 사이드바에 **지역** 대시보드를 따로 둡니다. 탭 하나가 지역이고, 탭 안의 카드 하나가 방입니다. 카드는 커뮤니티 카드 **auto-entities** 가 템플릿으로 만듭니다. 방은 기기 이름 규칙 `<방>-<종류>[번호]`(예: `bedroom2-th2`)에서 자르므로, 기기를 추가하거나 이름을 바꿔 방을 옮겨도 YAML 을 고치지 않아도 됩니다.
+Remote Home Assistant 는 지역 HA 의 엔티티 상태만 복제하고 기기와 방(area)은 가져오지 않습니다. 그래서 중앙 HA 의 기록 화면이나 기본 대시보드에서는 지역의 방 단위로 고를 수 없습니다. 중앙에는 방을 만들지 않고, 사이드바에 **지역** 대시보드를 따로 둡니다. 탭 하나가 지역이고, 탭 안의 카드 하나가 방입니다. 카드는 커뮤니티 카드 **auto-entities** 가 템플릿으로 만듭니다. 방은 기기 이름 규칙 `<방>-<종류>[-<위치>][번호]`(예: `bedroom2-th-door`)의 첫 칸에서 자르므로, 기기를 추가하거나 이름을 바꿔 방이나 위치를 옮겨도 YAML 을 고치지 않아도 됩니다.
 
 - 방 카드에는 현재 값과 24시간 기록 그래프가 함께 나옵니다. 그래프는 단위별로 나뉘고, 재실·문은 타임라인으로 그려집니다.
 - 맨 위 **주의** 카드에는 오프라인 기기, 배터리 20% 미만, LQI 50 미만, Zigbee2MQTT 브리지 끊김만 모입니다. 해당하는 게 없으면 카드가 숨습니다.
@@ -638,8 +638,8 @@ lovelace:
 ```yaml
 # 지역 대시보드(사이드바 "지역"). 탭 = 지역, 탭 안의 카드 = 방. initContainer 가 기동마다 /config/dashboards/regions.yaml 로 덮어쓰므로 여기가 원본입니다.
 # 중앙 HA 에는 방·기기가 없으므로(Remote Home Assistant 는 엔티티만 복제) 방은 이름 규칙에서 자릅니다:
-#   엔티티 friendly_name = <지역 접두사><방>-<종류>[번호] <항목>  예) "[SITE_NAME]bedroom2-th2 온도"  (iot/README.md 의 기기 이름 규칙)
-# 기기 추가·방 이동(이름 변경)·새 방은 YAML 수정 없이 반영됩니다. 규칙에 없는 종류를 쓰면 아래 두 정규식의 (th|multi|door|motion) 에 추가합니다.
+#   엔티티 friendly_name = <지역 접두사><방>-<종류>[-<위치>][번호] <항목>  예) "[SITE_NAME]bedroom2-th-door 온도"  (iot/README.md 의 기기 이름 규칙)
+# 기기 추가·방 이동·위치 이동(이름 변경)·새 방은 YAML 수정 없이 반영됩니다. 규칙에 없는 종류를 쓰면 아래 두 정규식의 (th|multi|contact|motion|air_quality) 에 추가합니다.
 # 지역 추가: 탭 하나를 복사해 title·path 와 템플릿의 region(Remote Home Assistant 의 entity_friendly_name_prefix)을 바꿉니다.
 # 기록 그래프는 중앙 HA 레코더(기본 10일 보관)에서 그립니다. 그보다 긴 기간은 Grafana(허브 TimescaleDB)에서 봅니다.
 title: 지역
@@ -663,7 +663,7 @@ views:
               {%- set label = fn[region | length:] if fn.startswith(region) else '' -%}
               {%- set dev = label.split(' ')[0] -%}
               {%- set reason = '' -%}
-              {%- if dev is match('[a-z0-9]+-(th|multi|door|motion)[0-9]*$') -%}
+              {%- if dev is match('[a-z0-9_]+-(th|multi|contact|motion|air_quality)(-[a-z_]+)?[0-9]*$') -%}
                 {%- if s.state == 'unavailable' -%}{%- set reason = '오프라인' -%}
                 {%- elif s.attributes.device_class == 'battery' and s.state | int(100) < 20 -%}{%- set reason = '배터리 ' ~ s.state ~ '%' -%}
                 {%- elif s.attributes.unit_of_measurement == 'lqi' and s.state | int(255) < 50 -%}{%- set reason = '신호 약함 ' ~ s.state -%}
@@ -693,7 +693,7 @@ views:
               {%- set fn = s.attributes.friendly_name | default('', true) -%}
               {%- set label = fn[region | length:] if fn.startswith(region) else '' -%}
               {%- set dev = label.split(' ')[0] -%}
-              {%- if dev is match('[a-z0-9]+-(th|multi|door|motion)[0-9]*$') and s.attributes.device_class | default('', true) in shown -%}
+              {%- if dev is match('[a-z0-9_]+-(th|multi|contact|motion|air_quality)(-[a-z_]+)?[0-9]*$') and s.attributes.device_class | default('', true) in shown -%}
                 {%- set ns.rows = ns.rows + [{'room': dev.split('-')[0], 'row': {'entity': s.entity_id, 'name': label}}] -%}
               {%- endif -%}
             {%- endfor -%}
@@ -784,7 +784,7 @@ wget https://eu4ng.github.io/assets/scripts/iot/ha-registry.py
 #                                예) sensor.0xa4c138f95fdbf3ad_linkquality → sensor.bedroom2_motion_linkquality. 기록은 HA 가 새 ID 로 옮깁니다
 #   --rename-matter              matter 엔티티 ID 를 <기기 이름>_<측정 항목(device_class 등)> 영문으로 바꿉니다. 표시 이름(온도 등)은 그대로입니다
 #                                예) sensor.cimsil2_bedroom2_air_quality_ondo → sensor.bedroom2_air_quality_temperature. 기록은 HA 가 새 ID 로 옮깁니다
-#   --assign-areas               Zigbee·Matter 기기를 이름(<방>-<종류>[번호])의 방에 해당하는 영역으로 옮깁니다. 영역이 없으면 만듭니다
+#   --assign-areas               Zigbee·Matter 기기를 이름(<방>-<종류>[-<위치>][번호])의 방에 해당하는 영역으로 옮깁니다. 영역이 없으면 만듭니다
 #                                예) bedroom2-th → 침실2 (방 코드는 영역 별칭으로 붙습니다). ROOMS 에 없는 방은 코드 그대로(garage)를 이름으로 씁니다
 import asyncio, getpass, os, re, sys
 
@@ -859,7 +859,7 @@ async def main(args):
                 taken.add(new)
 
         if "--rename-matter" in args:
-            # 한국어 HA 는 엔티티 이름(온도)을 로마자(ondo)로, 방 이름까지 붙여 ID 를 만듭니다. 방은 기기 이름(<방>-<종류>)에 이미 있습니다
+            # 한국어 HA 는 엔티티 이름(온도)을 로마자(ondo)로, 방 이름까지 붙여 ID 를 만듭니다. 방은 기기 이름(<방>-<종류>[-<위치>])에 이미 있습니다
             devs = {d["id"]: d.get("name_by_user") or d.get("name") for d in await call(type="config/device_registry/list")}
             ids = [e["entity_id"] for e in ents if e["platform"] == "matter"]
             full = await call(type="config/entity_registry/get_entries", entity_ids=ids) if ids else {}
@@ -897,11 +897,11 @@ async def main(args):
                 if not {i[0] for i in d["identifiers"]} & {"mqtt", "matter"}:
                     continue
                 name = d.get("name_by_user") or d.get("name") or ""
-                m = re.match(r"([a-z0-9]+)-", name)
+                m = re.match(r"([a-z0-9_]+)-", name)
                 if not m or m.group(1) == "retired":
                     continue
                 room = m.group(1)
-                r = re.fullmatch(r"([a-z]+)(\d*)", room)
+                r = re.fullmatch(r"([a-z_]+)(\d*)", room)
                 want = ROOMS[r.group(1)] + r.group(2) if r and r.group(1) in ROOMS else room
                 aid = find.get(room) or find.get(want)
                 if not aid:

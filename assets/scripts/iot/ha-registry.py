@@ -11,7 +11,7 @@
 #                                예) sensor.0xa4c138f95fdbf3ad_linkquality → sensor.bedroom2_motion_linkquality. 기록은 HA 가 새 ID 로 옮깁니다
 #   --rename-matter              matter 엔티티 ID 를 <기기 이름>_<측정 항목(device_class 등)> 영문으로 바꿉니다. 표시 이름(온도 등)은 그대로입니다
 #                                예) sensor.cimsil2_bedroom2_air_quality_ondo → sensor.bedroom2_air_quality_temperature. 기록은 HA 가 새 ID 로 옮깁니다
-#   --assign-areas               Zigbee·Matter 기기를 이름(<방>-<종류>[번호])의 방에 해당하는 영역으로 옮깁니다. 영역이 없으면 만듭니다
+#   --assign-areas               Zigbee·Matter 기기를 이름(<방>-<종류>[-<위치>][번호])의 방에 해당하는 영역으로 옮깁니다. 영역이 없으면 만듭니다
 #                                예) bedroom2-th → 침실2 (방 코드는 영역 별칭으로 붙습니다). ROOMS 에 없는 방은 코드 그대로(garage)를 이름으로 씁니다
 import asyncio, getpass, os, re, sys
 
@@ -86,7 +86,7 @@ async def main(args):
                 taken.add(new)
 
         if "--rename-matter" in args:
-            # 한국어 HA 는 엔티티 이름(온도)을 로마자(ondo)로, 방 이름까지 붙여 ID 를 만듭니다. 방은 기기 이름(<방>-<종류>)에 이미 있습니다
+            # 한국어 HA 는 엔티티 이름(온도)을 로마자(ondo)로, 방 이름까지 붙여 ID 를 만듭니다. 방은 기기 이름(<방>-<종류>[-<위치>])에 이미 있습니다
             devs = {d["id"]: d.get("name_by_user") or d.get("name") for d in await call(type="config/device_registry/list")}
             ids = [e["entity_id"] for e in ents if e["platform"] == "matter"]
             full = await call(type="config/entity_registry/get_entries", entity_ids=ids) if ids else {}
@@ -124,11 +124,11 @@ async def main(args):
                 if not {i[0] for i in d["identifiers"]} & {"mqtt", "matter"}:
                     continue
                 name = d.get("name_by_user") or d.get("name") or ""
-                m = re.match(r"([a-z0-9]+)-", name)
+                m = re.match(r"([a-z0-9_]+)-", name)
                 if not m or m.group(1) == "retired":
                     continue
                 room = m.group(1)
-                r = re.fullmatch(r"([a-z]+)(\d*)", room)
+                r = re.fullmatch(r"([a-z_]+)(\d*)", room)
                 want = ROOMS[r.group(1)] + r.group(2) if r and r.group(1) in ROOMS else room
                 aid = find.get(room) or find.get(want)
                 if not aid:
