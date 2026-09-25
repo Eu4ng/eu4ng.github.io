@@ -62,8 +62,10 @@ configMapGenerator:
 # Matter 통합의 엔티티 상태를 MQTT 로 재발행해 Telegraf 가 허브 DB 에 넣습니다. initContainer 가 매 기동 /config 로 복사합니다.
 # mqtt_statestream 은 통합 단위로 거르지 못해 엔티티 이름 규칙이 필요했으므로, 소속 통합(integration_entities)으로 거르는 자동화로 대신합니다.
 # Zigbee 기기는 MQTT 통합 소속이라 여기 걸리지 않고 zigbee2mqtt/ 토픽으로 따로 수집됩니다. 토픽은 mqtt_statestream 과 같습니다.
-# 값은 JSON 입니다. 상태(state)에 실물 기기 정보를 붙여 엔티티 ID 가 바뀌어도 같은 기기를 이어 볼 수 있게 합니다:
+# 값은 JSON 입니다. Telegraf 가 Zigbee 와 같은 테이블(readings)에 "기기 하나의 속성 하나" 로 넣도록 상태(state)에 다음을 붙입니다:
+#   device(HA 기기 이름, <방>-<용도>), property(엔티티 ID 에서 기기 이름을 뗀 측정 항목, 예: pm25), entity(엔티티 ID)
 #   node(패브릭-노드 ID, 다시 커미셔닝하면 바뀜), serial(기기 시리얼, 바뀌지 않음), model, vendor
+# 측정값이 아닌 button(식별)·update(펌웨어) 도메인은 발행하지 않습니다.
 - id: matter_statestream
   alias: Matter 상태를 MQTT 로 재발행
   mode: parallel
@@ -77,6 +79,7 @@ configMapGenerator:
         {{ trigger.event.data.new_state is not none
            and (trigger.event.data.old_state is none
                 or trigger.event.data.old_state.state != trigger.event.data.new_state.state)
+           and trigger.event.data.entity_id.split('.')[0] not in ['button', 'update']
            and trigger.event.data.entity_id in integration_entities('matter') }}
   actions:
     - action: mqtt.publish
@@ -85,7 +88,13 @@ configMapGenerator:
         payload: >-
           {%- set did = device_id(trigger.event.data.entity_id) %}
           {%- set ids = (device_attr(did, 'identifiers') or []) | map('last') | select('match', 'deviceid_') | list %}
+          {%- set name = device_attr(did, 'name_by_user') or device_attr(did, 'name') or '' %}
+          {%- set object_id = trigger.event.data.entity_id.split('.')[1] %}
+          {%- set prefix = (name | slugify) ~ '_' %}
           {{ {'state': trigger.event.data.new_state.state,
+              'device': name or object_id,
+              'property': object_id[prefix | length:] if name and object_id.startswith(prefix) else object_id,
+              'entity': trigger.event.data.entity_id,
               'node': ids[0][9:] | replace('-MatterNodeDevice', '') if ids else '',
               'serial': device_attr(did, 'serial_number') or '',
               'model': device_attr(did, 'model') or '',
@@ -576,20 +585,23 @@ bash setup-home-assistant.sh http://[EDGE_IP]:8123
 
 ## 4. Matter 상태를 수집 파이프라인에 연결
 
-1단계의 자동화는 Matter 엔티티 상태가 바뀔 때마다 `hass/[도메인]/[엔티티]/state` 토픽에 JSON 을 발행합니다. `state` 는 상태값(`21.5`, `on`, `off`, `unavailable`)이고, 나머지는 HA 기기 레지스트리에서 가져온 실물 기기 정보입니다.
+1단계의 자동화는 Matter 엔티티 상태가 바뀔 때마다 `hass/[도메인]/[엔티티]/state` 토픽에 JSON 을 발행합니다. `state` 는 상태값(`21.5`, `on`, `off`, `unavailable`)이고, 나머지는 Zigbee 기기와 같은 `readings` 테이블에 넣기 위한 기기 이름·측정 항목과 HA 기기 레지스트리에서 가져온 실물 기기 정보입니다. 측정값이 아닌 `button`(식별), `update`(펌웨어) 엔티티는 발행하지 않습니다.
 
 | 키 | 예 | 내용 |
 |---|---|---|
+| `device` | `bedroom2-air-quality` | HA 기기 이름. Zigbee 기기처럼 `[방]-[용도]` 로 지으면 `room`, `purpose` 가 채워집니다 |
+| `property` | `pm25` | 엔티티 ID 에서 기기 이름을 뗀 측정 항목 |
+| `entity` | `sensor.bedroom2_air_quality_pm25` | 엔티티 ID |
 | `node` | `CFEE358179DBE7B6-0000000000000001` | 패브릭 ID 와 노드 ID. 기기를 다시 커미셔닝하면 바뀝니다 |
-| `serial` | `602EPDJ02346` | 기기 시리얼. Zigbee 의 IEEE 주소처럼 바뀌지 않습니다 |
+| `serial` | `602EPDJ02346` | 기기 시리얼. Zigbee 의 IEEE 주소처럼 바뀌지 않습니다. `hw_id` 컬럼으로 들어갑니다 |
 | `model`, `vendor` | `LG Air Quality Sensor`, `LG Electronics` | 모델과 제조사 |
 
-Telegraf 에 이 토픽을 받는 입력을 추가합니다. 기기 정보는 같은 이름의 컬럼으로 넣고, `state` 는 숫자면 `value`, 그 외는 `value_text` 로 나누는 프로세서를 둡니다. `on`/`off` 는 그래프를 그릴 수 있게 1/0 도 넣습니다.
+Telegraf 에 이 토픽을 받는 입력을 Zigbee2MQTT 입력 바로 아래에 추가합니다. 입력은 JSON 의 기기 정보를 태그로 받고 `protocol = "matter"`, `source = "hass"` 를 붙이기만 합니다. `state` 를 `value`(숫자, `on`/`off` 는 1/0)와 `value_text` 로 나누는 일은 [Telegraf 글](/posts/43/)에서 둔 공통 starlark 프로세서가 그대로 맡습니다.
 
 {% raw %}
 ```toml
-# Home Assistant 가 재발행한 Matter 기기 상태. 토픽 hass/<도메인>/<엔티티>/state,
-# 값은 JSON {"state": "21.5"|"on"|"unavailable", "node", "serial", "model", "vendor"}. 기기 정보는 같은 이름의 컬럼으로 들어갑니다.
+# Home Assistant 가 재발행한 Matter 기기 상태. 토픽 hass/<도메인>/<엔티티>/state, 값은 JSON
+#   {"state": "21.5"|"on"|"unavailable", "device", "property", "entity", "node", "serial", "model", "vendor"}
 # HA 자동화가 Matter 통합 소속 엔티티만 발행하므로 Zigbee 기기와 중복되지 않습니다. 시각은 수신 시각입니다.
 [[inputs.mqtt_consumer]]
   servers = ["tcp://mosquitto.mosquitto.svc.cluster.local:1883"]
@@ -600,35 +612,13 @@ Telegraf 에 이 토픽을 받는 입력을 추가합니다. 기기 정보는 �
   persistent_session = true
   qos = 1
   topic_tag = ""
+  name_override = "readings"
   data_format = "json"
-  json_string_fields = ["state", "node", "serial", "model", "vendor"]   # 상태는 숫자·문자가 섞여 있어 문자열로 받고 아래 프로세서가 나눕니다
-  [[inputs.mqtt_consumer.topic_parsing]]
-    topic = "hass/+/+/state"
-    measurement = "measurement/_/_/_" # 테이블 이름 = hass
-    tags = "_/domain/device/_"        # 도메인(sensor, light …)과 엔티티 이름 → domain, device 컬럼
-
-# hass 의 문자열 값을 숫자(value)와 문자(value_text)로 나눕니다. on/off 는 그래프용으로 1/0 도 넣습니다.
-[[processors.starlark]]
-  namepass = ["hass"]
-  source = '''
-def is_number(s):
-    if not s or s.count(".") > 1:
-        return False
-    body = s[1:] if s[0] in "+-" else s
-    return len(body) > 0 and all([c in "0123456789." for c in body.elems()]) and body != "."
-
-def apply(metric):
-    s = str(metric.fields.pop("state", "")).strip()
-    if s == "":
-        return None                   # 상태가 없는 메시지는 버립니다
-    if is_number(s):
-        metric.fields["value"] = float(s)
-    else:
-        metric.fields["value_text"] = s
-        if s in ("on", "off"):
-            metric.fields["value"] = 1.0 if s == "on" else 0.0
-    return metric
-'''
+  json_string_fields = ["state"]      # 상태는 숫자·문자가 섞여 있어 문자열로 받고 아래 starlark 가 나눕니다
+  tag_keys = ["device", "property", "entity", "node", "serial", "model", "vendor"]
+  [inputs.mqtt_consumer.tags]
+    protocol = "matter"
+    source = "hass"
 ```
 {: file="iot/edge/telegraf/telegraf.conf (추가 부분)" }
 {% endraw %}
@@ -642,9 +632,9 @@ git push
 
 Matter 기기를 하나 등록한 뒤 **개발자 도구** > **상태** 에서 그 기기의 센서 엔티티 상태를 임의 값으로 바꿔 보면, 실제 값이 바뀔 때까지 기다리지 않고 경로 전체를 확인할 수 있습니다.
 
-- **확인:** 허브에서 `kubectl -n timescaledb exec deploy/timescaledb -- psql -U iot -d iot -c "select time, site, device, value, value_text, serial, node from hass order by time desc limit 5;"` 에 `site` 가 `[SITE]`, `device` 가 엔티티 이름인 행이 보이고, 숫자 상태는 `value`, `on` 은 `value` 1 과 `value_text` `on` 으로 들어갑니다. `serial`, `node` 에는 기기 정보가 들어갑니다. Telegraf 가 다시 붙을 때 브로커가 유지 메시지를 다시 보내므로 재시작 직후 각 엔티티의 마지막 값이 한 번 더 들어올 수 있습니다.
+- **확인:** 허브에서 `kubectl -n timescaledb exec deploy/timescaledb -- psql -U iot -d iot -c "select time, site, device, property, value, value_text, hw_id, node from readings where protocol = 'matter' order by time desc limit 5;"` 에 `site` 가 `[SITE]`, `device` 가 HA 기기 이름, `property` 가 측정 항목인 행이 보이고, 숫자 상태는 `value`, `on` 은 `value` 1 과 `value_text` `on` 으로 들어갑니다. `hw_id` 에는 시리얼, `node` 에는 노드 ID 가 들어갑니다. Telegraf 가 다시 붙을 때 브로커가 유지 메시지를 다시 보내므로 재시작 직후 각 엔티티의 마지막 값이 한 번 더 들어올 수 있습니다.
 
-> 토픽과 DB 의 `device` 는 엔티티 ID 입니다. 한국어 HA 는 기기 이름을 바꾸고 방을 지정할 때 엔티티 ID 를 `방 + 기기 이름 + 엔티티 이름` 의 로마자로 다시 만듭니다(`sensor.cimsil2_bedroom2_air_quality_ondo`). 기기를 등록하고 이름과 방을 정한 직후 [중앙 HA 글](/posts/49/)의 `ha-registry.py --rename-matter` 로 `sensor.bedroom2_air_quality_temperature` 처럼 영문 ID 로 맞춥니다. 화면의 표시 이름은 한국어 그대로입니다. 엔티티 ID 가 바뀌어도 `serial` 은 그대로이므로, 옛 ID 로 쌓인 기록도 `serial` 로 같은 기기에 묶어 볼 수 있습니다.
+> `property` 는 엔티티 ID 에서 기기 이름을 떼어 만듭니다. 한국어 HA 는 기기 이름을 바꾸고 방을 지정할 때 엔티티 ID 를 `방 + 기기 이름 + 엔티티 이름` 의 로마자로 다시 만듭니다(`sensor.cimsil2_bedroom2_air_quality_ondo`). 기기를 등록하고 이름과 방을 정한 직후 [중앙 HA 글](/posts/49/)의 `ha-registry.py --rename-matter` 로 `sensor.bedroom2_air_quality_temperature` 처럼 영문 ID 로 맞춰야 `property` 가 `temperature` 처럼 깔끔하게 남습니다. 화면의 표시 이름은 한국어 그대로입니다. 엔티티 ID 가 바뀌어도 `hw_id`(시리얼)는 그대로이므로, 옛 ID 로 쌓인 기록도 `hw_id` 로 같은 기기에 묶어 볼 수 있습니다.
 {: .prompt-tip }
 
 ## 5. 밖에서 열기와 2단계 인증
