@@ -7,7 +7,7 @@ tags: [iot, mqtt, mosquitto, telegraf, timescaledb, postgresql, grafana, kuberne
 permalink: /posts/43/
 ---
 
-허브 클러스터에 **TimescaleDB**를 두고, 엣지 클러스터에 **Mosquitto**(MQTT 브로커)와 **Telegraf**(수집기)를 두어 기기 메시지가 `엣지 브로커 → 엣지 Telegraf → 허브 TimescaleDB`로 흐르게 합니다. Telegraf 는 디스크 버퍼를 켜서 허브가 안 닿는 동안 파드가 재시작되더라도 데이터를 잃지 않고, 페이로드의 시각을 써서 뒤늦게 도착해도 원래 시각으로 적재됩니다. 태그(지역, 기기)를 컬럼으로 두어 여러 지역의 데이터가 한 테이블에 섞여도 구분되도록 했습니다. 매니페스트는 [이전 글](/posts/42/)에서 만든 `iot/` 폴더 규칙(`iot/hub/`, `iot/edge/`, `iot/clusters/[SITE]/`)을 따릅니다.
+허브 클러스터에 **TimescaleDB**를 두고, 엣지 클러스터에 **Mosquitto**(MQTT 브로커)와 **Telegraf**(수집기)를 두어 기기 메시지가 `엣지 브로커 → 엣지 Telegraf → 허브 TimescaleDB`로 흐르게 합니다. Telegraf 는 디스크 버퍼를 켜서 허브가 안 닿는 동안 파드가 재시작되더라도 데이터를 잃지 않고, 페이로드의 시각을 써서 뒤늦게 도착해도 원래 시각으로 적재됩니다. 모든 기기 값은 수집기와 관계없이 `readings` 테이블 하나에 "행 하나 = 기기 하나의 속성 하나" 로 넣고, 지역·프로토콜·수집기·기기를 컬럼으로 두어 여러 지역과 여러 종류의 기기가 한 테이블에 섞여도 구분되도록 했습니다. 매니페스트는 [이전 글](/posts/42/)에서 만든 `iot/` 폴더 규칙(`iot/hub/`, `iot/edge/`, `iot/clusters/[SITE]/`)을 따릅니다.
 
 1. 비밀 값 만들기
 2. 허브: TimescaleDB 와 Grafana 데이터소스
@@ -383,6 +383,8 @@ spec:
 
 Telegraf 설정 하나를 모든 지역이 공유합니다. 지역 이름과 허브 DB 주소는 env 로 받고, 계정은 Secret 에서 env 로 받아 설정 안의 `${VAR}` 에 채웁니다. 핵심은 세 가지입니다. `buffer_strategy = "disk"` 로 허브에 못 보낸 데이터를 PVC 에 쌓고, `json_time_key` 로 페이로드의 `last_seen` 을 행의 시각으로 쓰며, `startup_error_behavior = "retry"` 로 허브가 안 닿는 상태에서 파드가 떠도 종료하지 않게 합니다. 마지막 설정이 없으면 기본 동작이 "연결 실패 시 종료" 라서, 허브 단절 중 파드가 재시작되면 버퍼링조차 못 하고 크래시 루프에 빠집니다.
 
+입력은 `name_override = "readings"` 로 모두 같은 테이블에 보내고, starlark 프로세서가 메시지의 필드 하나를 행 하나로 쪼갭니다. Zigbee2MQTT 메시지 `{"temperature": 21.5, "humidity": 40}` 은 `property` 가 `temperature`, `humidity` 인 두 행이 됩니다. 수집기마다 다른 메시지 모양은 입력 블록과 이 프로세서에서만 흡수하므로, 나중에 Zigbee2MQTT 를 다른 수집기로 바꿔도 입력 블록만 새로 쓰면 되고 테이블과 대시보드는 그대로입니다.
+
 {% raw %}
 ```toml
 # 엣지 Telegraf. env 는 Secret telegraf-credentials(MQTT_USER, MQTT_PASSWORD, HUB_PG_PASSWORD)와 오버레이(SITE, HUB_PG_HOST, HUB_PG_PORT)가 넣습니다.
@@ -399,6 +401,11 @@ Telegraf 설정 하나를 모든 지역이 공유합니다. 지역 이름과 허
   omit_hostname = true                # 파드 이름이 태그로 붙지 않게 합니다
   skip_processors_after_aggregators = true   # 집계기를 쓰지 않습니다 (1.40 기본값 변경 경고를 없앰)
 
+# 모든 기기 값은 테이블 readings 하나에 "행 하나 = 기기 하나의 속성 하나" 로 들어갑니다.
+# 수집기(Zigbee2MQTT, Home Assistant …)마다 다른 메시지 모양은 입력과 아래 starlark 에서만 흡수하므로, 수집기를 바꿔도 입력 블록만 새로 쓰면 됩니다.
+#   태그(컬럼): site, protocol(zigbee, matter …), source(z2m, hass …), device, room, purpose, property, hw_id, model, vendor, (Matter) node, entity
+#   필드(컬럼): value(숫자. on/off·true/false 는 1/0), value_text(문자열 원문)
+
 # Zigbee2MQTT 기기 메시지. 한 단계(+)만 구독하면 bridge/#, <기기>/set|get|availability 는 자연히 빠집니다 (friendly_name 에 / 를 쓰지 않는 전제).
 [[inputs.mqtt_consumer]]
   servers = ["tcp://mosquitto.mosquitto.svc.cluster.local:1883"]
@@ -409,41 +416,84 @@ Telegraf 설정 하나를 모든 지역이 공유합니다. 지역 이름과 허
   persistent_session = true           # Telegraf 가 잠깐 내려가도 브로커가 QoS1 메시지를 보관합니다
   qos = 1
   topic_tag = ""
+  name_override = "readings"
   data_format = "json"
-  json_string_fields = ["*"]          # 기본은 숫자만 저장. 문자열(state)·불리언(contact, occupancy)도 컬럼으로 넣습니다
+  json_string_fields = ["*"]          # 기본은 숫자만 저장. 문자열(state)·불리언(contact, presence)도 받습니다
   json_time_key = "last_seen"         # 기기 시각(Zigbee2MQTT advanced.last_seen: ISO_8601). 수신 시각 대신 써서 지연 도착해도 시각이 맞습니다
   json_time_format = "2006-01-02T15:04:05Z07:00"   # RFC 3339. 소수점 초가 있어도 파싱됩니다
-  # Zigbee2MQTT mqtt.include_device_information 이 넣는 device{…} 는 device_<키> 필드로 펼쳐집니다. 실물 식별에 필요한 것만 남깁니다
-  fieldexclude = ["device_friendlyName", "device_networkAddress", "device_type", "device_manufacturerID",
-                  "device_powerSource", "device_*Version", "device_dateCode", "device_softwareBuildID"]
+  # Zigbee2MQTT mqtt.include_device_information 이 넣는 device{…} 는 device_<키> 로 펼쳐집니다. 실물 식별에 필요한 것만 태그로 남깁니다
+  tag_keys = ["device_ieeeAddr", "device_model", "device_manufacturerName"]
+  # 측정값이 아닌 기기 설정(보정값, 감도, 표시등 …)과 펌웨어 업데이트 정보는 버립니다
+  fieldexclude = ["device_*", "update_*", "*_calibration", "fading_time", "motion_detection_sensitivity",
+                  "illuminance_interval", "indicator", "temperature_unit"]
+  [inputs.mqtt_consumer.tags]
+    protocol = "zigbee"
+    source = "z2m"
   [[inputs.mqtt_consumer.topic_parsing]]
     topic = "zigbee2mqtt/+"
-    measurement = "measurement/_"     # 테이블 이름 = zigbee2mqtt
     tags = "_/device"                 # friendly_name → device 컬럼
   [inputs.mqtt_consumer.tagdrop]
     device = ["bridge"]
 
-# 실물 기기 정보 필드 이름을 짧게: ieee(기기 고유 주소), model, vendor
-[[processors.rename]]
-  namepass = ["zigbee2mqtt"]
-  [[processors.rename.replace]]
-    field = "device_ieeeAddr"
-    dest = "ieee"
-  [[processors.rename.replace]]
-    field = "device_model"
-    dest = "model"
-  [[processors.rename.replace]]
-    field = "device_manufacturerName"
-    dest = "vendor"
+# 필드 하나를 행 하나로 쪼개고 값을 value(숫자)와 value_text(문자열)로 나눕니다. 실물 기기 태그 이름도 여기서 통일합니다.
+# 메시지에 property 태그가 있으면(HA) 그 값이 속성 이름이고, 없으면(Zigbee2MQTT) 필드 이름이 속성 이름입니다.
+[[processors.starlark]]
+  namepass = ["readings"]
+  order = 1
+  source = '''
+HW_TAGS = {"device_ieeeAddr": "hw_id", "serial": "hw_id", "device_model": "model", "device_manufacturerName": "vendor"}
+ON_OFF = {"on": 1.0, "off": 0.0, "true": 1.0, "false": 0.0}
+
+def is_number(s):
+    if not s or s.count(".") > 1:
+        return False
+    body = s[1:] if s[0] in "+-" else s
+    return len(body) > 0 and all([c in "0123456789." for c in body.elems()]) and body != "."
+
+def apply(metric):
+    tags = {}
+    for k, v in metric.tags.items():
+        if v != "":
+            tags[HW_TAGS.get(k, k)] = v
+    if "device" not in tags:
+        return []                     # 기기 이름이 없는 메시지(옛 형식의 유지 메시지 등)는 버립니다
+    prop = tags.pop("property", None)
+    out = []
+    for k, v in metric.fields.items():
+        m = Metric(metric.name)
+        m.time = metric.time
+        for tk, tv in tags.items():
+            m.tags[tk] = tv
+        m.tags["property"] = prop or k
+        if type(v) == "bool":
+            m.fields["value"] = 1.0 if v else 0.0
+            m.fields["value_text"] = "true" if v else "false"
+        elif type(v) in ("int", "float"):
+            m.fields["value"] = float(v)
+        else:
+            s = str(v).strip()
+            if s == "":
+                continue                  # 값이 없는 필드는 버립니다
+            if is_number(s):
+                m.fields["value"] = float(s)
+            else:
+                m.fields["value_text"] = s
+                if s.lower() in ON_OFF:
+                    m.fields["value"] = ON_OFF[s.lower()]
+        out.append(m)
+    return out
+'''
 
 # 기기 이름 <방>-<용도> 를 첫 - 에서 잘라 room, purpose 컬럼으로. 규칙에 맞지 않는 이름은 두 컬럼이 비어 있을 뿐 그대로 저장됩니다
 [[processors.regex]]
-  namepass = ["zigbee2mqtt"]
+  namepass = ["readings"]
+  order = 2
   [[processors.regex.tags]]
     key = "device"
     pattern = '^(?P<room>[^-]+)-(?P<purpose>.+)$'
 
-# 허브 TimescaleDB. 태그를 외래 키 테이블로 빼지 않고 컬럼(site, device)으로 두어 지역 간 병합과 중복 제거가 쉽게 합니다.
+# 허브 TimescaleDB. 태그를 외래 키 테이블로 빼지 않고 컬럼으로 두어 지역 간 병합과 중복 제거가 쉽게 합니다.
+# 압축은 시계열 하나(site, device, property)끼리 묶어 값이 비슷한 것끼리 모이게 합니다.
 [[outputs.postgresql]]
   connection = "host=${HUB_PG_HOST} port=${HUB_PG_PORT} user=iot password=${HUB_PG_PASSWORD} dbname=iot sslmode=disable connect_timeout=10"
   startup_error_behavior = "retry"    # 허브가 안 닿는 상태로 파드가 떠도 종료하지 않고 버퍼에 쌓으며 연결을 재시도합니다 (기본값은 종료)
@@ -452,7 +502,7 @@ Telegraf 설정 하나를 모든 지역이 공유합니다. 지역 이름과 허
   create_templates = [
     '''CREATE TABLE {{ .table }} ({{ .columns }})''',
     '''SELECT create_hypertable({{ .table|quoteLiteral }}, 'time', chunk_time_interval => INTERVAL '7d')''',
-    '''ALTER TABLE {{ .table }} SET (timescaledb.compress, timescaledb.compress_segmentby = 'site, device', timescaledb.compress_orderby = 'time DESC')''',
+    '''ALTER TABLE {{ .table }} SET (timescaledb.compress, timescaledb.compress_segmentby = 'site, device, property', timescaledb.compress_orderby = 'time DESC')''',
     '''SELECT add_compression_policy({{ .table|quoteLiteral }}, INTERVAL '30d')''',
   ]
 
@@ -546,7 +596,20 @@ spec:
 ```
 {: file="iot/edge/telegraf/pvc.yaml" }
 
-`tags_as_foreign_keys = false` 라 `site` 와 `device` 가 본 테이블의 컬럼이 됩니다. 행 하나만 봐도 어느 지역의 어느 기기인지 알 수 있어 나중에 지역별 로컬 DB 와 병합하거나 중복을 걸러 내기 쉽습니다. 테이블은 첫 메시지가 올 때 Telegraf 가 `create_templates` 대로 만들고(하이퍼테이블, 7일 청크, 30일 뒤 압축), 새 필드가 보이면 컬럼을 추가합니다.
+`tags_as_foreign_keys = false` 라 태그가 모두 본 테이블의 컬럼이 됩니다. 행 하나만 봐도 어느 지역의 어느 기기인지 알 수 있어 나중에 지역별 로컬 DB 와 병합하거나 중복을 걸러 내기 쉽습니다. 테이블은 첫 메시지가 올 때 Telegraf 가 `create_templates` 대로 만들고(하이퍼테이블, 7일 청크, 30일 뒤 압축), 새 태그가 보이면 컬럼을 추가합니다.
+
+| 컬럼 | 예 | 내용 |
+|---|---|---|
+| `site` | `daejeon` | 지역 |
+| `protocol` | `zigbee`, `matter` | 기기 통신 방식 |
+| `source` | `z2m`, `hass` | 수집기. 수집기를 바꿔도 `protocol` 은 그대로입니다 |
+| `device`, `room`, `purpose` | `bedroom2-motion`, `bedroom2`, `motion` | 기기 이름과 이름을 첫 `-` 에서 자른 값 |
+| `property` | `temperature`, `presence` | 측정 항목 |
+| `value` | `26.3`, `1` | 숫자 값. `on`/`off`, `true`/`false` 는 1/0 |
+| `value_text` | `ON`, `false` | 문자열 원문 |
+| `hw_id`, `model`, `vendor` | `0xa4c138f95fdbf3ad`, `ZG-204ZV` | 실물 기기. Zigbee 는 IEEE 주소, Matter 는 시리얼 |
+
+압축은 `site, device, property` 가 같은 행끼리 묶습니다. 묶음 하나가 시계열 하나(예: 한 기기의 온도)가 되어 값이 비슷한 것끼리 모이므로 압축이 잘 되고, 조회할 때도 필요한 묶음만 풉니다.
 
 - **확인:** 이 단계도 파일만 만듭니다.
 
@@ -623,10 +686,10 @@ kubectl $E -n mosquitto run mq-pub --rm -i -q --restart=Never --image=eclipse-mo
 # 20초쯤 뒤 허브에서 조회
 kubectl -n timescaledb exec deploy/timescaledb -- psql -U iot -d iot \
   -c 'select hypertable_name from timescaledb_information.hypertables;' \
-  -c 'select time, site, device, temperature, humidity, contact, state from zigbee2mqtt order by time desc limit 3;'
+  -c 'select time, site, protocol, device, property, value, value_text from readings order by time desc, property limit 4;'
 ```
 
-- **확인:** 익명 발행은 `Connection error: Connection Refused: not authorised` 로 끝납니다. 조회에 하이퍼테이블 `zigbee2mqtt` 와 행 한 줄이 보이고, `time` 이 발행한 `TS` 와 같고 `site` 가 `[SITE]`, `device` 가 `test_sensor` 입니다. 문자열 `ON` 은 `text`, `true` 는 `boolean` 컬럼으로 들어갑니다.
+- **확인:** 익명 발행은 `Connection error: Connection Refused: not authorised` 로 끝납니다. 조회에 하이퍼테이블 `readings` 와 메시지 하나가 쪼개진 네 행(`contact`, `humidity`, `state`, `temperature`)이 보이고, `time` 이 발행한 `TS` 와 같고 `site` 가 `[SITE]`, `protocol` 이 `zigbee`, `device` 가 `test_sensor` 입니다. `true` 는 `value` 1 과 `value_text` `true`, `ON` 은 `value` 1 과 `value_text` `ON` 으로 들어갑니다.
 
 ## 6. Grafana 대시보드로 기록 보기
 
@@ -658,19 +721,16 @@ configMapGenerator:
 ```
 {: file="iot/hub/timescaledb/kustomization.yaml" }
 
-대시보드(uid `iot-records`)는 2단계에서 만든 `TimescaleDB` 데이터소스로 읽기 전용 조회만 합니다. 위쪽의 **지역**, **방**, **기기**, **HA 엔티티** 변수로 범위를 좁히고, 오른쪽 위 시간 범위가 모든 패널에 적용됩니다.
+대시보드(uid `iot-records`)는 2단계에서 만든 `TimescaleDB` 데이터소스로 읽기 전용 조회만 합니다. 위쪽의 **지역**, **프로토콜**, **방**, **기기**, **속성** 변수로 범위를 좁히고, 오른쪽 위 시간 범위가 모든 패널에 적용됩니다.
 
 | 패널 | 내용 |
 |---|---|
-| 기기별 최신 값 | 기기마다 항목별 마지막 값(온도, 습도, 재실, 닫힘, 조도, 배터리, LQI)과 실물 기기 정보(모델, 제조사, IEEE 주소) |
-| 온도, 습도, 조도, 배터리, 링크 품질 | 기기별 시계열 |
+| 기기별 최신 값 | 기기마다 속성별 마지막 값(온도, 습도, 재실, 닫힘, 조도, CO2, PM2.5, 배터리, LQI) |
+| 온도, 습도, 조도, 배터리, 링크 품질, CO2, 미세먼지 | 기기별 시계열. Zigbee 와 Matter 기기가 한 그래프에 함께 그려집니다 |
 | 재실, 닫힘 (문·창문) | 켜짐/꺼짐 구간 타임라인 |
-| 최근 기록 | `zigbee2mqtt`, `hass` 테이블의 원본 행 최근 200개. 기기 고유 ID(`ieee`, `serial`·`node`)도 함께 보입니다 |
-| Matter 기기 | `hass` 테이블의 실물 기기별 모델, 제조사, 시리얼, 노드 ID, 마지막 기록, 엔티티 수 |
-| 센서 값 | `hass` 테이블의 숫자 값 시계열 |
-
-> **Home Assistant (hass)** 줄의 패널은 `hass` 테이블을 읽습니다. 이 테이블은 [Home Assistant 글](/posts/48/)에서 Telegraf 입력을 추가한 뒤에 생기므로, 그 전에는 해당 패널에 `relation "hass" does not exist` 오류가 보입니다.
-{: .prompt-info }
+| 선택한 속성 | **속성** 변수로 고른 속성의 시계열 |
+| 실물 기기 | 실물 ID(`hw_id`)별 프로토콜, 수집기, 모델, 제조사, 지금 이름과 거쳐 간 이름 |
+| 최근 기록 | `readings` 테이블의 원본 행 최근 200개 |
 
 ```bash
 # 커밋하고 push
@@ -715,12 +775,12 @@ sudo iptables -D FORWARD -d [HUB_NODE_IP] -p tcp --dport 30432 -j REJECT --rejec
 ```bash
 # control plane: 40초쯤 뒤 허브 조회
 kubectl -n timescaledb exec deploy/timescaledb -- psql -U iot -d iot \
-  -c "select count(*), min(time), max(time) from zigbee2mqtt where device='drill_sensor';" \
-  -c "select time, temperature from zigbee2mqtt where device='drill_sensor' order by time;"
+  -c "select count(*), min(time), max(time) from readings where device='drill_sensor';" \
+  -c "select time, value from readings where device='drill_sensor' and property='temperature' order by time;"
 kubectl $E -n mosquitto delete pod mq-drill
 ```
 
-- **확인:** 차단 중 새로 뜬 Telegraf 파드가 `Running` 으로 유지되고 로그에 `Error writing to outputs.postgresql: not connected` 가 반복됩니다. 차단을 풀면 8건이 모두 발행 시각 그대로 들어옵니다. 이 글을 쓰며 실행했을 때는 파드를 지운 순간에 처리 중이던 4번 메시지가 두 번 들어와 9행이 됐습니다. 브로커의 QoS 1 은 "최소 한 번" 전달이라 파드 교체 시점에 한 건이 중복될 수 있으며, 조회할 때 `select distinct on (time, site, device) ...` 로 걸러 냅니다.
+- **확인:** 차단 중 새로 뜬 Telegraf 파드가 `Running` 으로 유지되고 로그에 `Error writing to outputs.postgresql: not connected` 가 반복됩니다. 차단을 풀면 8건이 모두 발행 시각 그대로 들어옵니다. 이 글을 쓰며 실행했을 때는 파드를 지운 순간에 처리 중이던 4번 메시지가 두 번 들어와 9행이 됐습니다. 브로커의 QoS 1 은 "최소 한 번" 전달이라 파드 교체 시점에 한 건이 중복될 수 있으며, 조회할 때 `select distinct on (time, site, device, property) ...` 로 걸러 냅니다.
 
 > 로그에 `Using disk-write-through buffer strategy ... this is an experimental feature` 경고가 남습니다. 문서에는 정식 옵션으로 적혀 있지만 구현은 아직 실험 표시가 붙어 있습니다. 위 드릴처럼 파드 재시작과 재연결을 한 번 직접 확인해 두는 것이 좋습니다.
 {: .prompt-warning }
