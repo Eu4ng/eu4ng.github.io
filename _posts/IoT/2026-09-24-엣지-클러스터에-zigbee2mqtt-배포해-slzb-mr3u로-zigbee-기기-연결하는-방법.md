@@ -131,6 +131,14 @@ spec:
             - { name: ZIGBEE2MQTT_CONFIG_SERIAL_BAUDRATE, value: "115200" }
             - { name: ZIGBEE2MQTT_CONFIG_ADVANCED_CHANNEL, value: "25" }   # Thread(기본 15)·Wi-Fi 와 겹치지 않게. 바꾸면 기기를 다시 페어링해야 합니다
             - { name: ZIGBEE2MQTT_CONFIG_MQTT_INCLUDE_DEVICE_INFORMATION, value: "true" }   # 메시지에 device{ieeeAddr, model …}를 넣어 DB 에 실물 기기가 남게 합니다
+            # 가용성: 기기가 죽으면 <이름>/availability 에 offline 을 알리고 HA 엔티티가 "사용할 수 없음"이 됩니다(마지막 값을 계속 보여 주지 않게).
+            # 배터리 기기는 잠들어 ping 에 답하지 못하므로 active 방식을 쓸 수 없고, 제한 시간 동안 메시지가 없으면 offline 으로 봅니다(passive).
+            - { name: ZIGBEE2MQTT_CONFIG_AVAILABILITY_ENABLED, value: "true" }
+            - { name: ZIGBEE2MQTT_CONFIG_AVAILABILITY_PASSIVE_TIMEOUT, value: "60" }   # 분. 기본 1500. 온습도계가 값이 안 바뀌면 30분까지 조용하므로 그 두 배
+            # 모든 기기의 기본 옵션입니다. 기기별로 같은 키를 주면 이 값이 가려집니다.
+            #   qos 1: 기본 0 이면 Telegraf 가 QoS1 로 구독해도 전달이 QoS0 이 되어, Telegraf 가 내려간 동안 브로커가 메시지를 보관하지 않고 버립니다
+            #   linkquality: HA 가 LQI 엔티티를 비활성으로 등록하지 않게 합니다(처음 등록될 때만 적용)
+            - { name: ZIGBEE2MQTT_CONFIG_DEVICE_OPTIONS, value: '{"qos":1,"homeassistant":{"linkquality":{"enabled_by_default":true}}}' }
           volumeMounts:
             - { name: data, mountPath: /app/data }
           startupProbe:
