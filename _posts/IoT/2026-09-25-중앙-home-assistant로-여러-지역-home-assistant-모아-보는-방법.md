@@ -87,14 +87,14 @@ remote_homeassistant:
 
 ```yaml
 # 엣지의 Home Assistant. Matter 커미셔닝 UI 와 제어·자동화 대시보드로만 쓰고, 수집 경로에는 두지 않습니다.
-# Matter 기기 상태만 mqtt_statestream 으로 브로커에 재발행해 Telegraf 가 받게 합니다 (설정은 initContainer 가 configuration.yaml 에 한 번 덧붙임).
+# Matter 통합의 엔티티 상태만 자동화(matter-statestream.yaml)로 브로커에 재발행해 Telegraf 가 받게 합니다 (initContainer 가 /config 로 복사하고 configuration.yaml 에 include 를 한 번 덧붙임).
 resources:
   - deployment.yaml
   - pvc.yaml
 configMapGenerator:
   - name: home-assistant-seed
     files:
-      - statestream.yaml
+      - matter-statestream.yaml
       - remote.yaml
       - install-remote.py
 ```
@@ -113,7 +113,8 @@ initContainers:
         python3 /seed/install-remote.py
         f=/config/configuration.yaml
         [ -f $f ] || exit 0
-        grep -q '^mqtt_statestream:' $f || cat /seed/statestream.yaml >> $f
+        cp /seed/matter-statestream.yaml /config/matter-statestream.yaml
+        grep -q '^automation matter:' $f || printf '\n# --- iot/edge/home-assistant 가 덧붙인 설정. Matter 통합 엔티티 상태를 MQTT 로 재발행합니다 (자동화는 initContainer 가 복사) ---\nautomation matter: !include matter-statestream.yaml\n' >> $f
         grep -q '^remote_homeassistant:' $f || cat /seed/remote.yaml >> $f
     env:
       - { name: REMOTE_HA_VERSION, value: "4.6" }   # custom-components/remote_homeassistant 태그

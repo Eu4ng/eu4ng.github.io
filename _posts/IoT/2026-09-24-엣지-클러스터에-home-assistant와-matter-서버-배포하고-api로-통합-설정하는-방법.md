@@ -7,7 +7,7 @@ tags: [iot, home-assistant, matter, thread, mqtt, telegraf, kubernetes, argo-cd,
 permalink: /posts/48/
 ---
 
-엣지 클러스터에 **Home Assistant**(HA)와 **matterjs-server**(Matter 컨트롤러)를 배포하고, HA 의 통합 설정을 스크립트로 넣은 뒤 밖에서 `ha-[SITE_CODE].[DOMAIN]` 으로 엽니다. HA 는 Matter 기기 등록 화면과 제어·자동화 대시보드로만 쓰고 수집 경로에는 두지 않습니다. Zigbee 는 [Zigbee2MQTT](/posts/44/)가 브로커로 바로 보내고, Matter 기기 상태만 HA 의 `mqtt_statestream` 이 브로커로 다시 발행해 [수집 파이프라인](/posts/43/)을 탑니다. 통합 추가, Thread 기본 네트워크 지정, 역방향 프록시 신뢰 설정은 모두 HA API 로 하므로 새 서버에서도 같은 명령 한 번이면 됩니다.
+엣지 클러스터에 **Home Assistant**(HA)와 **matterjs-server**(Matter 컨트롤러)를 배포하고, HA 의 통합 설정을 스크립트로 넣은 뒤 밖에서 `ha-[SITE_CODE].[DOMAIN]` 으로 엽니다. HA 는 Matter 기기 등록 화면과 제어·자동화 대시보드로만 쓰고 수집 경로에는 두지 않습니다. Zigbee 는 [Zigbee2MQTT](/posts/44/)가 브로커로 바로 보내고, Matter 기기 상태만 HA 자동화가 브로커로 다시 발행해 [수집 파이프라인](/posts/43/)을 탑니다. 통합 추가, Thread 기본 네트워크 지정, 역방향 프록시 신뢰 설정은 모두 HA API 로 하므로 새 서버에서도 같은 명령 한 번이면 됩니다.
 
 1. 매니페스트 추가와 배포
 2. 온보딩과 장기 액세스 토큰
@@ -39,34 +39,53 @@ permalink: /posts/48/
 
 ## 1. 매니페스트 추가와 배포
 
-HA 와 Matter 서버는 기기 탐색(mDNS)과 IPv6 로 LAN 의 기기와 직접 통신해야 해서 `hostNetwork` 로 띄웁니다. 파드 네트워크(Flannel)는 IPv4 만 다루기 때문입니다. HA 는 `configuration.yaml` 을 스스로 만들고 고치므로 PVC 에 두고, `mqtt_statestream` 블록만 initContainer 가 한 번 덧붙입니다. 이름이 `matter_` 로 시작하는 엔티티만 내보내는 이유는 Zigbee 기기도 HA 에 보이지만 이미 Zigbee2MQTT 경로로 수집되기 때문입니다. Matter 기기를 등록할 때 이름을 이 규칙으로 붙입니다.
+HA 와 Matter 서버는 기기 탐색(mDNS)과 IPv6 로 LAN 의 기기와 직접 통신해야 해서 `hostNetwork` 로 띄웁니다. 파드 네트워크(Flannel)는 IPv4 만 다루기 때문입니다. HA 는 `configuration.yaml` 을 스스로 만들고 고치므로 PVC 에 두고, initContainer 가 재발행 자동화 파일을 복사하고 그 파일을 읽는 줄만 한 번 덧붙입니다. 자동화는 **Matter 통합에 속한 엔티티**(`integration_entities('matter')`)의 상태가 바뀔 때만 발행합니다. Zigbee 기기도 HA 에 보이지만 MQTT 통합 소속이고 이미 Zigbee2MQTT 경로로 수집되므로 걸리지 않습니다. 기기 이름과 무관하게 거르므로 Matter 기기를 등록할 때 이름 규칙을 지킬 필요가 없습니다.
+
+> HA 의 `mqtt_statestream` 도 같은 토픽 형식으로 발행하지만 도메인·엔티티 이름으로만 거를 수 있고 통합 단위로는 거르지 못합니다. 그래서 `matter_*` 같은 이름 규칙이 필요해지고, 기기 이름에서 자동으로 만들어진 엔티티는 빠집니다.
+{: .prompt-info }
 
 ```yaml
 # 엣지의 Home Assistant. Matter 커미셔닝 UI 와 제어·자동화 대시보드로만 쓰고, 수집 경로에는 두지 않습니다.
-# Matter 기기 상태만 mqtt_statestream 으로 브로커에 재발행해 Telegraf 가 받게 합니다 (설정은 initContainer 가 configuration.yaml 에 한 번 덧붙임).
+# Matter 통합의 엔티티 상태만 자동화(matter-statestream.yaml)로 브로커에 재발행해 Telegraf 가 받게 합니다 (initContainer 가 /config 로 복사하고 configuration.yaml 에 include 를 한 번 덧붙임).
 resources:
   - deployment.yaml
   - pvc.yaml
 configMapGenerator:
   - name: home-assistant-seed
     files:
-      - statestream.yaml
+      - matter-statestream.yaml
 ```
 {: file="iot/edge/home-assistant/kustomization.yaml" }
 
+{% raw %}
 ```yaml
-# --- iot/edge/home-assistant 가 덧붙인 설정. Matter 기기 상태를 MQTT 로 재발행해 Telegraf 가 허브 DB 에 넣습니다 ---
-# base_topic 을 homeassistant 로 두면 Zigbee2MQTT 의 MQTT 디스커버리 접두사와 겹칩니다.
-# Zigbee 기기는 이미 zigbee2mqtt/ 토픽으로 수집되므로, 이중 저장을 막기 위해 이름이 matter_ 로 시작하는 엔티티만 내보냅니다 (Matter 기기 이름 규칙).
-mqtt_statestream:
-  base_topic: hass
-  publish_attributes: false
-  publish_timestamps: false
-  include:
-    entity_globs:
-      - "*.matter_*"
+# Matter 통합의 엔티티 상태를 MQTT 로 재발행해 Telegraf 가 허브 DB 에 넣습니다. initContainer 가 매 기동 /config 로 복사합니다.
+# mqtt_statestream 은 통합 단위로 거르지 못해 엔티티 이름 규칙이 필요했으므로, 소속 통합(integration_entities)으로 거르는 자동화로 대신합니다.
+# Zigbee 기기는 MQTT 통합 소속이라 여기 걸리지 않고 zigbee2mqtt/ 토픽으로 따로 수집됩니다. 토픽과 값 형식은 mqtt_statestream 과 같습니다.
+- id: matter_statestream
+  alias: Matter 상태를 MQTT 로 재발행
+  mode: parallel
+  max: 100
+  triggers:
+    - trigger: event
+      event_type: state_changed
+  conditions:
+    - condition: template
+      value_template: >-
+        {{ trigger.event.data.new_state is not none
+           and (trigger.event.data.old_state is none
+                or trigger.event.data.old_state.state != trigger.event.data.new_state.state)
+           and trigger.event.data.entity_id in integration_entities('matter') }}
+  actions:
+    - action: mqtt.publish
+      data:
+        topic: "hass/{{ trigger.event.data.entity_id | replace('.', '/') }}/state"
+        payload: "{{ trigger.event.data.new_state.state }}"
+        qos: 1
+        retain: true
 ```
-{: file="iot/edge/home-assistant/statestream.yaml" }
+{: file="iot/edge/home-assistant/matter-statestream.yaml" }
+{% endraw %}
 
 ```yaml
 apiVersion: apps/v1
@@ -85,7 +104,8 @@ spec:
     spec:
       hostNetwork: true                    # 기기 탐색(mDNS·SSDP)과 Matter 서버·OTBR 접근을 노드 네트워크에서 직접 합니다
       dnsPolicy: ClusterFirstWithHostNet   # hostNetwork 에서도 mosquitto.mosquitto.svc 같은 클러스터 이름을 풉니다
-      # 첫 기동에 HA 가 만든 configuration.yaml 에 mqtt_statestream 블록이 없으면 덧붙입니다. 파일이 아직 없으면(최초 기동) 건너뛰고 다음 기동에 붙입니다.
+      # 첫 기동에 HA 가 만든 configuration.yaml 에 Matter 재발행 자동화 include 가 없으면 덧붙입니다. 파일이 아직 없으면(최초 기동) 건너뛰고 다음 기동에 붙입니다.
+      # 자동화 파일은 매 기동 복사해 이 저장소의 수정이 재기동으로 반영됩니다.
       # 프록시 신뢰(http)는 HA 2026 부터 YAML 이 아니라 .storage 에서 관리하므로 setup-home-assistant.sh 가 API 로 설정합니다.
       initContainers:
         - name: seed-config
@@ -96,7 +116,8 @@ spec:
             - |
               f=/config/configuration.yaml
               [ -f $f ] || exit 0
-              grep -q '^mqtt_statestream:' $f || cat /seed/statestream.yaml >> $f
+              cp /seed/matter-statestream.yaml /config/matter-statestream.yaml
+              grep -q '^automation matter:' $f || printf '\n# --- iot/edge/home-assistant 가 덧붙인 설정. Matter 통합 엔티티 상태를 MQTT 로 재발행합니다 (자동화는 initContainer 가 복사) ---\nautomation matter: !include matter-statestream.yaml\n' >> $f
           volumeMounts:
             - { name: config, mountPath: /config }
             - { name: seed, mountPath: /seed }
@@ -546,12 +567,12 @@ bash setup-home-assistant.sh http://[EDGE_IP]:8123
 
 ## 4. Matter 상태를 수집 파이프라인에 연결
 
-`mqtt_statestream` 은 엔티티 상태가 바뀔 때마다 `hass/[도메인]/[엔티티]/state` 토픽에 값을 **평문**으로 발행합니다(`21.5`, `on`, `off`, `unavailable`). Telegraf 에 이 토픽을 받는 입력을 추가하고, 숫자는 `value`, 그 외는 `value_text` 로 나누는 프로세서를 둡니다. `on`/`off` 는 그래프를 그릴 수 있게 1/0 도 넣고, 빈 메시지(유지 메시지 지우기)는 버립니다.
+1단계의 자동화는 Matter 엔티티 상태가 바뀔 때마다 `hass/[도메인]/[엔티티]/state` 토픽에 값을 **평문**으로 발행합니다(`21.5`, `on`, `off`, `unavailable`). Telegraf 에 이 토픽을 받는 입력을 추가하고, 숫자는 `value`, 그 외는 `value_text` 로 나누는 프로세서를 둡니다. `on`/`off` 는 그래프를 그릴 수 있게 1/0 도 넣고, 빈 메시지(유지 메시지 지우기)는 버립니다.
 
 {% raw %}
 ```toml
-# Home Assistant 의 mqtt_statestream(Matter 기기). 토픽 hass/<도메인>/<엔티티>/state, 값은 평문(21.5, on, off, unavailable).
-# HA 설정에서 이름이 matter_ 로 시작하는 엔티티만 발행하므로 Zigbee 기기와 중복되지 않습니다. 시각은 수신 시각입니다.
+# Home Assistant 가 재발행한 Matter 기기 상태. 토픽 hass/<도메인>/<엔티티>/state, 값은 평문(21.5, on, off, unavailable).
+# HA 자동화가 Matter 통합 소속 엔티티만 발행하므로 Zigbee 기기와 중복되지 않습니다. 시각은 수신 시각입니다.
 [[inputs.mqtt_consumer]]
   servers = ["tcp://mosquitto.mosquitto.svc.cluster.local:1883"]
   topics = ["hass/+/+/state"]
@@ -597,11 +618,11 @@ def apply(metric):
 ```bash
 # 커밋하고 push
 git add iot/edge/telegraf/telegraf.conf
-git commit -m "feat(iot): Telegraf 에 Home Assistant statestream(Matter 기기) 입력 추가"
+git commit -m "feat(iot): Telegraf 에 Home Assistant 재발행(Matter 기기) 입력 추가"
 git push
 ```
 
-Matter 기기가 아직 없어도 이름이 `matter_` 로 시작하는 HA 헬퍼(예: 숫자 입력 `input_number.matter_test`)를 만들어 값을 바꿔 보면 경로 전체를 확인할 수 있습니다. 확인 뒤 헬퍼는 지웁니다.
+Matter 기기를 하나 등록한 뒤 **개발자 도구** > **상태** 에서 그 기기의 센서 엔티티 상태를 임의 값으로 바꿔 보면, 실제 값이 바뀔 때까지 기다리지 않고 경로 전체를 확인할 수 있습니다.
 
 - **확인:** 허브에서 `kubectl -n timescaledb exec deploy/timescaledb -- psql -U iot -d iot -c "select time, site, domain, device, value, value_text from hass order by time desc limit 5;"` 에 `site` 가 `[SITE]`, `device` 가 엔티티 이름인 행이 보이고, 숫자 상태는 `value`, `on` 은 `value` 1 과 `value_text` `on` 으로 들어갑니다. Telegraf 가 다시 붙을 때 브로커가 유지 메시지를 다시 보내므로 재시작 직후 각 엔티티의 마지막 값이 한 번 더 들어올 수 있습니다.
 
@@ -717,13 +738,13 @@ HA 휴대폰 앱에서는 **내부 URL** 을 `http://[EDGE_IP]:8123`(집 Wi-Fi �
 ```bash
 # 엣지 kubeconfig 로 HA 로그의 오류와 통합 상태
 E="--kubeconfig ~/k3s-[SITE].yaml"
-kubectl $E -n home-assistant logs deploy/home-assistant | grep -E "mqtt_statestream|reverse proxy" | tail -3
+kubectl $E -n home-assistant logs deploy/home-assistant | grep -E "automation|reverse proxy" | tail -3
 
 # Thread 보더 라우터 상태 (OTBR 을 쓰는 경우)
 curl -s http://[EDGE_IP]:8081/node/state
 ```
 
-- **확인:** HA 로그에 `mqtt_statestream` 설정 실패나 reverse proxy 오류가 없습니다. OTBR 상태는 `"leader"` 입니다. HA 의 **설정 > 기기 및 서비스**에 MQTT 아래 Zigbee2MQTT 브리지와 기기들이 자동으로 보입니다.
+- **확인:** HA 로그에 자동화 설정 오류나 reverse proxy 오류가 없고, **설정 > 자동화 및 장면** 에 `Matter 상태를 MQTT 로 재발행` 이 보입니다. OTBR 상태는 `"leader"` 입니다. HA 의 **설정 > 기기 및 서비스**에 MQTT 아래 Zigbee2MQTT 브리지와 기기들이 자동으로 보입니다.
 
 ## 트러블슈팅
 
@@ -758,7 +779,8 @@ curl -s http://[EDGE_IP]:8081/node/state
 ## 참고 자료
 
 - [Home Assistant - Matter](https://www.home-assistant.io/integrations/matter/)
-- [Home Assistant - MQTT Statestream](https://www.home-assistant.io/integrations/mqtt_statestream/)
+- [Home Assistant - Templating (integration_entities)](https://www.home-assistant.io/docs/configuration/templating/)
+- [Home Assistant - MQTT (Publish action)](https://www.home-assistant.io/integrations/mqtt/)
 - [Home Assistant - HTTP](https://www.home-assistant.io/integrations/http/)
 - [Home Assistant - Multi-factor authentication](https://www.home-assistant.io/docs/authentication/multi-factor-auth/)
 - [Home Assistant - WebSocket API](https://developers.home-assistant.io/docs/api/websocket/)
