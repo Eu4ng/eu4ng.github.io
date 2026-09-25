@@ -61,6 +61,8 @@ configMapGenerator:
   - name: zigbee2mqtt-seed
     files:
       - configuration.yaml
+    options:
+      disableNameSuffixHash: true   # 시드는 첫 기동에만 복사되므로, 내용이 바뀌어도 이름(해시)을 바꿔 Z2M 을 재기동하지 않습니다
 ```
 {: file="iot/edge/zigbee2mqtt/kustomization.yaml" }
 
