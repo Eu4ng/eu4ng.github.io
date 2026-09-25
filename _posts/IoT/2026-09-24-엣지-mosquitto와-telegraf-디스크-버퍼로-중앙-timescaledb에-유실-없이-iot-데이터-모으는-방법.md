@@ -403,8 +403,8 @@ Telegraf 설정 하나를 모든 지역이 공유합니다. 지역 이름과 허
 
 # 모든 기기 값은 테이블 readings 하나에 "행 하나 = 기기 하나의 속성 하나" 로 들어갑니다.
 # 수집기(Zigbee2MQTT, Home Assistant …)마다 다른 메시지 모양은 입력과 아래 starlark 에서만 흡수하므로, 수집기를 바꿔도 입력 블록만 새로 쓰면 됩니다.
-#   태그(컬럼): site, protocol(zigbee, matter …), source(z2m, hass …), device, property, hw_id, model, vendor, (Matter) node, entity
-#   방은 따로 두지 않고 기기 이름 <방>-<종류>[번호] 의 첫 - 앞을 조회할 때 자릅니다 (split_part(device, '-', 1))
+#   컬럼 순서: time, site, room, device, property, value, value_text, protocol, source, vendor, model, hw_id, node (아래 create_templates)
+#   기기 이름 <방>-<종류>[번호] 는 첫 - 에서 나눠 room(방)과 device(종류[번호])에 넣습니다. device 는 방마다 겹칠 수 있고 실물 식별은 hw_id 가 맡습니다
 #   필드(컬럼): value(숫자. on/off·true/false 는 1/0), value_text(문자열 원문)
 
 # Zigbee2MQTT 기기 메시지. 한 단계(+)만 구독하면 bridge/#, <기기>/set|get|availability 는 자연히 빠집니다 (friendly_name 에 / 를 쓰지 않는 전제).
@@ -466,6 +466,10 @@ def apply(metric):
             tags[HW_TAGS.get(k, k)] = v
     if not valid_name(tags.get("device", "")):
         return []                     # 이름이 없거나(옛 형식의 유지 메시지 등) 이름 규칙에 맞지 않는 기기는 버립니다
+    name = tags["device"]
+    i = name.find("-")
+    tags["room"] = name[:i]           # bedroom2-air-quality → room bedroom2, device air-quality
+    tags["device"] = name[i + 1:]
     prop = tags.pop("property", None)
     out = []
     for k, v in metric.fields.items():
@@ -494,16 +498,18 @@ def apply(metric):
 '''
 
 # 허브 TimescaleDB. 태그를 외래 키 테이블로 빼지 않고 컬럼으로 두어 지역 간 병합과 중복 제거가 쉽게 합니다.
-# 압축은 시계열 하나(site, device, property)끼리 묶어 값이 비슷한 것끼리 모이게 합니다.
+# 테이블은 컬럼 순서를 정해 두려고 직접 만들고, 이후 새 태그는 Telegraf 가 끝에 컬럼으로 붙입니다.
+# 압축은 시계열 하나(site, room, device, property)끼리 묶어 값이 비슷한 것끼리 모이게 합니다.
 [[outputs.postgresql]]
   connection = "host=${HUB_PG_HOST} port=${HUB_PG_PORT} user=iot password=${HUB_PG_PASSWORD} dbname=iot sslmode=disable connect_timeout=10"
   startup_error_behavior = "retry"    # 허브가 안 닿는 상태로 파드가 떠도 종료하지 않고 버퍼에 쌓으며 연결을 재시도합니다 (기본값은 종료)
   tags_as_foreign_keys = false
   timestamp_column_type = "timestamp with time zone"
   create_templates = [
-    '''CREATE TABLE {{ .table }} ({{ .columns }})''',
+    '''CREATE TABLE {{ .table }} (time timestamptz NOT NULL, site text, room text, device text, property text, value double precision, value_text text,
+        protocol text, source text, vendor text, model text, hw_id text, node text)''',
     '''SELECT create_hypertable({{ .table|quoteLiteral }}, 'time', chunk_time_interval => INTERVAL '7d')''',
-    '''ALTER TABLE {{ .table }} SET (timescaledb.compress, timescaledb.compress_segmentby = 'site, device, property', timescaledb.compress_orderby = 'time DESC')''',
+    '''ALTER TABLE {{ .table }} SET (timescaledb.compress, timescaledb.compress_segmentby = 'site, room, device, property', timescaledb.compress_orderby = 'time DESC')''',
     '''SELECT add_compression_policy({{ .table|quoteLiteral }}, INTERVAL '30d')''',
   ]
 
@@ -597,22 +603,26 @@ spec:
 ```
 {: file="iot/edge/telegraf/pvc.yaml" }
 
-`tags_as_foreign_keys = false` 라 태그가 모두 본 테이블의 컬럼이 됩니다. 행 하나만 봐도 어느 지역의 어느 기기인지 알 수 있어 나중에 지역별 로컬 DB 와 병합하거나 중복을 걸러 내기 쉽습니다. 테이블은 첫 메시지가 올 때 Telegraf 가 `create_templates` 대로 만들고(하이퍼테이블, 7일 청크, 30일 뒤 압축), 새 태그가 보이면 컬럼을 추가합니다.
+`tags_as_foreign_keys = false` 라 태그가 모두 본 테이블의 컬럼이 됩니다. 행 하나만 봐도 어느 지역의 어느 기기인지 알 수 있어 나중에 지역별 로컬 DB 와 병합하거나 중복을 걸러 내기 쉽습니다. 테이블은 첫 메시지가 올 때 Telegraf 가 `create_templates` 대로 만들고(하이퍼테이블, 7일 청크, 30일 뒤 압축), 새 태그가 보이면 끝에 컬럼을 추가합니다. 컬럼 순서를 정해 두려고 `CREATE TABLE` 에 컬럼을 직접 적었으며, 아래 표가 그 순서입니다.
 
 | 컬럼 | 예 | 내용 |
 |---|---|---|
+| `time` | `2026-09-25 15:51:04+00` | 기록 시각. Zigbee 는 기기 시각(`last_seen`), Matter 는 수신 시각 |
 | `site` | `daejeon` | 지역 |
-| `protocol` | `zigbee`, `matter` | 기기 통신 방식 |
-| `source` | `z2m`, `hass` | 수집기. 수집기를 바꿔도 `protocol` 은 그대로입니다 |
-| `device` | `bedroom2-motion` | 기기 이름. 방은 컬럼으로 두지 않고 조회할 때 첫 `-` 앞을 자릅니다(`split_part(device, '-', 1)`) |
+| `room` | `bedroom2` | 방. 기기 이름 `<방>-<종류>[번호]` 의 첫 `-` 앞 |
+| `device` | `motion2` | 기기 종류와 번호. 이름의 첫 `-` 뒤라 방마다 겹칠 수 있고, 실물 식별은 `hw_id` 가 맡습니다 |
 | `property` | `temperature`, `presence` | 측정 항목 |
 | `value` | `26.3`, `1` | 숫자 값. `on`/`off`, `true`/`false` 는 1/0 |
 | `value_text` | `ON`, `false` | 문자열 원문 |
-| `hw_id`, `model`, `vendor` | `0xa4c138f95fdbf3ad`, `ZG-204ZV` | 실물 기기. Zigbee 는 IEEE 주소, Matter 는 시리얼 |
+| `protocol` | `zigbee`, `matter` | 기기 통신 방식 |
+| `source` | `z2m`, `hass` | 수집기. 수집기를 바꿔도 `protocol` 은 그대로입니다 |
+| `vendor`, `model` | `HOBEIAN`, `ZG-204ZV` | 실물 기기의 제조사와 모델 |
+| `hw_id` | `0xa4c138f95fdbf3ad` | 실물 기기의 고유 ID. Zigbee 는 IEEE 주소, Matter 는 시리얼 |
+| `node` | `CFEE358179DBE7B6-0000000000000001` | Matter 노드 ID (Matter 만) |
 
 기기 이름이 `<방>-<종류>[번호]` 규칙(영문 소문자·숫자)에 맞지 않으면 starlark 가 그 메시지를 버립니다. 페어링 직후 Zigbee 기기의 `0x…` 이름, 이름을 정하기 전 Matter 기기의 HA 기본 이름, 교체한 옛 기기의 `retired-…` 이름이 여기에 걸리므로 기기를 추가하면 바로 이름을 붙입니다.
 
-압축은 `site, device, property` 가 같은 행끼리 묶습니다. 묶음 하나가 시계열 하나(예: 한 기기의 온도)가 되어 값이 비슷한 것끼리 모이므로 압축이 잘 되고, 조회할 때도 필요한 묶음만 풉니다.
+압축은 `site, room, device, property` 가 같은 행끼리 묶습니다. 묶음 하나가 시계열 하나(예: 한 기기의 온도)가 되어 값이 비슷한 것끼리 모이므로 압축이 잘 되고, 조회할 때도 필요한 묶음만 풉니다.
 
 - **확인:** 이 단계도 파일만 만듭니다.
 
