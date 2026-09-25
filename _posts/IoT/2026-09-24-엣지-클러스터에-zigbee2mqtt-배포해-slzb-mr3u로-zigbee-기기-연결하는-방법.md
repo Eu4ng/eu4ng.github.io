@@ -238,10 +238,10 @@ kubectl $E -n zigbee2mqtt logs deploy/zigbee2mqtt | grep -E 'Socket connected|Co
 
 ## 4. 프런트엔드 접속과 기기 페어링
 
-내 PC 브라우저에서 `http://[EDGE_IP]:30083` 을 열고 시크릿 스크립트에 입력한 프런트엔드 토큰으로 들어갑니다. 상단의 **Permit join** 을 켠 뒤 기기를 페어링 모드로 만들면(기기마다 버튼을 몇 초 누르는 식) 목록에 나타납니다. 기기 이름(friendly name)은 토픽과 DB 의 `device` 컬럼에 그대로 쓰이므로 `<방>-<종류>` 형식의 영문 소문자로 바꿉니다(예: 온습도계 `bedroom-th`, 멀티 센서 `bedroom-multi`, 문 센서 `bedroom-door`). 종류는 측정 항목이 아니라 기기 역할이고, 같은 방에 여럿이면 `bedroom-th2` 처럼 번호를 붙입니다. Telegraf 가 이름을 첫 `-` 에서 잘라 `room`, `purpose` 컬럼에 넣으므로 방 이름에는 `-` 를 쓰지 않습니다(`livingroom`). 또 `include_device_information` 으로 실린 실물 기기의 IEEE 주소와 모델을 `ieee`, `model`, `vendor` 컬럼에 넣습니다.
+내 PC 브라우저에서 `http://[EDGE_IP]:30083` 을 열고 시크릿 스크립트에 입력한 프런트엔드 토큰으로 들어갑니다. 상단의 **Permit join** 을 켠 뒤 기기를 페어링 모드로 만들면(기기마다 버튼을 몇 초 누르는 식) 목록에 나타납니다. 기기 이름(friendly name)은 토픽과 DB 의 `device` 컬럼에 그대로 쓰이므로 `<방>-<종류>` 형식의 영문 소문자로 바꿉니다(예: 온습도계 `bedroom-th`, 멀티 센서 `bedroom-multi`, 문 센서 `bedroom-door`). 종류는 측정 항목이 아니라 기기 역할이고, 같은 방에 여럿이면 `bedroom-th2` 처럼 번호를 붙입니다. Telegraf 가 이름을 첫 `-` 에서 잘라 `room`, `purpose` 컬럼에 넣으므로 방 이름에는 `-` 를 쓰지 않습니다(`livingroom`). 또 `include_device_information` 으로 실린 실물 기기의 IEEE 주소와 모델을 `hw_id`, `model`, `vendor` 컬럼에 넣습니다.
 
 - 기기를 다른 방으로 옮기면 옮기는 즉시 이름을 새 방으로 바꿉니다. 바꾼 시각부터 새 방으로 기록되고, 과거 행은 옛 방으로 남습니다.
-- 기기를 교체하면 옛 기기를 `retired-[기기 이름]` 으로 바꾸거나 제거하고, 새 기기에 옛 이름을 줍니다. 이름은 이어지고 `ieee`, `model` 만 바뀝니다.
+- 기기를 교체하면 옛 기기를 `retired-[기기 이름]` 으로 바꾸거나 제거하고, 새 기기에 옛 이름을 줍니다. 이름은 이어지고 `hw_id`, `model` 만 바뀝니다.
 
 > 이름에 `/` 를 넣으면 토픽이 `zigbee2mqtt/거실/온도` 처럼 두 단계가 되어 Telegraf 의 `zigbee2mqtt/+` 구독에 잡히지 않습니다.
 {: .prompt-warning }
@@ -257,16 +257,16 @@ kubectl $E -n mosquitto run mq-sub --rm -i -q --restart=Never --image=eclipse-mo
 
 ## 5. 허브 DB 에서 확인
 
-Telegraf 는 기기 메시지의 숫자·불리언·문자열 필드를 그대로 컬럼으로 넣고, 처음 보는 필드는 컬럼을 추가합니다. 허브에서 기기별 최근 행을 봅니다.
+Telegraf 는 기기 메시지의 필드 하나를 `readings` 테이블의 행 하나(`property`, `value`, `value_text`)로 넣습니다. 기기 설정값(보정값, 감도, 표시등 등)은 버립니다. 허브에서 기기별로 들어온 속성을 봅니다.
 
 ```bash
 # 허브 control plane
 kubectl -n timescaledb exec deploy/timescaledb -- psql -U iot -d iot \
-  -c "select device, room, purpose, ieee, model, count(*), max(time) from zigbee2mqtt group by 1,2,3,4,5 order by 1;" \
-  -c "\d zigbee2mqtt"
+  -c "select device, room, purpose, hw_id, model, string_agg(distinct property, ', ') as properties, max(time)
+      from readings where protocol = 'zigbee' group by 1,2,3,4,5 order by 1;"
 ```
 
-- **확인:** `device` 에 기기 이름, `room`·`purpose` 에 이름을 자른 값, `ieee`·`model` 에 실물 기기가 보이고 `max(time)` 이 기기가 마지막으로 보고한 시각(`last_seen`)과 같습니다. 테이블 정의에 기기가 보내는 필드(`temperature`, `battery`, `linkquality` 등)가 컬럼으로 추가되어 있습니다.
+- **확인:** `device` 에 기기 이름, `room`·`purpose` 에 이름을 자른 값, `hw_id`·`model` 에 실물 기기가 보이고 `max(time)` 이 기기가 마지막으로 보고한 시각(`last_seen`)과 같습니다. `properties` 에 기기가 보내는 측정 항목(`temperature`, `battery`, `linkquality` 등)이 보입니다.
 
 ## 마무리
 
