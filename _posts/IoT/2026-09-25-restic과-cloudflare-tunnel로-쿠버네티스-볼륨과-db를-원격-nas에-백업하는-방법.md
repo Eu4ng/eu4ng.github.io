@@ -34,8 +34,7 @@ permalink: /posts/50/
 
 다음 항목이 준비되어 있어야 합니다.
 
-- NAS 에서 도는 cloudflared 커넥터가 `nas-ssh.[DOMAIN]` 을 NAS 의 `ssh://localhost:22` 로 잇는 Cloudflare Tunnel 과, 그 이름에 서비스 토큰 정책을 건 Access 애플리케이션
-- 허브 Secret `backup/cloudflare-access` 에 들어 있는 Access 서비스 토큰(`CF_ACCESS_CLIENT_ID`, `CF_ACCESS_CLIENT_SECRET`)
+- `nas-ssh.[DOMAIN]` 을 NAS 의 SSH 로 잇는 Cloudflare Tunnel 과, 허브 Secret `backup/cloudflare-access` 에 들어 있는 Access 서비스 토큰 ([Cloudflare Tunnel로 포트 열지 않고 홈랩 서버와 원격 NAS에 SSH 접속하는 방법](/posts/51/))
 - 엣지 클러스터와 허브 TimescaleDB ([엣지 Mosquitto와 Telegraf 디스크 버퍼로 중앙 TimescaleDB에 유실 없이 IoT 데이터 모으는 방법](/posts/43/)), control plane 의 엣지 kubeconfig `~/k3s-[SITE].yaml` ([Proxmox에 Ansible로 k3s 엣지 클러스터 만들고 Argo CD 원격 클러스터로 등록하는 방법](/posts/42/))
 - 허브 `mineru` 네임스페이스에 있는 GHCR pull Secret `ghcr-pull` 과, 이미지를 빌드할 GitHub Actions ([쿠버네티스에 MinerU 파싱 서버 배포하는 방법](/posts/38/))
 
