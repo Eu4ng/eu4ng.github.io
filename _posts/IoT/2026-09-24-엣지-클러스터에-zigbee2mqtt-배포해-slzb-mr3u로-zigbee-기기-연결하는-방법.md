@@ -72,7 +72,7 @@ homeassistant:
   enabled: true                  # Home Assistant 가 MQTT 디스커버리로 기기를 보게 합니다 (수집 경로와 무관)
 mqtt:
   base_topic: zigbee2mqtt        # Telegraf 가 zigbee2mqtt/+ 를 구독합니다
-# 기기 이름(friendly_name)은 <방>-<용도> (예: bedroom-temp). Telegraf 가 첫 - 에서 잘라 room, purpose 컬럼에 넣습니다.
+# 기기 이름(friendly_name)은 <방>-<종류> (예: bedroom-th). Telegraf 가 첫 - 에서 잘라 room, purpose 컬럼에 넣으므로 방 이름에는 - 를 쓰지 않습니다.
 # / 는 쓰지 않습니다(토픽이 두 단계가 되어 수집되지 않음). 옮기면 이름을 새 방으로, 교체하면 새 기기에 옛 이름을 줍니다.
 frontend:
   enabled: true
@@ -228,7 +228,7 @@ kubectl $E -n zigbee2mqtt logs deploy/zigbee2mqtt | grep -E 'Socket connected|Co
 
 ## 4. 프런트엔드 접속과 기기 페어링
 
-내 PC 브라우저에서 `http://[EDGE_IP]:30083` 을 열고 시크릿 스크립트에 입력한 프런트엔드 토큰으로 들어갑니다. 상단의 **Permit join** 을 켠 뒤 기기를 페어링 모드로 만들면(기기마다 버튼을 몇 초 누르는 식) 목록에 나타납니다. 기기 이름(friendly name)은 토픽과 DB 의 `device` 컬럼에 그대로 쓰이므로 `<방>-<용도>` 형식의 영문 소문자로 바꿉니다(예: `bedroom-temp`). Telegraf 가 이름을 첫 `-` 에서 잘라 `room`, `purpose` 컬럼에 넣고, `include_device_information` 으로 실린 실물 기기의 IEEE 주소와 모델을 `ieee`, `model`, `vendor` 컬럼에 넣습니다.
+내 PC 브라우저에서 `http://[EDGE_IP]:30083` 을 열고 시크릿 스크립트에 입력한 프런트엔드 토큰으로 들어갑니다. 상단의 **Permit join** 을 켠 뒤 기기를 페어링 모드로 만들면(기기마다 버튼을 몇 초 누르는 식) 목록에 나타납니다. 기기 이름(friendly name)은 토픽과 DB 의 `device` 컬럼에 그대로 쓰이므로 `<방>-<종류>` 형식의 영문 소문자로 바꿉니다(예: 온습도계 `bedroom-th`, 멀티 센서 `bedroom-multi`, 문 센서 `bedroom-door`). 종류는 측정 항목이 아니라 기기 역할이고, 같은 방에 여럿이면 `bedroom-th2` 처럼 번호를 붙입니다. Telegraf 가 이름을 첫 `-` 에서 잘라 `room`, `purpose` 컬럼에 넣으므로 방 이름에는 `-` 를 쓰지 않습니다(`livingroom`). 또 `include_device_information` 으로 실린 실물 기기의 IEEE 주소와 모델을 `ieee`, `model`, `vendor` 컬럼에 넣습니다.
 
 - 기기를 다른 방으로 옮기면 옮기는 즉시 이름을 새 방으로 바꿉니다. 바꾼 시각부터 새 방으로 기록되고, 과거 행은 옛 방으로 남습니다.
 - 기기를 교체하면 옛 기기를 `retired-[기기 이름]` 으로 바꾸거나 제거하고, 새 기기에 옛 이름을 줍니다. 이름은 이어지고 `ieee`, `model` 만 바뀝니다.
