@@ -269,7 +269,7 @@ unset T
 
 [지역 HA 글](/posts/48/)의 `setup-home-assistant.sh` 를 중앙 HA 에도 씁니다. 변수 블록에서 MQTT·Matter·OTBR 주소를 비우면 그 통합은 건너뛰고, `REMOTES` 에 적은 지역마다 Remote Home Assistant 연결을 추가합니다. 지역 HA 토큰은 그 지역 클러스터의 Secret 에서 읽습니다. 엔티티 접두사(`[SITE_CODE]_`)는 지역마다 달라야 하며, 여러 지역에 같은 이름의 엔티티가 있어도 충돌하지 않게 합니다. 서비스 이름에도 같은 접두사가 붙습니다.
 
-중앙 HA 앞의 프록시는 같은 클러스터의 Traefik 파드이므로 `TRUSTED_PROXIES` 에는 허브의 파드 대역을 넣습니다. kubeadm 에 Flannel 기본값을 썼다면 `10.244.0.0/16` 입니다.
+중앙 HA 앞의 프록시는 같은 클러스터의 Traefik 파드이므로 `TRUSTED_PROXIES` 에는 허브의 파드 대역을 넣습니다. kubeadm 에 Flannel 기본값을 썼다면 `10.244.0.0/16` 입니다. 밖에서 오는 요청은 그 앞에 Cloudflare 를 거치므로 스크립트의 Cloudflare 대역(`$CLOUDFLARE_IPV4`)도 함께 넣습니다. 빼면 HA 가 Cloudflare 주소를 접속자로 보고 로그인 실패 차단도 그 주소에 겁니다.
 
 ```bash
 # control plane 에서 스크립트 내려받기
@@ -281,17 +281,15 @@ wget https://eu4ng.github.io/assets/scripts/iot/setup-home-assistant.sh
 MQTT_BROKER=
 MATTER_URL=
 OTBR_URL=
-TRUSTED_PROXIES="[POD_CIDR]"
+TRUSTED_PROXIES="[POD_CIDR] $CLOUDFLARE_IPV4"
 KUBECTL="kubectl"
 REMOTES="[SITE_CODE]_|[EDGE_IP]:8123|$HOME/k3s-[SITE].yaml|[SITE_NAME] "
 ```
 {: file="setup-home-assistant.sh" }
 
 ```bash
-# control plane. 포트 포워딩으로 중앙 HA 에 붙어 실행합니다
-kubectl -n home-assistant port-forward svc/home-assistant 18123:8123 >/dev/null & PF=$!
-bash setup-home-assistant.sh http://127.0.0.1:18123
-kill $PF
+# control plane. 서비스 주소로 붙습니다(포트 포워딩은 스크립트가 HA 를 재시작할 때 끊깁니다)
+bash setup-home-assistant.sh http://$(kubectl -n home-assistant get svc home-assistant -o jsonpath='{.spec.clusterIP}'):8123
 ```
 
 <details markdown="1">
@@ -316,7 +314,10 @@ MQTT_PORT=1883
 MQTT_USER=homeassistant
 MATTER_URL=ws://127.0.0.1:5580/ws                   # 같은 노드의 hostNetwork 파드(matter-server)
 OTBR_URL=http://127.0.0.1:8081                      # 같은 노드의 hostNetwork 파드(otbr). OTBR 이 없으면 비워 둡니다
-TRUSTED_PROXIES="[HUB_NODE_IP_1] [HUB_NODE_IP_2]"   # HA 앞 역방향 프록시의 주소(허브 파드 요청은 허브 노드 주소로 들어옴). 비우면 HTTP 설정 생략
+# Cloudflare 프록시 대역(https://www.cloudflare.com/ips-v4). 밖에서 Cloudflare 를 거쳐 오면 이 대역까지 신뢰해야 HA 가 실제 접속자 IP 를 보고,
+# 로그인 실패 차단도 Cloudflare 주소가 아니라 그 접속자에게 겁니다.
+CLOUDFLARE_IPV4="173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22"
+TRUSTED_PROXIES="[HUB_NODE_IP_1] [HUB_NODE_IP_2] $CLOUDFLARE_IPV4"   # HA 앞 역방향 프록시 주소(허브 파드 요청은 허브 노드 주소로 들어옴)와 Cloudflare. 비우면 HTTP 설정 생략
 LOGIN_ATTEMPTS=5                                    # 로그인 실패가 이 횟수면 그 IP 를 차단
 HA_TOKEN_SECRET=home-assistant/ha-api-token         # 토큰을 담은 Secret (네임스페이스/이름, 키 token)
 KUBECTL="kubectl --kubeconfig $HOME/k3s-[SITE].yaml"   # 이 HA 가 있는 클러스터에 접근하는 kubectl
@@ -530,7 +531,8 @@ base = dict(cur["pending"] or cur["stable"] or cur["default"])
 for k in ("created_at", "error", "error_message"): base.pop(k, None)
 if all(base.get(k) == v for k, v in want.items()) and cur["pending"] is None:
     print("- 이미 같은 설정, 건너뜀"); sys.exit(0)
-if not (cur["pending"] and all(base.get(k) == v for k, v in want.items())):
+# 같은 설정이 pending 으로 이미 적용돼 돌고 있으면 확정만 합니다. pending 이 남아 있어도 되돌려진 상태(stable 로 동작)면 다시 넣습니다.
+if not (cur["pending"] and cur["active_config_type"] == "pending" and all(base.get(k) == v for k, v in want.items())):
     base.update(want)
     r = WS().call(type="http/config/configure", config=base)
     print(f"- pending 으로 저장, 재시작: {r.get('restart')}")
@@ -587,6 +589,14 @@ unset T
 
 - **원인:** 중앙 HA 가 아직 Traefik 에서 온 요청(`X-Forwarded-For` 포함)을 신뢰하지 않습니다. HA 2026 에서는 `configuration.yaml` 의 `http:` 블록이 무시되고 HTTP 설정을 내부 저장소에서 관리합니다.
 - **해결:** 온보딩은 3단계처럼 포트 포워딩으로 하고, 4단계 스크립트가 API 로 `trusted_proxies` 를 넣게 합니다.
+
+</details>
+
+<details markdown="1">
+<summary><code>Login attempt or request with invalid authentication from 172.69.…</code> — 로그의 접속자가 Cloudflare 주소일 때</summary>
+
+- **원인:** HA 가 앞단 Traefik 만 신뢰하고 그 앞의 Cloudflare 는 신뢰하지 않아, `X-Forwarded-For` 를 따라가다 Cloudflare 주소에서 멈춥니다. 이 상태에서는 로그인 실패 차단이 실제 접속자가 아니라 Cloudflare 주소에 걸려, 같은 Cloudflare 경로로 들어오는 다른 접속까지 막힐 수 있습니다.
+- **해결:** `TRUSTED_PROXIES` 에 스크립트의 `$CLOUDFLARE_IPV4` 를 함께 넣고 다시 실행합니다. 이후 로그에는 접속자의 공인 IP 가 찍힙니다.
 
 </details>
 
