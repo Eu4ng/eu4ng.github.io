@@ -99,8 +99,8 @@
           "type": "grafana-postgresql-datasource",
           "uid": "timescaledb"
         },
-        "query": "SELECT DISTINCT device FROM hass WHERE $__timeFilter(time) AND value IS NOT NULL AND site IN ($site)",
-        "definition": "SELECT DISTINCT device FROM hass WHERE $__timeFilter(time) AND value IS NOT NULL AND site IN ($site)",
+        "query": "SELECT DISTINCT device AS __value, regexp_replace(device, '_pm25$', '_pm2.5') AS __text FROM hass WHERE $__timeFilter(time) AND value IS NOT NULL AND site IN ($site)",
+        "definition": "SELECT DISTINCT device AS __value, regexp_replace(device, '_pm25$', '_pm2.5') AS __text FROM hass WHERE $__timeFilter(time) AND value IS NOT NULL AND site IN ($site)",
         "refresh": 2,
         "sort": 1,
         "multi": true,
@@ -630,7 +630,7 @@
           "editorMode": "code",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT $__timeGroupAlias(time, $__interval), device AS metric, avg(value) AS value\nFROM hass\nWHERE $__timeFilter(time) AND value IS NOT NULL AND site IN ($site) AND ('__all__' IN ($entity) OR device IN ($entity))\nGROUP BY 1, 2\nORDER BY 1"
+          "rawSql": "SELECT $__timeGroupAlias(time, $__interval), regexp_replace(device, '_pm25$', '_pm2.5') AS metric, avg(value) AS value\nFROM hass\nWHERE $__timeFilter(time) AND value IS NOT NULL AND site IN ($site) AND ('__all__' IN ($entity) OR device IN ($entity))\nGROUP BY 1, 2\nORDER BY 1"
         }
       ],
       "fieldConfig": {
@@ -678,7 +678,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT time, site, domain, device, value, value_text\nFROM hass\nWHERE $__timeFilter(time) AND site IN ($site) AND ('__all__' IN ($entity) OR device IN ($entity))\nORDER BY time DESC\nLIMIT 200"
+          "rawSql": "SELECT time, site, domain, regexp_replace(device, '_pm25$', '_pm2.5') AS device, value, value_text\nFROM hass\nWHERE $__timeFilter(time) AND site IN ($site) AND ('__all__' IN ($entity) OR device IN ($entity))\nORDER BY time DESC\nLIMIT 200"
         }
       ],
       "fieldConfig": {
