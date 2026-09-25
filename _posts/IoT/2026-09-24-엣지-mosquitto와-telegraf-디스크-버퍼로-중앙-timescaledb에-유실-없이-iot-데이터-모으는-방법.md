@@ -403,9 +403,10 @@ Telegraf 설정 하나를 모든 지역이 공유합니다. 지역 이름과 허
 
 # 모든 기기 값은 테이블 readings 하나에 "행 하나 = 기기 하나의 속성 하나" 로 들어갑니다.
 # 수집기(Zigbee2MQTT, Home Assistant …)마다 다른 메시지 모양은 입력과 아래 starlark 에서만 흡수하므로, 수집기를 바꿔도 입력 블록만 새로 쓰면 됩니다.
-#   컬럼 순서: time, site, room, device, property, value, value_text, protocol, source, vendor, model, hw_id, node (아래 create_templates)
+#   컬럼 순서: time, site, room, device, property, value, unit, value_text, protocol, source, vendor, model, hw_id, node (아래 create_templates)
 #   기기 이름 <방>-<종류>[번호] 는 첫 - 에서 나눠 room(방)과 device(종류[번호])에 넣습니다. device 는 방마다 겹칠 수 있고 실물 식별은 hw_id 가 맡습니다
 #   필드(컬럼): value(숫자. on/off·true/false 는 1/0), value_text(문자열 원문)
+#   unit 은 기기 정의의 단위입니다(Zigbee2MQTT bridge/devices 의 exposes, HA 의 unit_of_measurement). 단위가 없는 값(presence 등)은 비어 있습니다
 
 # Zigbee2MQTT 기기 메시지. 한 단계(+)만 구독하면 bridge/#, <기기>/set|get|availability 는 자연히 빠집니다 (friendly_name 에 / 를 쓰지 않는 전제).
 [[inputs.mqtt_consumer]]
@@ -436,12 +437,29 @@ Telegraf 설정 하나를 모든 지역이 공유합니다. 지역 이름과 허
   [inputs.mqtt_consumer.tagdrop]
     device = ["bridge"]
 
+# Zigbee2MQTT 기기 정의(유지 메시지). 아래 starlark 가 기기·속성별 단위를 기억해 두고 기기 메시지에 unit 으로 붙이며, 이 메시지 자체는 버립니다.
+# 기기를 추가하거나 이름을 바꾸면 Zigbee2MQTT 가 다시 발행합니다. Telegraf 재시작 직후 이보다 먼저 온 기기 메시지 몇 개는 unit 이 비어 있을 수 있습니다.
+[[inputs.mqtt_consumer]]
+  servers = ["tcp://mosquitto.mosquitto.svc.cluster.local:1883"]
+  topics = ["zigbee2mqtt/bridge/devices"]
+  username = "${MQTT_USER}"
+  password = "${MQTT_PASSWORD}"
+  client_id = "telegraf-z2m-devices"
+  qos = 1
+  topic_tag = ""
+  name_override = "z2m_devices"
+  data_format = "value"
+  data_type = "string"                # JSON 전체를 문자열 필드 value 하나로 받아 starlark 가 풉니다
+
 # 필드 하나를 행 하나로 쪼개고 값을 value(숫자)와 value_text(문자열)로 나눕니다. 실물 기기 태그 이름도 여기서 통일합니다.
 # 메시지에 property 태그가 있으면(HA) 그 값이 속성 이름이고, 없으면(Zigbee2MQTT) 필드 이름이 속성 이름입니다.
+# 단위는 HA 메시지에는 unit 태그로 실려 오고, Zigbee2MQTT 는 기기 정의(z2m_devices)에서 기억해 둔 값을 붙입니다.
 [[processors.starlark]]
-  namepass = ["readings"]
+  namepass = ["readings", "z2m_devices"]
   order = 1
   source = '''
+load("json.star", "json")
+
 HW_TAGS = {"device_ieeeAddr": "hw_id", "serial": "hw_id", "device_model": "model", "device_manufacturerName": "vendor"}
 ON_OFF = {"on": 1.0, "off": 0.0, "true": 1.0, "false": 0.0}
 NAME_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789-"
@@ -459,7 +477,26 @@ def is_number(s):
     body = s[1:] if s[0] in "+-" else s
     return len(body) > 0 and all([c in "0123456789." for c in body.elems()]) and body != "."
 
+def collect_units(expose, units):
+    # exposes 는 features 안에 다시 exposes 가 들어 있을 수 있습니다(light, climate 등)
+    if expose.get("property") and expose.get("unit"):
+        units[expose["property"]] = expose["unit"]
+    for f in expose.get("features", []):
+        collect_units(f, units)
+
+def remember_units(metric):
+    units = {}
+    for d in json.decode(metric.fields["value"]):
+        u = {}
+        for e in (d.get("definition") or {}).get("exposes", []):
+            collect_units(e, u)
+        units[d.get("friendly_name", "")] = u
+    state["units"] = units
+
 def apply(metric):
+    if metric.name == "z2m_devices":
+        remember_units(metric)
+        return []
     tags = {}
     for k, v in metric.tags.items():
         if v != "":
@@ -467,6 +504,7 @@ def apply(metric):
     if not valid_name(tags.get("device", "")):
         return []                     # 이름이 없거나(옛 형식의 유지 메시지 등) 이름 규칙에 맞지 않는 기기는 버립니다
     name = tags["device"]
+    units = state.get("units", {}).get(name, {})
     i = name.find("-")
     tags["room"] = name[:i]           # bedroom2-air-quality → room bedroom2, device air-quality
     tags["device"] = name[i + 1:]
@@ -478,6 +516,8 @@ def apply(metric):
         for tk, tv in tags.items():
             m.tags[tk] = tv
         m.tags["property"] = prop or k
+        if "unit" not in tags and units.get(m.tags["property"]):
+            m.tags["unit"] = units[m.tags["property"]]
         if type(v) == "bool":
             m.fields["value"] = 1.0 if v else 0.0
             m.fields["value_text"] = "true" if v else "false"
@@ -506,7 +546,7 @@ def apply(metric):
   tags_as_foreign_keys = false
   timestamp_column_type = "timestamp with time zone"
   create_templates = [
-    '''CREATE TABLE {{ .table }} (time timestamptz NOT NULL, site text, room text, device text, property text, value double precision, value_text text,
+    '''CREATE TABLE {{ .table }} (time timestamptz NOT NULL, site text, room text, device text, property text, value double precision, unit text, value_text text,
         protocol text, source text, vendor text, model text, hw_id text, node text)''',
     '''SELECT create_hypertable({{ .table|quoteLiteral }}, 'time', chunk_time_interval => INTERVAL '7d')''',
     '''ALTER TABLE {{ .table }} SET (timescaledb.compress, timescaledb.compress_segmentby = 'site, room, device, property', timescaledb.compress_orderby = 'time DESC')''',
@@ -613,6 +653,7 @@ spec:
 | `device` | `motion2` | 기기 종류와 번호. 이름의 첫 `-` 뒤라 방마다 겹칠 수 있고, 실물 식별은 `hw_id` 가 맡습니다 |
 | `property` | `temperature`, `presence` | 측정 항목 |
 | `value` | `26.3`, `1` | 숫자 값. `on`/`off`, `true`/`false` 는 1/0 |
+| `unit` | `°C`, `mV`, `μg/m³` | 단위. Zigbee 는 Zigbee2MQTT 기기 정의(`bridge/devices`), Matter 는 HA 의 `unit_of_measurement` 에서 가져옵니다. 단위가 없는 값(`presence` 등)은 비어 있습니다 |
 | `value_text` | `ON`, `false` | 문자열 원문 |
 | `protocol` | `zigbee`, `matter` | 기기 통신 방식 |
 | `source` | `z2m`, `hass` | 수집기. 수집기를 바꿔도 `protocol` 은 그대로입니다 |

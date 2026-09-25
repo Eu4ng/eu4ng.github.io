@@ -63,7 +63,7 @@ configMapGenerator:
 # mqtt_statestream 은 통합 단위로 거르지 못해 엔티티 이름 규칙이 필요했으므로, 소속 통합(integration_entities)으로 거르는 자동화로 대신합니다.
 # Zigbee 기기는 MQTT 통합 소속이라 여기 걸리지 않고 zigbee2mqtt/ 토픽으로 따로 수집됩니다. 토픽은 mqtt_statestream 과 같습니다.
 # 값은 JSON 입니다. Telegraf 가 Zigbee 와 같은 테이블(readings)에 "기기 하나의 속성 하나" 로 넣도록 상태(state)에 다음을 붙입니다:
-#   device(HA 기기 이름, <방>-<용도>), property(엔티티 ID 에서 기기 이름을 뗀 측정 항목, 예: pm25)
+#   device(HA 기기 이름, <방>-<용도>), property(엔티티 ID 에서 기기 이름을 뗀 측정 항목, 예: pm25), unit(엔티티의 unit_of_measurement, 예: µg/m³)
 #   node(패브릭-노드 ID, 다시 커미셔닝하면 바뀜), serial(기기 시리얼, 바뀌지 않음), model, vendor
 # 측정값이 아닌 button(식별)·update(펌웨어) 도메인은 발행하지 않습니다.
 - id: matter_statestream
@@ -94,6 +94,7 @@ configMapGenerator:
           {{ {'state': trigger.event.data.new_state.state,
               'device': name or object_id,
               'property': object_id[prefix | length:] if name and object_id.startswith(prefix) else object_id,
+              'unit': state_attr(trigger.event.data.entity_id, 'unit_of_measurement') or '',
               'node': ids[0][9:] | replace('-MatterNodeDevice', '') if ids else '',
               'serial': device_attr(did, 'serial_number') or '',
               'model': device_attr(did, 'model') or '',
@@ -590,6 +591,7 @@ bash setup-home-assistant.sh http://[EDGE_IP]:8123
 |---|---|---|
 | `device` | `bedroom2-air-quality` | HA 기기 이름. Zigbee 기기처럼 `[방]-[종류]` 로 지어야 기록되고, DB 에는 `room`(`bedroom2`)과 `device`(`air-quality`)로 나뉘어 들어갑니다 |
 | `property` | `pm25` | 엔티티 ID 에서 기기 이름을 뗀 측정 항목 |
+| `unit` | `μg/m³` | 엔티티의 단위(`unit_of_measurement`). 단위가 없는 엔티티는 빈 값입니다 |
 | `node` | `CFEE358179DBE7B6-0000000000000001` | 패브릭 ID 와 노드 ID. 기기를 다시 커미셔닝하면 바뀝니다 |
 | `serial` | `602EPDJ02346` | 기기 시리얼. Zigbee 의 IEEE 주소처럼 바뀌지 않습니다. `hw_id` 컬럼으로 들어갑니다 |
 | `model`, `vendor` | `LG Air Quality Sensor`, `LG Electronics` | 모델과 제조사 |
@@ -599,7 +601,7 @@ Telegraf 에 이 토픽을 받는 입력을 Zigbee2MQTT 입력 바로 아래에 
 {% raw %}
 ```toml
 # Home Assistant 가 재발행한 Matter 기기 상태. 토픽 hass/<도메인>/<엔티티>/state, 값은 JSON
-#   {"state": "21.5"|"on"|"unavailable", "device", "property", "node", "serial", "model", "vendor"}
+#   {"state": "21.5"|"on"|"unavailable", "device", "property", "unit", "node", "serial", "model", "vendor"}
 # HA 자동화가 Matter 통합 소속 엔티티만 발행하므로 Zigbee 기기와 중복되지 않습니다. 시각은 수신 시각입니다.
 [[inputs.mqtt_consumer]]
   servers = ["tcp://mosquitto.mosquitto.svc.cluster.local:1883"]
@@ -613,7 +615,7 @@ Telegraf 에 이 토픽을 받는 입력을 Zigbee2MQTT 입력 바로 아래에 
   name_override = "readings"
   data_format = "json"
   json_string_fields = ["state"]      # 상태는 숫자·문자가 섞여 있어 문자열로 받고 아래 starlark 가 나눕니다
-  tag_keys = ["device", "property", "node", "serial", "model", "vendor"]
+  tag_keys = ["device", "property", "unit", "node", "serial", "model", "vendor"]
   [inputs.mqtt_consumer.tags]
     protocol = "matter"
     source = "hass"
