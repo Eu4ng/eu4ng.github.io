@@ -273,7 +273,7 @@ kubectl $E -n zigbee2mqtt exec deploy/zigbee2mqtt -c zigbee2mqtt -- sed -n '/^de
 
 ## 5. 허브 DB 에서 확인
 
-Telegraf 는 기기 메시지의 필드 하나를 `readings` 테이블의 행 하나(`property`, `value`, `value_text`)로 넣습니다. 기기 설정값(보정값, 감도, 표시등 등)은 버립니다. 허브에서 기기별로 들어온 속성을 봅니다.
+Telegraf 는 기기 메시지의 필드 하나를 `readings` 테이블의 행 하나(`property`, `value`, `value_text`)로 넣습니다. 기기 설정값(보정값, 감도, 표시등 등)과 펌웨어 업데이트 정보도 같은 방식으로 들어가고, 기기 정보(`device_software_build_id` 등)는 바뀔 때만 들어갑니다. 허브에서 기기별로 들어온 속성을 봅니다.
 
 ```bash
 # 허브 control plane
