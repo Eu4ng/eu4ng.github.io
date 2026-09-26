@@ -63,12 +63,12 @@ curl -s "https://apihub.kma.go.kr/api/typ01/url/stn_inf.php?inf=AWS&stn=&help=0&
 | 컬럼 | 133 대전 | 648 장동 |
 |---|---|---|
 | `site` | `daejeon` | `daejeon` |
-| `room` / `device` / `position` | `outdoor` / `weather` / `daejeon` | `outdoor` / `weather` / `jangdong` |
+| `room` / `device` / `anchor` | `outdoor` / `weather` / `daejeon` | `outdoor` / `weather` / `jangdong` |
 | `processing` | `raw` | `raw` |
 | `protocol` / `source` / `vendor` | `http` / `kma` / `KMA` | `http` / `kma` / `KMA` |
 | `model` / `hw_id` | `ASOS` / `133` | `AWS` / `648` |
 
-기기 이름 규칙 `<방>-<종류>[-<위치>]` 에 맞춰 위치 칸에 지점 이름을 넣었고, 지점 번호는 실물 기기의 고유 ID 자리인 `hw_id` 에 넣었습니다. 기상청이 준 값 그대로이므로 `processing` 은 모두 `raw` 입니다.
+기기 이름 규칙 `<방>-<종류>[-<기준>]` 에 맞춰 기준 칸에 지점 이름을 넣었고, 지점 번호는 실물 기기의 고유 ID 자리인 `hw_id` 에 넣었습니다. 기상청이 준 값 그대로이므로 `processing` 은 모두 `raw` 입니다.
 
 받는 항목은 매분자료의 열 가운데 9개입니다.
 
@@ -194,7 +194,7 @@ spec:
           envFrom:
             - secretRef: { name: weather-credentials }   # KMA_AUTH_KEY(기상청 API허브 인증키), PGPASSWORD(DB 계정 iot). GitOps 밖에서 만듭니다
           env:
-            # <지역>:<지점번호>:<model>:<position>, 여러 개는 공백으로. position 은 지점 이름(영문)입니다
+            # <지역>:<지점번호>:<model>:<anchor>, 여러 개는 공백으로. anchor(기준) 는 지점 이름(영문)입니다
             # 133 대전(ASOS, 유성구 구성동), 648 장동(AWS, 대덕구 장동)
             - { name: STATIONS, value: "daejeon:133:ASOS:daejeon daejeon:648:AWS:jangdong" }
             - { name: MISSING_FINAL_DAYS, value: "7" }   # 기상청도 값이 없는 분이 이 일수가 지나도 비어 있으면 영구 결측으로 보고 더 요청하지 않습니다
@@ -213,7 +213,7 @@ spec:
 ```
 {: file="iot/hub/weather/deployment.yaml" }
 
-지점은 env `STATIONS` 에 `<지역>:<지점번호>:<model>:<position>` 으로 적습니다. 다른 지역을 추가하면 그 지역 센서가 처음 기록된 시각부터 채웁니다.
+지점은 env `STATIONS` 에 `<지역>:<지점번호>:<model>:<anchor>` 로 적습니다. 다른 지역을 추가하면 그 지역 센서가 처음 기록된 시각부터 채웁니다.
 
 <details markdown="1">
 <summary>collect.sh 전문</summary>
@@ -225,7 +225,7 @@ spec:
 #   백필:   시작 직후 한 번은 그 지역 센서의 첫 기록부터, 이후 BACKFILL_EVERY 분마다 최근 BACKFILL_DAYS 일에서 빈 분을 찾아 그 구간만 다시 받습니다.
 #   결측:   기상청도 값이 없다고 답한 분은 weather_missing 에 남기고, 그 분이 MISSING_FINAL_DAYS 일 지나도 비어 있으면 영구 결측으로 보고 더 요청하지 않습니다.
 # 이미 있는 행은 넣지 않으므로 같은 구간을 여러 번 받아도 겹치지 않습니다.
-# env: STATIONS("<지역>:<지점번호>:<model>:<position> …"), KMA_AUTH_KEY, PGHOST, PGUSER, PGDATABASE, PGPASSWORD
+# env: STATIONS("<지역>:<지점번호>:<model>:<anchor> …"), KMA_AUTH_KEY, PGHOST, PGUSER, PGDATABASE, PGPASSWORD
 set -u
 API=https://apihub.kma.go.kr/api/typ01/cgi-bin/url/nph-aws2_min
 LIVE_MINUTES=${LIVE_MINUTES:-15}
@@ -238,15 +238,15 @@ ROWS=/tmp/weather-rows.csv
 log() { echo "$(date -u +%FT%TZ) $*"; }
 sql() { psql -X -q -t -A -F ' ' -v ON_ERROR_STOP=1 "$@"; }
 
-# fetch <지역> <지점> <model> <position> <tm1> <tm2>  (KST YYYYMMDDHHMI, 최대 6시간)
+# fetch <지역> <지점> <model> <anchor> <tm1> <tm2>  (KST YYYYMMDDHHMI, 최대 6시간)
 fetch() {
-  site=$1 stn=$2 model=$3 position=$4 tm1=$5 tm2=$6
+  site=$1 stn=$2 model=$3 anchor=$4 tm1=$5 tm2=$6
   body=$(wget -q -T 60 -O- "$API?tm1=$tm1&tm2=$tm2&stn=$stn&disp=1&help=0&authKey=$KMA_AUTH_KEY") || { log "$site:$stn $tm1~$tm2 요청 실패"; return 1; }
   case $body in '#START7777'*) ;; *) log "$site:$stn 응답 오류: $(echo "$body" | head -c 200)"; return 1 ;; esac
 
   # 한 줄(한 분)에서 필요한 열만 골라 행 여러 개로 나눕니다. -50 이하는 결측이라 버립니다. 표준 출력에는 응답에 있던 분의 수를 냅니다
   # 열: 1 시각, 2 지점, 3 WD1, 4 WS1, 6 WSS, 9 TA, 12 RN-60m, 14 RN-DAY, 15 HM, 16 PA, 18 TD
-  lines=$(echo "$body" | awk -F, -v site="$site" -v stn="$stn" -v model="$model" -v pos="$position" -v out="$ROWS" '
+  lines=$(echo "$body" | awk -F, -v site="$site" -v stn="$stn" -v model="$model" -v anchor="$anchor" -v out="$ROWS" '
     BEGIN {
       n = split("9 15 16 18 3 4 6 12 14", col, " ")
       split("temperature humidity pressure dew_point wind_direction wind_speed wind_gust_speed precipitation_1h precipitation_day", prop, " ")
@@ -259,7 +259,7 @@ fetch() {
       t = sprintf("%s-%s-%s %s:%s:00+09", substr($1,1,4), substr($1,5,2), substr($1,7,2), substr($1,9,2), substr($1,11,2))
       for (i = 1; i <= n; i++) {
         v = $(col[i]) + 0
-        if (v > -50) printf "%s,%s,outdoor,weather,%s,%s,raw,%s,%s,http,kma,KMA,%s,%s\n", t, site, pos, prop[i], v, unit[i], model, stn > out
+        if (v > -50) printf "%s,%s,outdoor,weather,%s,%s,raw,%s,%s,http,kma,KMA,%s,%s\n", t, site, anchor, prop[i], v, unit[i], model, stn > out
       }
     }
     END { print lines + 0 }')
@@ -270,7 +270,7 @@ fetch() {
 SET TIME ZONE 'Asia/Seoul';
 BEGIN;
 CREATE TEMP TABLE t (LIKE readings) ON COMMIT DROP;
-\copy t (time, site, room, device, position, property, processing, value, unit, protocol, source, vendor, model, hw_id) from '/tmp/weather-rows.csv' with (format csv)
+\copy t (time, site, room, device, anchor, property, processing, value, unit, protocol, source, vendor, model, hw_id) from '/tmp/weather-rows.csv' with (format csv)
 WITH ins AS (
   INSERT INTO readings SELECT t.* FROM t
   WHERE NOT EXISTS (SELECT 1 FROM readings r WHERE r.time = t.time AND r.site = t.site AND r.source = 'kma' AND r.hw_id = t.hw_id
@@ -330,13 +330,13 @@ SQL
 backfill() {
   days=$1
   for s in $STATIONS; do
-    IFS=: read -r site stn model position <<EOS
+    IFS=: read -r site stn model anchor <<EOS
 $s
 EOS
     ranges=$(gaps "$site" "$stn" "$days") || { log "$site:$stn 빈 구간 조회 실패"; continue; }
     [ -n "$ranges" ] || continue
     log "$site:$stn 백필 $(echo "$ranges" | wc -l)구간"
-    echo "$ranges" | while read -r tm1 tm2; do fetch "$site" "$stn" "$model" "$position" "$tm1" "$tm2"; done
+    echo "$ranges" | while read -r tm1 tm2; do fetch "$site" "$stn" "$model" "$anchor" "$tm1" "$tm2"; done
   done
 }
 
@@ -356,10 +356,10 @@ while :; do
   set -- $(live) || true
   if [ $# -eq 2 ]; then
     for s in $STATIONS; do
-      IFS=: read -r site stn model position <<EOS
+      IFS=: read -r site stn model anchor <<EOS
 $s
 EOS
-      fetch "$site" "$stn" "$model" "$position" "$1" "$2"
+      fetch "$site" "$stn" "$model" "$anchor" "$1" "$2"
     done
   fi
   if [ "$(date +%s)" -ge "$next" ]; then
@@ -410,7 +410,7 @@ kubectl -n weather logs deploy/weather
 ```bash
 # 지점별 적재 범위와 중복
 kubectl -n timescaledb exec deploy/timescaledb -- psql -U iot -d iot \
-  -c "select position, hw_id, count(distinct time) minutes, min(time) at time zone 'Asia/Seoul' first_kst, max(time) at time zone 'Asia/Seoul' last_kst
+  -c "select anchor, hw_id, count(distinct time) minutes, min(time) at time zone 'Asia/Seoul' first_kst, max(time) at time zone 'Asia/Seoul' last_kst
       from readings where source = 'kma' group by 1, 2;" \
   -c "select count(*) dup from (select time, hw_id, property from readings where source = 'kma' group by 1, 2, 3 having count(*) > 1) d;"
 ```

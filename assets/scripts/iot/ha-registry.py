@@ -3,6 +3,9 @@
 # 토큰은 대상 HA 의 장기 액세스 토큰(관리자)입니다. HA_TOKEN 이 없으면 입력받습니다. 저장소·파일에 남기지 않습니다.
 #
 # 작업(여러 개 가능):
+#   --set-name <시리얼>=<이름>   Matter 기기를 시리얼로 찾아 HA 기기 이름(name_by_user)을 바꿉니다. 여러 번 줄 수 있고, 아래 작업보다 먼저 적용됩니다
+#                                예) --set-name SSMGE21XS00E2D=bedroom2-plug-server_ms_a2_1 --rename-matter --assign-areas
+#                                SmartThings 등에서 온 기본 이름보다 우선합니다. Zigbee 기기 이름은 Zigbee2MQTT 에서 바꿉니다
 #   --enable-platform <플랫폼>   통합이 꺼 둔(disabled_by=integration) 엔티티를 켭니다. 사용자가 끈 것(user)은 두고요. 예) mqtt
 #   --delete-empty-areas         기기·엔티티가 하나도 없는 방을 지웁니다 (중앙 HA 의 온보딩 기본 방)
 #   --prune-remote-orphans       Remote Home Assistant 엔티티 중 원격에서 사라져 상태가 없는 것을 지웁니다 (지역에서 이름을 바꾼 잔재).
@@ -11,7 +14,7 @@
 #                                예) sensor.0xa4c138f95fdbf3ad_linkquality → sensor.bedroom2_motion_linkquality. 기록은 HA 가 새 ID 로 옮깁니다
 #   --rename-matter              matter 엔티티 ID 를 <기기 이름>_<측정 항목(device_class 등)> 영문으로 바꿉니다. 표시 이름(온도 등)은 그대로입니다
 #                                예) sensor.cimsil2_bedroom2_air_quality_ondo → sensor.bedroom2_air_quality_temperature. 기록은 HA 가 새 ID 로 옮깁니다
-#   --assign-areas               Zigbee·Matter 기기를 이름(<방>-<종류>[-<위치>][번호])의 방에 해당하는 영역으로 옮깁니다. 영역이 없으면 만듭니다
+#   --assign-areas               Zigbee·Matter 기기를 이름(<방>-<종류>[-<기준>][번호])의 방에 해당하는 영역으로 옮깁니다. 영역이 없으면 만듭니다
 #                                예) bedroom2-th → 침실2 (방 코드는 영역 별칭으로 붙습니다). ROOMS 에 없는 방은 코드 그대로(garage)를 이름으로 씁니다
 import asyncio, getpass, os, re, sys
 
@@ -49,6 +52,26 @@ async def main(args):
 
         ents = await call(type="config/entity_registry/list")
         tag = "[dry-run] " if dry else ""
+        renamed = {}   # --set-name 으로 바꾼 기기 id → 새 이름. --dry-run 에서도 뒤 작업이 새 이름으로 미리 보이게 합니다
+
+        if "--set-name" in args:
+            want = dict(args[i + 1].split("=", 1) for i, a in enumerate(args) if a == "--set-name")
+            devs = {d.get("serial_number"): d for d in await call(type="config/device_registry/list")
+                    if "matter" in {i[0] for i in d["identifiers"]} and d.get("serial_number")}
+            for serial, name in want.items():
+                d = devs.get(serial)
+                if not d:
+                    print(f"건너뜀 {serial}: 이 시리얼의 Matter 기기가 없습니다")
+                    continue
+                if not re.fullmatch(r"[a-z0-9_]+-[a-z0-9_]+(-[a-z0-9_]+)?", name):
+                    print(f"경고 {name}: 기기 이름 규칙(<방>-<종류>[-<기준>][번호])에 맞지 않아 수집되지 않습니다")
+                old = d.get("name_by_user") or d.get("name")
+                if old == name:
+                    continue
+                print(f"{tag}기기 이름 {old} → {name}")
+                renamed[d["id"]] = name
+                if not dry:
+                    await call(type="config/device_registry/update", device_id=d["id"], name_by_user=name)
 
         if "--enable-platform" in args:
             plat = args[args.index("--enable-platform") + 1]
@@ -86,8 +109,8 @@ async def main(args):
                 taken.add(new)
 
         if "--rename-matter" in args:
-            # 한국어 HA 는 엔티티 이름(온도)을 로마자(ondo)로, 방 이름까지 붙여 ID 를 만듭니다. 방은 기기 이름(<방>-<종류>[-<위치>])에 이미 있습니다
-            devs = {d["id"]: d.get("name_by_user") or d.get("name") for d in await call(type="config/device_registry/list")}
+            # 한국어 HA 는 엔티티 이름(온도)을 로마자(ondo)로, 방 이름까지 붙여 ID 를 만듭니다. 방은 기기 이름(<방>-<종류>[-<기준>])에 이미 있습니다
+            devs = {d["id"]: renamed.get(d["id"]) or d.get("name_by_user") or d.get("name") for d in await call(type="config/device_registry/list")}
             ids = [e["entity_id"] for e in ents if e["platform"] == "matter"]
             full = await call(type="config/entity_registry/get_entries", entity_ids=ids) if ids else {}
             taken = {e["entity_id"] for e in ents}
@@ -123,7 +146,7 @@ async def main(args):
                 # 이름 규칙은 Zigbee2MQTT(mqtt)·Matter 기기에만 있습니다. 휴대폰(mobile_app) 등은 건너뜁니다
                 if not {i[0] for i in d["identifiers"]} & {"mqtt", "matter"}:
                     continue
-                name = d.get("name_by_user") or d.get("name") or ""
+                name = renamed.get(d["id"]) or d.get("name_by_user") or d.get("name") or ""
                 m = re.match(r"([a-z0-9_]+)-", name)
                 if not m or m.group(1) == "retired":
                     continue

@@ -74,10 +74,10 @@ homeassistant:
   enabled: true                  # Home Assistant 가 MQTT 디스커버리로 기기를 보게 합니다 (수집 경로와 무관)
 mqtt:
   base_topic: zigbee2mqtt        # Telegraf 가 zigbee2mqtt/+ 를 구독합니다
-# 기기 이름(friendly_name)은 <방>-<종류>[-<위치>][번호] (예: bedroom-th, bedroom-th-door). Telegraf 가 - 에서 나눠 DB 의 room, device, position 컬럼에 넣으므로
+# 기기 이름(friendly_name)은 <방>-<종류>[-<기준>][번호] (예: bedroom-th, bedroom-th-door). Telegraf 가 - 에서 나눠 DB 의 room, device, anchor 컬럼에 넣으므로
 # 칸 안에서는 - 대신 _ 로 단어를 잇습니다(living_room, air_quality).
 # 규칙에 맞지 않는 이름(페어링 직후의 0x…)과 retired-… 는 Telegraf 가 기록하지 않으므로 페어링하면 바로 이름을 붙입니다.
-# / 는 쓰지 않습니다(토픽이 두 단계가 되어 수집되지 않음). 옮기면 이름을 새 방·위치로, 교체하면 새 기기에 옛 이름을 줍니다.
+# / 는 쓰지 않습니다(토픽이 두 단계가 되어 수집되지 않음). 옮기면 이름을 새 방·기준으로, 교체하면 새 기기에 옛 이름을 줍니다.
 frontend:
   enabled: true
 advanced:
@@ -242,9 +242,9 @@ kubectl $E -n zigbee2mqtt logs deploy/zigbee2mqtt | grep -E 'Socket connected|Co
 
 ## 4. 프런트엔드 접속과 기기 페어링
 
-내 PC 브라우저에서 `http://[EDGE_IP]:30083` 을 열고 시크릿 스크립트에 입력한 프런트엔드 토큰으로 들어갑니다. 상단의 **Permit join** 을 켠 뒤 기기를 페어링 모드로 만들면(기기마다 버튼을 몇 초 누르는 식) 목록에 나타납니다. 기기 이름(friendly name)은 토픽에 그대로 쓰이고 DB 에서는 `room`·`device`·`position` 컬럼으로 나뉘므로 `<방>-<종류>[-<위치>][번호]` 형식의 영문 소문자로 바꿉니다(예: 온습도계 `bedroom-th`, 멀티 센서 `bedroom-multi`, 문 열림 센서 `bedroom-contact-door`). 종류는 측정 항목이 아니라 기기 역할입니다. 위치는 같은 방 안에서 어디에 두었는지가 값에 영향을 줄 때만 붙이며, 주 출입문에 서서 방 안을 바라본 방향(`door`, `left`, `right`, `back`, `back_left`, `back_right`)이나 방에 하나뿐인 기준물(`window`, `bed`, `desk`), 높이(`ceil`, `floor`)로 적습니다. 같은 이름이 둘 이상이면 `bedroom-th2`, `bedroom-th-left2` 처럼 맨 끝에 번호를 붙입니다. Telegraf 가 이름을 `-` 에서 나눠 `room`(`bedroom`), `device`(`th`), `position`(`door`)에 넣으므로 칸 안에서는 `-` 대신 `_` 로 단어를 잇습니다(`living_room`, `air_quality`). Telegraf 는 이 규칙에 맞는 이름만 기록하므로, 페어링 직후의 `0x…` 이름으로 보낸 값은 DB 에 남지 않습니다. 또 `include_device_information` 으로 실린 실물 기기의 IEEE 주소와 모델을 `hw_id`, `model`, `vendor` 컬럼에 넣습니다.
+내 PC 브라우저에서 `http://[EDGE_IP]:30083` 을 열고 시크릿 스크립트에 입력한 프런트엔드 토큰으로 들어갑니다. 상단의 **Permit join** 을 켠 뒤 기기를 페어링 모드로 만들면(기기마다 버튼을 몇 초 누르는 식) 목록에 나타납니다. 기기 이름(friendly name)은 토픽에 그대로 쓰이고 DB 에서는 `room`·`device`·`anchor` 컬럼으로 나뉘므로 `<방>-<종류>[-<기준>][번호]` 형식의 영문 소문자로 바꿉니다(예: 온습도계 `bedroom-th`, 멀티 센서 `bedroom-multi`, 문 열림 센서 `bedroom-contact-door`). 종류는 측정 항목이 아니라 기기 역할입니다. 기준(기기가 기준으로 삼는 대상)은 센서의 경우 같은 방 안에서 어디에 두었는지가 값에 영향을 줄 때만 붙이며, 주 출입문에 서서 방 안을 바라본 방향(`door`, `left`, `right`, `back`, `back_left`, `back_right`)이나 방에 하나뿐인 기준물(`window`, `bed`, `desk`), 높이(`ceil`, `floor`)로 적습니다. 같은 이름이 둘 이상이면 `bedroom-th2`, `bedroom-th-left2` 처럼 맨 끝에 번호를 붙입니다. Telegraf 가 이름을 `-` 에서 나눠 `room`(`bedroom`), `device`(`th`), `anchor`(`door`)에 넣으므로 칸 안에서는 `-` 대신 `_` 로 단어를 잇습니다(`living_room`, `air_quality`). Telegraf 는 이 규칙에 맞는 이름만 기록하므로, 페어링 직후의 `0x…` 이름으로 보낸 값은 DB 에 남지 않습니다. 또 `include_device_information` 으로 실린 실물 기기의 IEEE 주소와 모델을 `hw_id`, `model`, `vendor` 컬럼에 넣습니다.
 
-- 기기를 다른 방이나 위치로 옮기면 옮기는 즉시 이름을 바꿉니다. 바꾼 시각부터 새 방·위치로 기록되고, 과거 행은 옛 방·위치로 남습니다.
+- 기기를 다른 방이나 자리로 옮기면 옮기는 즉시 이름을 바꿉니다. 바꾼 시각부터 새 방·기준으로 기록되고, 과거 행은 옛 방·기준으로 남습니다.
 - 기기를 교체하면 옛 기기를 `retired-[기기 이름]` 으로 바꾸거나 제거하고, 새 기기에 옛 이름을 줍니다. 이름은 이어지고 `hw_id`, `model` 만 바뀝니다. `retired-` 이름의 값은 기록되지 않습니다.
 
 > 이름에 `/` 를 넣으면 토픽이 `zigbee2mqtt/거실/온도` 처럼 두 단계가 되어 Telegraf 의 `zigbee2mqtt/+` 구독에 잡히지 않습니다.
@@ -278,12 +278,12 @@ Telegraf 는 기기 메시지의 필드 하나를 `readings` 테이블의 행 �
 ```bash
 # 허브 control plane
 kubectl -n timescaledb exec deploy/timescaledb -- psql -U iot -d iot \
-  -c "select room, device, position, hw_id, model, string_agg(distinct property, ', ') as properties,
+  -c "select room, device, anchor, hw_id, model, string_agg(distinct property, ', ') as properties,
              max(time) filter (where property <> 'availability') as last_seen
       from readings where protocol = 'zigbee' group by 1,2,3,4,5 order by 1,2,3;"
 ```
 
-- **확인:** `room`·`device`·`position` 에 규칙에 맞는 기기 이름을 나눈 방·종류·위치가 있고 `hw_id`·`model` 에 실물 기기가 보이고 `last_seen` 이 기기가 마지막으로 보고한 시각과 같습니다. `properties` 에 기기가 보내는 측정 항목(`temperature`, `battery`, `linkquality` 등)과 연결 상태(`availability`)가 보입니다. 연결 상태는 기기 시각이 없어 Telegraf 가 받은 시각으로 남으므로 `last_seen` 계산에서 뺍니다.
+- **확인:** `room`·`device`·`anchor` 에 규칙에 맞는 기기 이름을 나눈 방·종류·기준이 있고 `hw_id`·`model` 에 실물 기기가 보이고 `last_seen` 이 기기가 마지막으로 보고한 시각과 같습니다. `properties` 에 기기가 보내는 측정 항목(`temperature`, `battery`, `linkquality` 등)과 연결 상태(`availability`)가 보입니다. 연결 상태는 기기 시각이 없어 Telegraf 가 받은 시각으로 남으므로 `last_seen` 계산에서 뺍니다.
 
 ## 마무리
 
