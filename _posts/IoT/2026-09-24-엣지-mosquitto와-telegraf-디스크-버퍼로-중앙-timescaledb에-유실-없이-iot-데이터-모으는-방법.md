@@ -7,7 +7,7 @@ tags: [iot, mqtt, mosquitto, telegraf, timescaledb, postgresql, grafana, kuberne
 permalink: /posts/43/
 ---
 
-허브 클러스터에 **TimescaleDB**를 두고, 엣지 클러스터에 **Mosquitto**(MQTT 브로커)와 **Telegraf**(수집기)를 두어 기기 메시지가 `엣지 브로커 → 엣지 Telegraf → 허브 TimescaleDB`로 흐르게 합니다. Telegraf 는 디스크 버퍼를 켜서 허브가 안 닿는 동안 파드가 재시작되더라도 데이터를 잃지 않고, 페이로드의 시각을 써서 뒤늦게 도착해도 원래 시각으로 적재됩니다. 모든 기기 값은 수집기와 관계없이 `readings` 테이블 하나에 "행 하나 = 기기 하나의 속성 하나" 로 넣고, 지역·프로토콜·수집기·기기를 컬럼으로 두어 여러 지역과 여러 종류의 기기가 한 테이블에 섞여도 구분되도록 했습니다. 매니페스트는 [이전 글](/posts/42/)에서 만든 `iot/` 폴더 규칙(`iot/hub/`, `iot/edge/`, `iot/clusters/[SITE]/`)을 따릅니다.
+허브 클러스터에 **TimescaleDB**를 두고, 엣지 클러스터에 **Mosquitto**(MQTT 브로커)와 **Telegraf**(수집기)를 두어 기기 메시지가 `엣지 브로커 → 엣지 Telegraf → 허브 TimescaleDB`로 흐르게 합니다. Telegraf 는 디스크 버퍼를 켜서 허브가 안 닿는 동안 파드가 재시작되더라도 데이터를 잃지 않고, 페이로드의 시각을 써서 뒤늦게 도착해도 원래 시각으로 적재됩니다. 모든 기기 값은 수집기와 관계없이 `readings` 테이블 하나에 "행 하나 = 기기 하나의 속성 하나" 로 넣고, 지역·프로토콜·수집기·기기를 컬럼으로 두어 여러 지역과 여러 종류의 기기가 한 테이블에 섞여도 구분되도록 했습니다. 기기로 간 제어 명령은 `events` 테이블에 따로 남깁니다. 매니페스트는 [이전 글](/posts/42/)에서 만든 `iot/` 폴더 규칙(`iot/hub/`, `iot/edge/`, `iot/clusters/[SITE]/`)을 따릅니다.
 
 1. 비밀 값 만들기
 2. 허브: TimescaleDB 와 Grafana 데이터소스
@@ -385,11 +385,14 @@ Telegraf 설정 하나를 모든 지역이 공유합니다. 지역 이름과 허
 
 입력은 `name_override = "readings"` 로 모두 같은 테이블에 보내고, starlark 프로세서가 메시지의 필드 하나를 행 하나로 쪼갭니다. Zigbee2MQTT 메시지 `{"temperature": 21.5, "humidity": 40}` 은 `property` 가 `temperature`, `humidity` 인 두 행이 됩니다. 수집기마다 다른 메시지 모양은 입력 블록과 이 프로세서에서만 흡수하므로, 나중에 Zigbee2MQTT 를 다른 수집기로 바꿔도 입력 블록만 새로 쓰면 되고 테이블과 대시보드는 그대로입니다.
 
+수집은 **모두 수집**이 기본입니다. 감도·보정값 같은 기기 설정과 펌웨어 업데이트 정보도 측정값과 똑같이 행으로 남깁니다. 설정이 바뀌면 같은 상황에서도 값이 달라지기 때문입니다. 메시지마다 같은 값이 반복되는 기기 정보(`device{…}`)만 버리고, 대신 기기 정의(`bridge/devices`)에서 값이 바뀔 때만 `device_software_build_id` 같은 행으로 남깁니다. 기기로 간 명령(`zigbee2mqtt/[기기]/set`)은 `name_override = "events"` 로 두 번째 출력이 `events` 테이블에 넣습니다.
+
 {% raw %}
 ```toml
 # 엣지 Telegraf. env 는 Secret telegraf-credentials(MQTT_USER, MQTT_PASSWORD, HUB_PG_PASSWORD)와 오버레이(SITE, HUB_PG_HOST, HUB_PG_PORT)가 넣습니다.
 [global_tags]
   site = "${SITE}"                    # 모든 행에 지역 이름. 허브에서 지역이 섞여도 구분됩니다
+  processing = "raw"                  # 기기가 보낸 값 그대로입니다. 보정(corrected)·계산(derived) 값은 허브의 가공 스크립트가 새 행으로 넣습니다
 
 [agent]
   interval = "10s"                    # 입력이 push 라 수집 주기는 의미 없고 flush 주기만 유효합니다
@@ -403,12 +406,15 @@ Telegraf 설정 하나를 모든 지역이 공유합니다. 지역 이름과 허
 
 # 모든 기기 값은 테이블 readings 하나에 "행 하나 = 기기 하나의 속성 하나" 로 들어갑니다.
 # 수집기(Zigbee2MQTT, Home Assistant …)마다 다른 메시지 모양은 입력과 아래 starlark 에서만 흡수하므로, 수집기를 바꿔도 입력 블록만 새로 쓰면 됩니다.
-#   컬럼 순서: time, site, room, device, property, value, unit, value_text, protocol, source, vendor, model, hw_id, node (아래 create_templates)
-#   기기 이름 <방>-<종류>[번호] 는 첫 - 에서 나눠 room(방)과 device(종류[번호])에 넣습니다. device 는 방마다 겹칠 수 있고 실물 식별은 hw_id 가 맡습니다
-#   필드(컬럼): value(숫자. on/off·true/false 는 1/0), value_text(문자열 원문)
+#   컬럼 순서: time, site, room, device, anchor, property, processing, value, unit, value_text, protocol, source, vendor, model, hw_id, node (아래 create_templates)
+#   기기 이름 <방>-<종류>[-<기준>][번호] 는 - 에서 나눠 room(방), device(종류), anchor(기준, 없으면 비움)에 넣습니다. 번호는 마지막 칸에 붙어 들어갑니다.
+#   device 는 방마다 겹칠 수 있고 실물 식별은 hw_id 가 맡습니다
+#   필드(컬럼): value(숫자. on/off·true/false·online/offline 은 1/0), value_text(문자열 원문)
+#   기기 연결 상태는 property 가 availability 인 행입니다(Zigbee2MQTT 가 알리는 online/offline)
+#   processing 은 원본(raw)·보정(corrected)·계산(derived) 구분입니다. 이 Telegraf 는 raw 만 넣고, 원본 행은 고치지 않습니다
 #   unit 은 기기 정의의 단위입니다(Zigbee2MQTT bridge/devices 의 exposes, HA 의 unit_of_measurement). 단위가 없는 값(presence 등)은 비어 있습니다
 
-# Zigbee2MQTT 기기 메시지. 한 단계(+)만 구독하면 bridge/#, <기기>/set|get|availability 는 자연히 빠집니다 (friendly_name 에 / 를 쓰지 않는 전제).
+# Zigbee2MQTT 기기 메시지. 한 단계(+)만 구독하면 bridge/#, <기기>/set|get|availability 는 자연히 빠집니다 (friendly_name 에 / 를 쓰지 않는 전제). availability 는 아래 입력이 받습니다.
 [[inputs.mqtt_consumer]]
   servers = ["tcp://mosquitto.mosquitto.svc.cluster.local:1883"]
   topics = ["zigbee2mqtt/+"]
@@ -425,9 +431,10 @@ Telegraf 설정 하나를 모든 지역이 공유합니다. 지역 이름과 허
   json_time_format = "2006-01-02T15:04:05Z07:00"   # RFC 3339. 소수점 초가 있어도 파싱됩니다
   # Zigbee2MQTT mqtt.include_device_information 이 넣는 device{…} 는 device_<키> 로 펼쳐집니다. 실물 식별에 필요한 것만 태그로 남깁니다
   tag_keys = ["device_ieeeAddr", "device_model", "device_manufacturerName"]
-  # 측정값이 아닌 기기 설정(보정값, 감도, 표시등 …)과 펌웨어 업데이트 정보는 버립니다
-  fieldexclude = ["device_*", "update_*", "*_calibration", "fading_time", "motion_detection_sensitivity",
-                  "illuminance_interval", "indicator", "temperature_unit"]
+  # 기기 설정(보정값, 감도, 표시등 …)과 펌웨어 업데이트(update_state, update_installed_version …)도 값과 똑같이 기록합니다.
+  # 감도·보정이 바뀌면 같은 상황에서도 값이 달라지므로 그 이력이 필요합니다.
+  # device{…} 는 메시지마다 같은 값이 반복되므로 여기서 버리고, 아래 기기 정의 입력이 바뀔 때만 device_<키> 행으로 남깁니다
+  fieldexclude = ["device_*"]
   [inputs.mqtt_consumer.tags]
     protocol = "zigbee"
     source = "z2m"
@@ -437,8 +444,11 @@ Telegraf 설정 하나를 모든 지역이 공유합니다. 지역 이름과 허
   [inputs.mqtt_consumer.tagdrop]
     device = ["bridge"]
 
-# Zigbee2MQTT 기기 정의(유지 메시지). 아래 starlark 가 기기·속성별 단위를 기억해 두고 기기 메시지에 unit 으로 붙이며, 이 메시지 자체는 버립니다.
-# 기기를 추가하거나 이름을 바꾸면 Zigbee2MQTT 가 다시 발행합니다. Telegraf 재시작 직후 이보다 먼저 온 기기 메시지 몇 개는 unit 이 비어 있을 수 있습니다.
+# Zigbee2MQTT 기기 정의(유지 메시지). 아래 starlark 가 기기·속성별 단위와 실물 정보(IEEE 주소, 모델, 제조사)를 기억해 두고
+# 기기 메시지에 unit 으로, 연결 상태 메시지에 hw_id·model·vendor 로 붙입니다.
+# 기기 정보(software_build_id, date_code, power_source, network_address …)는 기억해 둔 값과 달라진 것만 device_<키> 행으로 남깁니다(시각은 수신 시각).
+# Telegraf 가 재시작하면 기억이 비므로 그때 한 번은 모두 다시 들어옵니다.
+# 기기를 추가하거나 이름을 바꾸면 Zigbee2MQTT 가 다시 발행합니다. Telegraf 재시작 직후 이보다 먼저 온 메시지 몇 개는 이 값들이 비어 있을 수 있습니다.
 [[inputs.mqtt_consumer]]
   servers = ["tcp://mosquitto.mosquitto.svc.cluster.local:1883"]
   topics = ["zigbee2mqtt/bridge/devices"]
@@ -451,31 +461,117 @@ Telegraf 설정 하나를 모든 지역이 공유합니다. 지역 이름과 허
   data_format = "value"
   data_type = "string"                # JSON 전체를 문자열 필드 value 하나로 받아 starlark 가 풉니다
 
+# Zigbee2MQTT 기기 연결 상태(유지 메시지 {"state": "online"|"offline"}). 속성 availability 인 행 하나가 됩니다.
+# 기기 시각이 없어 수신 시각으로 남습니다. offline 은 마지막 메시지에서 제한 시간(availability timeout)이 지난 시각입니다.
+# 유지 메시지라 Telegraf 가 다시 접속하면 지금 상태가 한 번 더 들어옵니다. 기기 정보가 없어 hw_id·model·vendor 는 starlark 가 기기 정의에서 채웁니다.
+[[inputs.mqtt_consumer]]
+  servers = ["tcp://mosquitto.mosquitto.svc.cluster.local:1883"]
+  topics = ["zigbee2mqtt/+/availability"]
+  username = "${MQTT_USER}"
+  password = "${MQTT_PASSWORD}"
+  client_id = "telegraf-z2m-availability"
+  persistent_session = true
+  qos = 1
+  topic_tag = ""
+  name_override = "readings"
+  data_format = "json"
+  json_string_fields = ["state"]
+  [inputs.mqtt_consumer.tags]
+    protocol = "zigbee"
+    source = "z2m"
+    property = "availability"
+  [[inputs.mqtt_consumer.topic_parsing]]
+    topic = "zigbee2mqtt/+/availability"
+    tags = "_/device/_"
+
+# Zigbee2MQTT 로 간 명령(zigbee2mqtt/<기기>/set). HA 를 거치지 않은 MQTT 명령까지 남습니다. 명령의 필드 하나(state, brightness …)가 행 하나이고,
+# property 는 필드 이름, action 은 보낸 값입니다. 보낸 쪽을 알 수 없어 origin 은 mqtt, 시각은 수신 시각입니다.
+[[inputs.mqtt_consumer]]
+  servers = ["tcp://mosquitto.mosquitto.svc.cluster.local:1883"]
+  topics = ["zigbee2mqtt/+/set"]
+  username = "${MQTT_USER}"
+  password = "${MQTT_PASSWORD}"
+  client_id = "telegraf-z2m-set"
+  persistent_session = true
+  qos = 1
+  topic_tag = ""
+  name_override = "events"
+  data_format = "json"
+  json_string_fields = ["*"]
+  [inputs.mqtt_consumer.tags]
+    protocol = "zigbee"
+    source = "z2m"
+    origin = "mqtt"
+  [[inputs.mqtt_consumer.topic_parsing]]
+    topic = "zigbee2mqtt/+/set"
+    tags = "_/device/_"
+
 # 필드 하나를 행 하나로 쪼개고 값을 value(숫자)와 value_text(문자열)로 나눕니다. 실물 기기 태그 이름도 여기서 통일합니다.
 # 메시지에 property 태그가 있으면(HA) 그 값이 속성 이름이고, 없으면(Zigbee2MQTT) 필드 이름이 속성 이름입니다.
 # 단위는 HA 메시지에는 unit 태그로 실려 오고, Zigbee2MQTT 는 기기 정의(z2m_devices)에서 기억해 둔 값을 붙입니다.
+# Zigbee2MQTT 연결 상태 메시지처럼 실물 정보가 없는 메시지에도 기기 정의에서 기억해 둔 hw_id·model·vendor 를 붙입니다.
+# 기기 정의에서는 기기 정보가 바뀐 것만 device_<키> 행으로 냅니다. 제어 기록(events)은 이름만 나누고 필드는 그대로 둡니다(z2m set 은 필드마다 행).
 [[processors.starlark]]
-  namepass = ["readings", "z2m_devices"]
+  namepass = ["readings", "z2m_devices", "events"]
   order = 1
   source = '''
 load("json.star", "json")
 
 HW_TAGS = {"device_ieeeAddr": "hw_id", "serial": "hw_id", "device_model": "model", "device_manufacturerName": "vendor"}
-ON_OFF = {"on": 1.0, "off": 0.0, "true": 1.0, "false": 0.0}
-NAME_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789-"
+ON_OFF = {"on": 1.0, "off": 0.0, "true": 1.0, "false": 0.0, "online": 1.0, "offline": 0.0}
+NAME_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789_"
+DEVICE_INFO_SKIP = ["friendly_name", "ieee_address"]   # 이미 device·hw_id 컬럼에 들어가는 값
 
 def valid_name(name):
-    # <방>-<종류>[번호] 영문 소문자·숫자. 페어링 직후 이름(0x…)과 HA 기본 이름(공백·대문자), 교체한 옛 기기(retired-…)는 기록하지 않습니다
-    i = name.find("-")
-    if i <= 0 or name.endswith("-") or name.startswith("retired-"):
+    # <방>-<종류>[-<기준>][번호]. 칸은 - 로 나누고 칸 안의 단어는 _ 로 잇는 영문 소문자·숫자입니다.
+    # 페어링 직후 이름(0x…)과 HA 기본 이름(공백·대문자), 교체한 옛 기기(retired-…)는 기록하지 않습니다
+    parts = name.split("-")
+    if len(parts) not in (2, 3) or parts[0] == "retired":
         return False
-    return all([c in NAME_CHARS for c in name.elems()])
+    return all([p != "" and all([c in NAME_CHARS for c in p.elems()]) for p in parts])
+
+def split_name(tags):
+    # bedroom2-th-door → room bedroom2, device th, anchor door
+    parts = tags["device"].split("-")
+    tags["room"] = parts[0]
+    tags["device"] = parts[1]
+    if len(parts) == 3:
+        tags["anchor"] = parts[2]
 
 def is_number(s):
     if not s or s.count(".") > 1:
         return False
     body = s[1:] if s[0] in "+-" else s
     return len(body) > 0 and all([c in "0123456789." for c in body.elems()]) and body != "."
+
+def set_value(m, v, keep_text=False):
+    # 값을 value(숫자)와 value_text(문자열)로 나눕니다. 값이 비어 있으면 False 를 돌려줍니다
+    # keep_text 면 숫자로 읽히는 문자열도 value_text 에 원문을 남깁니다(펌웨어 빌드 ID 0129… 의 앞자리 0 등)
+    if type(v) == "bool":
+        m.fields["value"] = 1.0 if v else 0.0
+        m.fields["value_text"] = "true" if v else "false"
+    elif type(v) in ("int", "float"):
+        m.fields["value"] = float(v)
+    else:
+        s = str(v).strip()
+        if s == "":
+            return False
+        if is_number(s):
+            m.fields["value"] = float(s)
+            if keep_text:
+                m.fields["value_text"] = s
+        else:
+            m.fields["value_text"] = s
+            if s.lower() in ON_OFF:
+                m.fields["value"] = ON_OFF[s.lower()]
+    return True
+
+def clean_tags(metric):
+    tags = {}
+    for k, v in metric.tags.items():
+        if v != "":
+            tags[HW_TAGS.get(k, k)] = v
+    return tags
 
 def collect_units(expose, units):
     # exposes 는 features 안에 다시 exposes 가 들어 있을 수 있습니다(light, climate 등)
@@ -484,30 +580,89 @@ def collect_units(expose, units):
     for f in expose.get("features", []):
         collect_units(f, units)
 
-def remember_units(metric):
-    units = {}
+def remember_devices(metric):
+    # 태그 값은 기기 메시지의 device{…}와 같게 맞춥니다: model 은 기기 정의의 모델, vendor 는 기기가 알리는 제조사
+    units, hw = {}, {}
+    seen = state.get("device_info", {})
+    out = []
     for d in json.decode(metric.fields["value"]):
+        name = d.get("friendly_name", "")
+        definition = d.get("definition") or {}
         u = {}
-        for e in (d.get("definition") or {}).get("exposes", []):
+        for e in definition.get("exposes", []):
             collect_units(e, u)
-        units[d.get("friendly_name", "")] = u
+        units[name] = u
+        hw[name] = {"hw_id": d.get("ieee_address") or "", "model": definition.get("model") or "", "vendor": d.get("manufacturer") or ""}
+        info = {}
+        for k, v in d.items():
+            if k not in DEVICE_INFO_SKIP and type(v) not in ("dict", "list"):
+                info[k] = v
+        old = seen.get(name, {})
+        seen[name] = info
+        if not valid_name(name):
+            continue
+        for k, v in info.items():
+            if k in old and old[k] == v:
+                continue
+            m = Metric("readings")
+            m.time = metric.time
+            tags = clean_tags(metric)
+            tags.update({"device": name, "protocol": "zigbee", "source": "z2m", "property": "device_" + k})
+            for tk, tv in hw[name].items():
+                if tv != "":
+                    tags[tk] = tv
+            split_name(tags)
+            for tk, tv in tags.items():
+                m.tags[tk] = tv
+            if set_value(m, v, keep_text=True):
+                out.append(m)
+    state["device_info"] = seen
     state["units"] = units
+    state["hw"] = hw
+    return out
+
+def event(metric):
+    tags = clean_tags(metric)
+    if "device" in tags:
+        if not valid_name(tags["device"]):
+            return []                 # 이름 규칙에 맞지 않는 기기로 간 명령은 readings 와 같이 버립니다
+        split_name(tags)
+    if tags.get("source") == "z2m" and "hw_id" not in tags:
+        for k, v in state.get("hw", {}).get(metric.tags.get("device", ""), {}).items():
+            if v != "":
+                tags[k] = v
+    for k in list(metric.tags.keys()):
+        metric.tags.pop(k)
+    for k, v in tags.items():
+        metric.tags[k] = v
+    if tags.get("source") != "z2m":
+        return metric
+    out = []                          # z2m set: {"state": "ON", "brightness": 120} → 필드마다 행(property=필드, action=값)
+    for k, v in metric.fields.items():
+        m = Metric("events")
+        m.time = metric.time
+        for tk, tv in tags.items():
+            m.tags[tk] = tv
+        m.tags["property"] = k
+        m.fields["action"] = str(int(v)) if type(v) == "float" and v == int(v) else str(v)
+        out.append(m)
+    return out
 
 def apply(metric):
     if metric.name == "z2m_devices":
-        remember_units(metric)
-        return []
-    tags = {}
-    for k, v in metric.tags.items():
-        if v != "":
-            tags[HW_TAGS.get(k, k)] = v
+        return remember_devices(metric)
+    if metric.name == "events":
+        return event(metric)
+    tags = clean_tags(metric)
     if not valid_name(tags.get("device", "")):
         return []                     # 이름이 없거나(옛 형식의 유지 메시지 등) 이름 규칙에 맞지 않는 기기는 버립니다
     name = tags["device"]
     units = state.get("units", {}).get(name, {})
-    i = name.find("-")
-    tags["room"] = name[:i]           # bedroom2-air-quality → room bedroom2, device air-quality
-    tags["device"] = name[i + 1:]
+    if tags.get("source") == "z2m" and "hw_id" not in tags:
+        for k, v in state.get("hw", {}).get(name, {}).items():
+            if v != "":
+                tags[k] = v
+    split_name(tags)
     prop = tags.pop("property", None)
     out = []
     for k, v in metric.fields.items():
@@ -518,38 +673,46 @@ def apply(metric):
         m.tags["property"] = prop or k
         if "unit" not in tags and units.get(m.tags["property"]):
             m.tags["unit"] = units[m.tags["property"]]
-        if type(v) == "bool":
-            m.fields["value"] = 1.0 if v else 0.0
-            m.fields["value_text"] = "true" if v else "false"
-        elif type(v) in ("int", "float"):
-            m.fields["value"] = float(v)
-        else:
-            s = str(v).strip()
-            if s == "":
-                continue                  # 값이 없는 필드는 버립니다
-            if is_number(s):
-                m.fields["value"] = float(s)
-            else:
-                m.fields["value_text"] = s
-                if s.lower() in ON_OFF:
-                    m.fields["value"] = ON_OFF[s.lower()]
-        out.append(m)
+        if set_value(m, v):
+            out.append(m)
     return out
 '''
 
 # 허브 TimescaleDB. 태그를 외래 키 테이블로 빼지 않고 컬럼으로 두어 지역 간 병합과 중복 제거가 쉽게 합니다.
 # 테이블은 컬럼 순서를 정해 두려고 직접 만들고, 이후 새 태그는 Telegraf 가 끝에 컬럼으로 붙입니다.
-# 압축은 시계열 하나(site, room, device, property)끼리 묶어 값이 비슷한 것끼리 모이게 합니다.
+# 압축은 시계열 하나(site, room, device, anchor, property, processing)끼리 묶어 값이 비슷한 것끼리 모이게 합니다.
 [[outputs.postgresql]]
+  namepass = ["readings"]
   connection = "host=${HUB_PG_HOST} port=${HUB_PG_PORT} user=iot password=${HUB_PG_PASSWORD} dbname=iot sslmode=disable connect_timeout=10"
   startup_error_behavior = "retry"    # 허브가 안 닿는 상태로 파드가 떠도 종료하지 않고 버퍼에 쌓으며 연결을 재시도합니다 (기본값은 종료)
   tags_as_foreign_keys = false
   timestamp_column_type = "timestamp with time zone"
   create_templates = [
-    '''CREATE TABLE {{ .table }} (time timestamptz NOT NULL, site text, room text, device text, property text, value double precision, unit text, value_text text,
+    '''CREATE TABLE {{ .table }} (time timestamptz NOT NULL, site text, room text, device text, anchor text, property text,
+        processing text NOT NULL CHECK (processing IN ('raw', 'corrected', 'derived')), value double precision, unit text, value_text text,
         protocol text, source text, vendor text, model text, hw_id text, node text)''',
     '''SELECT create_hypertable({{ .table|quoteLiteral }}, 'time', chunk_time_interval => INTERVAL '7d')''',
-    '''ALTER TABLE {{ .table }} SET (timescaledb.compress, timescaledb.compress_segmentby = 'site, room, device, property', timescaledb.compress_orderby = 'time DESC')''',
+    '''ALTER TABLE {{ .table }} SET (timescaledb.compress, timescaledb.compress_segmentby = 'site, room, device, anchor, property, processing', timescaledb.compress_orderby = 'time DESC')''',
+    '''SELECT add_compression_policy({{ .table|quoteLiteral }}, INTERVAL '30d')''',
+  ]
+
+# 허브 TimescaleDB 의 제어 기록 테이블 events. "행 하나 = 기기 하나에 간 명령 하나"(또는 자동화·스크립트 실행 하나)이고 값을 가공하지 않으므로 processing 이 없습니다.
+#   컬럼: time, site, room, device, anchor, property, action(switch.turn_off, ON …), data(서비스 데이터 JSON), origin(user|automation|system|mqtt),
+#         actor(사람 이름, automation.…), context_id, parent_id(HA context. 자동화 실행 행과 그 자동화가 보낸 명령이 context_id 로 이어집니다), protocol, source, vendor, model, hw_id, node
+# 출력마다 디스크 버퍼가 따로 있어 허브가 안 닿는 동안 readings 와 같이 쌓입니다.
+[[outputs.postgresql]]
+  namepass = ["events"]
+  tagexclude = ["processing"]
+  connection = "host=${HUB_PG_HOST} port=${HUB_PG_PORT} user=iot password=${HUB_PG_PASSWORD} dbname=iot sslmode=disable connect_timeout=10"
+  startup_error_behavior = "retry"
+  tags_as_foreign_keys = false
+  timestamp_column_type = "timestamp with time zone"
+  create_templates = [
+    '''CREATE TABLE {{ .table }} (time timestamptz NOT NULL, site text, room text, device text, anchor text, property text,
+        action text, data text, origin text, actor text, context_id text, parent_id text,
+        protocol text, source text, vendor text, model text, hw_id text, node text)''',
+    '''SELECT create_hypertable({{ .table|quoteLiteral }}, 'time', chunk_time_interval => INTERVAL '7d')''',
+    '''ALTER TABLE {{ .table }} SET (timescaledb.compress, timescaledb.compress_segmentby = 'site, room, device, anchor, property', timescaledb.compress_orderby = 'time DESC')''',
     '''SELECT add_compression_policy({{ .table|quoteLiteral }}, INTERVAL '30d')''',
   ]
 
@@ -557,7 +720,6 @@ def apply(metric):
 [[outputs.health]]
   service_address = "http://:8888"
   namepass = ["__none__"]
-```
 {: file="iot/edge/telegraf/telegraf.conf" }
 {% endraw %}
 
@@ -647,12 +809,14 @@ spec:
 
 | 컬럼 | 예 | 내용 |
 |---|---|---|
-| `time` | `2026-09-25 15:51:04+00` | 기록 시각. Zigbee 는 기기 시각(`last_seen`), Matter 는 수신 시각 |
+| `time` | `2026-09-25 15:51:04+00` | 기록 시각. Zigbee 는 기기 시각(`last_seen`, 연결 상태만 수신 시각), Matter 는 HA 가 상태를 바꾼 시각(`last_changed`) |
 | `site` | `daejeon` | 지역 |
-| `room` | `bedroom2` | 방. 기기 이름 `<방>-<종류>[번호]` 의 첫 `-` 앞 |
-| `device` | `motion2` | 기기 종류와 번호. 이름의 첫 `-` 뒤라 방마다 겹칠 수 있고, 실물 식별은 `hw_id` 가 맡습니다 |
-| `property` | `temperature`, `presence` | 측정 항목 |
-| `value` | `26.3`, `1` | 숫자 값. `on`/`off`, `true`/`false` 는 1/0 |
+| `room` | `bedroom2` | 방. 기기 이름 `<방>-<종류>[-<기준>][번호]` 의 첫 칸 |
+| `device` | `th`, `motion2`, `plug` | 기기 종류. 기준이 없으면 번호까지 들어갑니다. 방마다 겹칠 수 있고, 실물 식별은 `hw_id` 가 맡습니다 |
+| `anchor` | `door`, `ceil`, `server_ms_a2_1` | 기준. 센서는 방 안에서 둔 자리, 플러그는 꽂은 제품입니다. 이름에 기준 칸이 없으면 비어 있습니다 |
+| `property` | `temperature`, `presence`, `availability` | 측정 항목. `availability` 는 Zigbee 기기의 연결 상태(`online`/`offline`)로, 기기 시각이 없어 수신 시각으로 남습니다 |
+| `processing` | `raw` | 원본(`raw`)·보정(`corrected`)·계산(`derived`) 구분. 이 Telegraf 가 넣는 행은 모두 `raw` 입니다 |
+| `value` | `26.3`, `1` | 숫자 값. `on`/`off`, `true`/`false`, `online`/`offline` 은 1/0 |
 | `unit` | `°C`, `mV`, `μg/m³` | 단위. Zigbee 는 Zigbee2MQTT 기기 정의(`bridge/devices`), Matter 는 HA 의 `unit_of_measurement` 에서 가져옵니다. 단위가 없는 값(`presence` 등)은 비어 있습니다 |
 | `value_text` | `ON`, `false` | 문자열 원문 |
 | `protocol` | `zigbee`, `matter` | 기기 통신 방식 |
@@ -661,9 +825,22 @@ spec:
 | `hw_id` | `0xa4c138f95fdbf3ad` | 실물 기기의 고유 ID. Zigbee 는 IEEE 주소, Matter 는 시리얼 |
 | `node` | `CFEE358179DBE7B6-0000000000000001` | Matter 노드 ID (Matter 만) |
 
-기기 이름이 `<방>-<종류>[번호]` 규칙(영문 소문자·숫자)에 맞지 않으면 starlark 가 그 메시지를 버립니다. 페어링 직후 Zigbee 기기의 `0x…` 이름, 이름을 정하기 전 Matter 기기의 HA 기본 이름, 교체한 옛 기기의 `retired-…` 이름이 여기에 걸리므로 기기를 추가하면 바로 이름을 붙입니다.
+기기 이름이 `<방>-<종류>[-<기준>][번호]` 규칙(칸은 `-` 로 나누고 칸 안의 단어는 `_` 로 잇는 영문 소문자·숫자)에 맞지 않으면 starlark 가 그 메시지를 버립니다. 페어링 직후 Zigbee 기기의 `0x…` 이름, 이름을 정하기 전 Matter 기기의 HA 기본 이름, 교체한 옛 기기의 `retired-…` 이름이 여기에 걸리므로 기기를 추가하면 바로 이름을 붙입니다.
 
-압축은 `site, room, device, property` 가 같은 행끼리 묶습니다. 묶음 하나가 시계열 하나(예: 한 기기의 온도)가 되어 값이 비슷한 것끼리 모이므로 압축이 잘 되고, 조회할 때도 필요한 묶음만 풉니다.
+`processing` 은 값이 원본인지 가공한 것인지 나눕니다. 원본 행은 고치지 않고, 센서 편차를 보정한 값이나 평균처럼 계산한 값은 같은 시각·속성에 `corrected`·`derived` 행으로 따로 넣습니다. 그래서 `where processing = 'raw'` 로 원본만, `<> 'raw'` 로 가공 값만 뽑을 수 있습니다. 기본값 없이 `NOT NULL` 과 `CHECK` 제약을 걸어, 가공 스크립트가 구분을 빠뜨리거나 다른 값을 넣으면 INSERT 가 실패합니다.
+
+압축은 `site, room, device, anchor, property, processing` 이 같은 행끼리 묶습니다. 묶음 하나가 시계열 하나(예: 한 기기의 온도)가 되어 값이 비슷한 것끼리 모이므로 압축이 잘 되고, 조회할 때도 필요한 묶음만 풉니다.
+
+`events` 테이블은 "행 하나 = 기기 하나에 간 명령 하나" 입니다. 이 글에서는 Zigbee 명령만 들어오고, [Home Assistant 글](/posts/48/)에서 HA 로 제어한 명령과 자동화 실행이 누가 했는지와 함께 들어옵니다. 기기 컬럼은 `readings` 와 같아 명령 직후의 전력 변화처럼 두 테이블을 조인해 볼 수 있습니다. 값을 가공하지 않으므로 `processing` 은 없습니다.
+
+| 컬럼 | 예 | 내용 |
+|---|---|---|
+| `time`, `site`, `room`, `device`, `anchor`, `property` | `bedroom2`, `plug`, `outlet` | `readings` 와 같습니다. Zigbee 명령은 수신 시각이고 `property` 는 명령의 필드 이름입니다 |
+| `action` | `ON`, `switch.turn_off` | Zigbee 명령은 보낸 값, HA 명령은 서비스 이름 |
+| `data` | `{"brightness": 120}` | HA 서비스 데이터 JSON |
+| `origin`, `actor` | `mqtt`, `user`, `automation` | 누가 보냈는지. Zigbee 명령은 보낸 쪽을 알 수 없어 `mqtt` 입니다 |
+| `context_id`, `parent_id` | | HA context. 자동화 실행 행과 그 자동화가 보낸 명령을 잇습니다 |
+| `protocol`, `source`, `vendor`, `model`, `hw_id`, `node` | | `readings` 와 같습니다 |
 
 - **확인:** 이 단계도 파일만 만듭니다.
 
@@ -782,6 +959,7 @@ configMapGenerator:
 | 기기별 최신 값 | 기기마다 속성별 마지막 값(온도, 습도, 재실, 닫힘, 조도, CO2, PM2.5, 배터리, LQI) |
 | 온도, 습도, 조도, 배터리, 링크 품질, CO2, 미세먼지 | 기기별 시계열. Zigbee 와 Matter 기기가 한 그래프에 함께 그려집니다 |
 | 재실, 닫힘 (문·창문) | 켜짐/꺼짐 구간 타임라인 |
+| 연결 상태 (Zigbee) | 기기별 `online`/`offline` 구간 타임라인 |
 | 선택한 속성 | **속성** 변수로 고른 속성의 시계열 |
 | 실물 기기 | 실물 ID(`hw_id`)별 프로토콜, 수집기, 모델, 제조사, 지금 이름과 거쳐 간 이름 |
 | 최근 기록 | `readings` 테이블의 원본 행 최근 200개 |

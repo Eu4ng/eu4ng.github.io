@@ -74,9 +74,10 @@ homeassistant:
   enabled: true                  # Home Assistant 가 MQTT 디스커버리로 기기를 보게 합니다 (수집 경로와 무관)
 mqtt:
   base_topic: zigbee2mqtt        # Telegraf 가 zigbee2mqtt/+ 를 구독합니다
-# 기기 이름(friendly_name)은 <방>-<종류> (예: bedroom-th). Telegraf 가 첫 - 에서 나눠 DB 의 room, device 컬럼에 넣으므로 방 이름에는 - 를 쓰지 않습니다.
+# 기기 이름(friendly_name)은 <방>-<종류>[-<기준>][번호] (예: bedroom-th, bedroom-th-door). Telegraf 가 - 에서 나눠 DB 의 room, device, anchor 컬럼에 넣으므로
+# 칸 안에서는 - 대신 _ 로 단어를 잇습니다(living_room, air_quality).
 # 규칙에 맞지 않는 이름(페어링 직후의 0x…)과 retired-… 는 Telegraf 가 기록하지 않으므로 페어링하면 바로 이름을 붙입니다.
-# / 는 쓰지 않습니다(토픽이 두 단계가 되어 수집되지 않음). 옮기면 이름을 새 방으로, 교체하면 새 기기에 옛 이름을 줍니다.
+# / 는 쓰지 않습니다(토픽이 두 단계가 되어 수집되지 않음). 옮기면 이름을 새 방·기준으로, 교체하면 새 기기에 옛 이름을 줍니다.
 frontend:
   enabled: true
 advanced:
@@ -136,6 +137,8 @@ spec:
             # 배터리 기기는 잠들어 ping 에 답하지 못하므로 active 방식을 쓸 수 없고, 제한 시간 동안 메시지가 없으면 offline 으로 봅니다(passive).
             - { name: ZIGBEE2MQTT_CONFIG_AVAILABILITY_ENABLED, value: "true" }
             - { name: ZIGBEE2MQTT_CONFIG_AVAILABILITY_PASSIVE_TIMEOUT, value: "60" }   # 분. 기본 1500. 온습도계가 값이 안 바뀌면 30분까지 조용하므로 그 두 배
+            # 생존 신호 간격이 이보다 긴 기기(문·창문 센서는 상태가 안 바뀌면 약 3시간마다 배터리만 보냄)는 기기별 availability.timeout 을 줍니다.
+            # 기기별 값은 PVC 의 configuration.yaml(devices)에 저장되므로 bridge/request/device/options 요청이나 프런트엔드로 바꿉니다
             # 모든 기기의 기본 옵션입니다. 기기별로 같은 키를 주면 이 값이 가려집니다.
             #   qos 1: 기본 0 이면 Telegraf 가 QoS1 로 구독해도 전달이 QoS0 이 되어, Telegraf 가 내려간 동안 브로커가 메시지를 보관하지 않고 버립니다
             #   linkquality: HA 가 LQI 엔티티를 비활성으로 등록하지 않게 합니다(처음 등록될 때만 적용)
@@ -239,9 +242,9 @@ kubectl $E -n zigbee2mqtt logs deploy/zigbee2mqtt | grep -E 'Socket connected|Co
 
 ## 4. 프런트엔드 접속과 기기 페어링
 
-내 PC 브라우저에서 `http://[EDGE_IP]:30083` 을 열고 시크릿 스크립트에 입력한 프런트엔드 토큰으로 들어갑니다. 상단의 **Permit join** 을 켠 뒤 기기를 페어링 모드로 만들면(기기마다 버튼을 몇 초 누르는 식) 목록에 나타납니다. 기기 이름(friendly name)은 토픽에 그대로 쓰이고 DB 에서는 `room`·`device` 컬럼으로 나뉘므로 `<방>-<종류>` 형식의 영문 소문자로 바꿉니다(예: 온습도계 `bedroom-th`, 멀티 센서 `bedroom-multi`, 문 센서 `bedroom-door`). 종류는 측정 항목이 아니라 기기 역할이고, 같은 방에 여럿이면 `bedroom-th2` 처럼 번호를 붙입니다. Telegraf 가 이름을 첫 `-` 에서 나눠 `room`(`bedroom`)과 `device`(`th`)에 넣으므로 방 이름에는 `-` 를 쓰지 않습니다(`livingroom`). Telegraf 는 이 규칙에 맞는 이름만 기록하므로, 페어링 직후의 `0x…` 이름으로 보낸 값은 DB 에 남지 않습니다. 또 `include_device_information` 으로 실린 실물 기기의 IEEE 주소와 모델을 `hw_id`, `model`, `vendor` 컬럼에 넣습니다.
+내 PC 브라우저에서 `http://[EDGE_IP]:30083` 을 열고 시크릿 스크립트에 입력한 프런트엔드 토큰으로 들어갑니다. 상단의 **Permit join** 을 켠 뒤 기기를 페어링 모드로 만들면(기기마다 버튼을 몇 초 누르는 식) 목록에 나타납니다. 기기 이름(friendly name)은 토픽에 그대로 쓰이고 DB 에서는 `room`·`device`·`anchor` 컬럼으로 나뉘므로 `<방>-<종류>[-<기준>][번호]` 형식의 영문 소문자로 바꿉니다(예: 온습도계 `bedroom-th`, 멀티 센서 `bedroom-multi`, 문 열림 센서 `bedroom-contact-door`). 종류는 측정 항목이 아니라 기기 역할입니다. 기준(기기가 기준으로 삼는 대상)은 센서의 경우 같은 방 안에서 어디에 두었는지가 값에 영향을 줄 때만 붙이며, 주 출입문에 서서 방 안을 바라본 방향(`door`, `left`, `right`, `back`, `back_left`, `back_right`)이나 방에 하나뿐인 기준물(`window`, `bed`, `desk`), 높이(`ceil`, `floor`)로 적습니다. 같은 이름이 둘 이상이면 `bedroom-th2`, `bedroom-th-left2` 처럼 맨 끝에 번호를 붙입니다. Telegraf 가 이름을 `-` 에서 나눠 `room`(`bedroom`), `device`(`th`), `anchor`(`door`)에 넣으므로 칸 안에서는 `-` 대신 `_` 로 단어를 잇습니다(`living_room`, `air_quality`). Telegraf 는 이 규칙에 맞는 이름만 기록하므로, 페어링 직후의 `0x…` 이름으로 보낸 값은 DB 에 남지 않습니다. 또 `include_device_information` 으로 실린 실물 기기의 IEEE 주소와 모델을 `hw_id`, `model`, `vendor` 컬럼에 넣습니다.
 
-- 기기를 다른 방으로 옮기면 옮기는 즉시 이름을 새 방으로 바꿉니다. 바꾼 시각부터 새 방으로 기록되고, 과거 행은 옛 방으로 남습니다.
+- 기기를 다른 방이나 자리로 옮기면 옮기는 즉시 이름을 바꿉니다. 바꾼 시각부터 새 방·기준으로 기록되고, 과거 행은 옛 방·기준으로 남습니다.
 - 기기를 교체하면 옛 기기를 `retired-[기기 이름]` 으로 바꾸거나 제거하고, 새 기기에 옛 이름을 줍니다. 이름은 이어지고 `hw_id`, `model` 만 바뀝니다. `retired-` 이름의 값은 기록되지 않습니다.
 
 > 이름에 `/` 를 넣으면 토픽이 `zigbee2mqtt/거실/온도` 처럼 두 단계가 되어 Telegraf 의 `zigbee2mqtt/+` 구독에 잡히지 않습니다.
@@ -256,18 +259,31 @@ kubectl $E -n mosquitto run mq-sub --rm -i -q --restart=Never --image=eclipse-mo
   --command -- mosquitto_sub -h mosquitto -u telegraf -P "$PW" -t 'zigbee2mqtt/+' -v
 ```
 
+배터리 기기는 값이 바뀔 때와 주기적인 생존 신호(배터리·링크 품질 보고) 때만 메시지를 보내고, 제한 시간(`availability.passive.timeout`, 여기서는 60분) 동안 아무 메시지도 없으면 `offline` 이 됩니다. 문 열림 센서는 문을 계속 열어 두거나 닫아 두면 3시간쯤마다 생존 신호만 보내므로 60분 제한에서는 멀쩡해도 `offline` 으로 표시됩니다. 이런 기기는 기기별 제한 시간을 생존 신호 간격보다 길게 줍니다. 값은 PVC 의 `configuration.yaml` 에 저장되어 재시작해도 유지됩니다.
+
+```bash
+# control plane: 문 열림 센서의 연결 상태 제한 시간을 240분으로 (기기마다 반복)
+kubectl $E -n mosquitto run mq-opt --rm -i -q --restart=Never --image=eclipse-mosquitto:2.0.22 --env="PW=$PW" \
+  --command -- mosquitto_pub -h mosquitto -u telegraf -P "$PW" -t zigbee2mqtt/bridge/request/device/options \
+  -m '{"id": "[기기 이름]", "options": {"availability": {"timeout": 240}}}'
+kubectl $E -n zigbee2mqtt exec deploy/zigbee2mqtt -c zigbee2mqtt -- sed -n '/^devices:/,/^[a-z]/p' /app/data/configuration.yaml
+```
+
+- **확인:** `configuration.yaml` 의 `devices:` 아래 그 기기 항목에 `availability:` `timeout: 240` 이 보입니다. 브로커의 `zigbee2mqtt/[기기 이름]/availability` 는 `{"state":"online"}` 이고, 생존 신호 간격보다 오래 조용해도 `offline` 으로 바뀌지 않습니다.
+
 ## 5. 허브 DB 에서 확인
 
-Telegraf 는 기기 메시지의 필드 하나를 `readings` 테이블의 행 하나(`property`, `value`, `value_text`)로 넣습니다. 기기 설정값(보정값, 감도, 표시등 등)은 버립니다. 허브에서 기기별로 들어온 속성을 봅니다.
+Telegraf 는 기기 메시지의 필드 하나를 `readings` 테이블의 행 하나(`property`, `value`, `value_text`)로 넣습니다. 기기 설정값(보정값, 감도, 표시등 등)과 펌웨어 업데이트 정보도 같은 방식으로 들어가고, 기기 정보(`device_software_build_id` 등)는 바뀔 때만 들어갑니다. 허브에서 기기별로 들어온 속성을 봅니다.
 
 ```bash
 # 허브 control plane
 kubectl -n timescaledb exec deploy/timescaledb -- psql -U iot -d iot \
-  -c "select room, device, hw_id, model, string_agg(distinct property, ', ') as properties, max(time)
-      from readings where protocol = 'zigbee' group by 1,2,3,4 order by 1,2;"
+  -c "select room, device, anchor, hw_id, model, string_agg(distinct property, ', ') as properties,
+             max(time) filter (where property <> 'availability') as last_seen
+      from readings where protocol = 'zigbee' group by 1,2,3,4,5 order by 1,2,3;"
 ```
 
-- **확인:** `room`·`device` 에 규칙에 맞는 기기 이름을 나눈 방과 종류가 있고 `hw_id`·`model` 에 실물 기기가 보이고 `max(time)` 이 기기가 마지막으로 보고한 시각(`last_seen`)과 같습니다. `properties` 에 기기가 보내는 측정 항목(`temperature`, `battery`, `linkquality` 등)이 보입니다.
+- **확인:** `room`·`device`·`anchor` 에 규칙에 맞는 기기 이름을 나눈 방·종류·기준이 있고 `hw_id`·`model` 에 실물 기기가 보이고 `last_seen` 이 기기가 마지막으로 보고한 시각과 같습니다. `properties` 에 기기가 보내는 측정 항목(`temperature`, `battery`, `linkquality` 등)과 연결 상태(`availability`)가 보입니다. 연결 상태는 기기 시각이 없어 Telegraf 가 받은 시각으로 남으므로 `last_seen` 계산에서 뺍니다.
 
 ## 마무리
 

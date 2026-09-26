@@ -577,7 +577,7 @@ log "완료. 상태가 loaded 가 아니면 HA 로그를 확인합니다."
 
 ## 6. 지역 대시보드
 
-Remote Home Assistant 는 지역 HA 의 엔티티 상태만 복제하고 기기와 방(area)은 가져오지 않습니다. 그래서 중앙 HA 의 기록 화면이나 기본 대시보드에서는 지역의 방 단위로 고를 수 없습니다. 중앙에는 방을 만들지 않고, 사이드바에 **지역** 대시보드를 따로 둡니다. 탭 하나가 지역이고, 탭 안의 카드 하나가 방입니다. 카드는 커뮤니티 카드 **auto-entities** 가 템플릿으로 만듭니다. 방은 기기 이름 규칙 `<방>-<종류>[번호]`(예: `bedroom2-th2`)에서 자르므로, 기기를 추가하거나 이름을 바꿔 방을 옮겨도 YAML 을 고치지 않아도 됩니다.
+Remote Home Assistant 는 지역 HA 의 엔티티 상태만 복제하고 기기와 방(area)은 가져오지 않습니다. 그래서 중앙 HA 의 기록 화면이나 기본 대시보드에서는 지역의 방 단위로 고를 수 없습니다. 중앙에는 방을 만들지 않고, 사이드바에 **지역** 대시보드를 따로 둡니다. 탭 하나가 지역이고, 탭 안의 카드 하나가 방입니다. 카드는 커뮤니티 카드 **auto-entities** 가 템플릿으로 만듭니다. 방은 기기 이름 규칙 `<방>-<종류>[-<기준>][번호]`(예: `bedroom2-th-door`)의 첫 칸에서 자르므로, 기기를 추가하거나 이름을 바꿔 방이나 기준을 옮겨도 YAML 을 고치지 않아도 됩니다.
 
 - 방 카드에는 현재 값과 24시간 기록 그래프가 함께 나옵니다. 그래프는 단위별로 나뉘고, 재실·문은 타임라인으로 그려집니다.
 - 맨 위 **주의** 카드에는 오프라인 기기, 배터리 20% 미만, LQI 50 미만, Zigbee2MQTT 브리지 끊김만 모입니다. 해당하는 게 없으면 카드가 숨습니다.
@@ -638,8 +638,8 @@ lovelace:
 ```yaml
 # 지역 대시보드(사이드바 "지역"). 탭 = 지역, 탭 안의 카드 = 방. initContainer 가 기동마다 /config/dashboards/regions.yaml 로 덮어쓰므로 여기가 원본입니다.
 # 중앙 HA 에는 방·기기가 없으므로(Remote Home Assistant 는 엔티티만 복제) 방은 이름 규칙에서 자릅니다:
-#   엔티티 friendly_name = <지역 접두사><방>-<종류>[번호] <항목>  예) "[SITE_NAME]bedroom2-th2 온도"  (iot/README.md 의 기기 이름 규칙)
-# 기기 추가·방 이동(이름 변경)·새 방은 YAML 수정 없이 반영됩니다. 규칙에 없는 종류를 쓰면 아래 두 정규식의 (th|multi|door|motion) 에 추가합니다.
+#   엔티티 friendly_name = <지역 접두사><방>-<종류>[-<기준>][번호] <항목>  예) "[SITE_NAME]bedroom2-th-door 온도"  (iot/README.md 의 기기 이름 규칙)
+# 기기 추가·방 이동·기준 변경(이름 변경)·새 방은 YAML 수정 없이 반영됩니다. 규칙에 없는 종류를 쓰면 아래 두 정규식의 (th|multi|contact|motion|air_quality|plug) 에 추가합니다.
 # 지역 추가: 탭 하나를 복사해 title·path 와 템플릿의 region(Remote Home Assistant 의 entity_friendly_name_prefix)을 바꿉니다.
 # 기록 그래프는 중앙 HA 레코더(기본 10일 보관)에서 그립니다. 그보다 긴 기간은 Grafana(허브 TimescaleDB)에서 봅니다.
 title: 지역
@@ -663,7 +663,7 @@ views:
               {%- set label = fn[region | length:] if fn.startswith(region) else '' -%}
               {%- set dev = label.split(' ')[0] -%}
               {%- set reason = '' -%}
-              {%- if dev is match('[a-z0-9]+-(th|multi|door|motion)[0-9]*$') -%}
+              {%- if dev is match('[a-z0-9_]+-(th|multi|contact|motion|air_quality|plug)(-[a-z0-9_]+)?[0-9]*$') -%}
                 {%- if s.state == 'unavailable' -%}{%- set reason = '오프라인' -%}
                 {%- elif s.attributes.device_class == 'battery' and s.state | int(100) < 20 -%}{%- set reason = '배터리 ' ~ s.state ~ '%' -%}
                 {%- elif s.attributes.unit_of_measurement == 'lqi' and s.state | int(255) < 50 -%}{%- set reason = '신호 약함 ' ~ s.state -%}
@@ -677,7 +677,7 @@ views:
             {%- endfor -%}
             {{ ns.rows | sort(attribute='name') | tojson }}
       # 방마다 현재 값 카드와 24시간 기록 그래프(단위별로 나뉘고 재실·문은 타임라인)를 한 묶음으로 둡니다.
-      # 상태 항목(온도·습도·조도·재실·문)만 보이고, 배터리·전압·LQI 같은 진단값은 위 주의 카드에서만 봅니다.
+      # 상태 항목(온도·습도·조도·재실·문·플러그 전력)만 보이고, 배터리·전압·LQI 같은 진단값은 위 주의 카드에서만 봅니다.
       - type: custom:auto-entities
         card_param: cards
         card:
@@ -687,13 +687,13 @@ views:
         filter:
           template: |
             {%- set region = '[SITE_NAME]' -%}
-            {%- set shown = ['temperature', 'humidity', 'illuminance', 'occupancy', 'motion', 'presence', 'door', 'window', 'opening'] -%}
+            {%- set shown = ['temperature', 'humidity', 'illuminance', 'occupancy', 'motion', 'presence', 'door', 'window', 'opening', 'power'] -%}
             {%- set ns = namespace(rows=[], cards=[]) -%}
             {%- for s in (states.sensor | list) + (states.binary_sensor | list) -%}
               {%- set fn = s.attributes.friendly_name | default('', true) -%}
               {%- set label = fn[region | length:] if fn.startswith(region) else '' -%}
               {%- set dev = label.split(' ')[0] -%}
-              {%- if dev is match('[a-z0-9]+-(th|multi|door|motion)[0-9]*$') and s.attributes.device_class | default('', true) in shown -%}
+              {%- if dev is match('[a-z0-9_]+-(th|multi|contact|motion|air_quality|plug)(-[a-z0-9_]+)?[0-9]*$') and s.attributes.device_class | default('', true) in shown -%}
                 {%- set ns.rows = ns.rows + [{'room': dev.split('-')[0], 'row': {'entity': s.entity_id, 'name': label}}] -%}
               {%- endif -%}
             {%- endfor -%}
@@ -776,6 +776,9 @@ wget https://eu4ng.github.io/assets/scripts/iot/ha-registry.py
 # 토큰은 대상 HA 의 장기 액세스 토큰(관리자)입니다. HA_TOKEN 이 없으면 입력받습니다. 저장소·파일에 남기지 않습니다.
 #
 # 작업(여러 개 가능):
+#   --set-name <시리얼>=<이름>   Matter 기기를 시리얼로 찾아 HA 기기 이름(name_by_user)을 바꿉니다. 여러 번 줄 수 있고, 아래 작업보다 먼저 적용됩니다
+#                                예) --set-name SSMGE21XS00E2D=bedroom2-plug-server_ms_a2_1 --rename-matter --assign-areas
+#                                SmartThings 등에서 온 기본 이름보다 우선합니다. Zigbee 기기 이름은 Zigbee2MQTT 에서 바꿉니다
 #   --enable-platform <플랫폼>   통합이 꺼 둔(disabled_by=integration) 엔티티를 켭니다. 사용자가 끈 것(user)은 두고요. 예) mqtt
 #   --delete-empty-areas         기기·엔티티가 하나도 없는 방을 지웁니다 (중앙 HA 의 온보딩 기본 방)
 #   --prune-remote-orphans       Remote Home Assistant 엔티티 중 원격에서 사라져 상태가 없는 것을 지웁니다 (지역에서 이름을 바꾼 잔재).
@@ -784,7 +787,7 @@ wget https://eu4ng.github.io/assets/scripts/iot/ha-registry.py
 #                                예) sensor.0xa4c138f95fdbf3ad_linkquality → sensor.bedroom2_motion_linkquality. 기록은 HA 가 새 ID 로 옮깁니다
 #   --rename-matter              matter 엔티티 ID 를 <기기 이름>_<측정 항목(device_class 등)> 영문으로 바꿉니다. 표시 이름(온도 등)은 그대로입니다
 #                                예) sensor.cimsil2_bedroom2_air_quality_ondo → sensor.bedroom2_air_quality_temperature. 기록은 HA 가 새 ID 로 옮깁니다
-#   --assign-areas               Zigbee·Matter 기기를 이름(<방>-<종류>[번호])의 방에 해당하는 영역으로 옮깁니다. 영역이 없으면 만듭니다
+#   --assign-areas               Zigbee·Matter 기기를 이름(<방>-<종류>[-<기준>][번호])의 방에 해당하는 영역으로 옮깁니다. 영역이 없으면 만듭니다
 #                                예) bedroom2-th → 침실2 (방 코드는 영역 별칭으로 붙습니다). ROOMS 에 없는 방은 코드 그대로(garage)를 이름으로 씁니다
 import asyncio, getpass, os, re, sys
 
@@ -822,6 +825,26 @@ async def main(args):
 
         ents = await call(type="config/entity_registry/list")
         tag = "[dry-run] " if dry else ""
+        renamed = {}   # --set-name 으로 바꾼 기기 id → 새 이름. --dry-run 에서도 뒤 작업이 새 이름으로 미리 보이게 합니다
+
+        if "--set-name" in args:
+            want = dict(args[i + 1].split("=", 1) for i, a in enumerate(args) if a == "--set-name")
+            devs = {d.get("serial_number"): d for d in await call(type="config/device_registry/list")
+                    if "matter" in {i[0] for i in d["identifiers"]} and d.get("serial_number")}
+            for serial, name in want.items():
+                d = devs.get(serial)
+                if not d:
+                    print(f"건너뜀 {serial}: 이 시리얼의 Matter 기기가 없습니다")
+                    continue
+                if not re.fullmatch(r"[a-z0-9_]+-[a-z0-9_]+(-[a-z0-9_]+)?", name):
+                    print(f"경고 {name}: 기기 이름 규칙(<방>-<종류>[-<기준>][번호])에 맞지 않아 수집되지 않습니다")
+                old = d.get("name_by_user") or d.get("name")
+                if old == name:
+                    continue
+                print(f"{tag}기기 이름 {old} → {name}")
+                renamed[d["id"]] = name
+                if not dry:
+                    await call(type="config/device_registry/update", device_id=d["id"], name_by_user=name)
 
         if "--enable-platform" in args:
             plat = args[args.index("--enable-platform") + 1]
@@ -859,8 +882,8 @@ async def main(args):
                 taken.add(new)
 
         if "--rename-matter" in args:
-            # 한국어 HA 는 엔티티 이름(온도)을 로마자(ondo)로, 방 이름까지 붙여 ID 를 만듭니다. 방은 기기 이름(<방>-<종류>)에 이미 있습니다
-            devs = {d["id"]: d.get("name_by_user") or d.get("name") for d in await call(type="config/device_registry/list")}
+            # 한국어 HA 는 엔티티 이름(온도)을 로마자(ondo)로, 방 이름까지 붙여 ID 를 만듭니다. 방은 기기 이름(<방>-<종류>[-<기준>])에 이미 있습니다
+            devs = {d["id"]: renamed.get(d["id"]) or d.get("name_by_user") or d.get("name") for d in await call(type="config/device_registry/list")}
             ids = [e["entity_id"] for e in ents if e["platform"] == "matter"]
             full = await call(type="config/entity_registry/get_entries", entity_ids=ids) if ids else {}
             taken = {e["entity_id"] for e in ents}
@@ -896,12 +919,12 @@ async def main(args):
                 # 이름 규칙은 Zigbee2MQTT(mqtt)·Matter 기기에만 있습니다. 휴대폰(mobile_app) 등은 건너뜁니다
                 if not {i[0] for i in d["identifiers"]} & {"mqtt", "matter"}:
                     continue
-                name = d.get("name_by_user") or d.get("name") or ""
-                m = re.match(r"([a-z0-9]+)-", name)
+                name = renamed.get(d["id"]) or d.get("name_by_user") or d.get("name") or ""
+                m = re.match(r"([a-z0-9_]+)-", name)
                 if not m or m.group(1) == "retired":
                     continue
                 room = m.group(1)
-                r = re.fullmatch(r"([a-z]+)(\d*)", room)
+                r = re.fullmatch(r"([a-z_]+)(\d*)", room)
                 want = ROOMS[r.group(1)] + r.group(2) if r and r.group(1) in ROOMS else room
                 aid = find.get(room) or find.get(want)
                 if not aid:
@@ -945,7 +968,7 @@ kubectl -n home-assistant exec -i deploy/home-assistant -c home-assistant -- \
 unset T
 ```
 
-지역 HA 에서는 Zigbee2MQTT 가 꺼 둔 채 등록한 진단 엔티티(LQI 등)를 켜고, 페어링 직후 IEEE 주소(`0x…`)로 잡힌 엔티티 ID 를 기기 이름으로 바꿉니다. Matter 기기는 한국어 HA 가 엔티티 이름(`온도`)을 로마자로 옮기고 방 이름까지 붙여 `sensor.cimsil2_bedroom2_air_quality_ondo` 같은 ID 를 만드므로, `--rename-matter` 로 `sensor.bedroom2_air_quality_temperature` 처럼 기기 이름과 측정 항목의 영문으로 바꿉니다. 표시 이름은 한국어 그대로이고, 허브 DB 의 `hass.device` 에는 바꾼 ID 가 들어갑니다. `--assign-areas` 는 Zigbee·Matter 기기를 이름의 방 부분(`bedroom2-th` 의 `bedroom2`)에 맞는 영역으로 옮깁니다. 방 코드는 스크립트의 `ROOMS` 로 한국어 영역 이름(`침실2`)이 되고, 그 영역이 없으면 방 코드를 별칭으로 붙여 새로 만듭니다. 그래서 기기를 추가하거나 다른 방으로 옮길 때는 이름만 바꾸고 이 명령을 실행하면 됩니다. 이름을 바꾸면 중앙에는 새 ID 가 올라오고 옛 ID 는 잔재가 되므로, 새 엔티티가 보인 뒤 위의 중앙 명령을 한 번 더 실행합니다.
+지역 HA 에서는 Zigbee2MQTT 가 꺼 둔 채 등록한 진단 엔티티(LQI 등)를 켜고, 페어링 직후 IEEE 주소(`0x…`)로 잡힌 엔티티 ID 를 기기 이름으로 바꿉니다. Matter 기기는 한국어 HA 가 엔티티 이름(`온도`)을 로마자로 옮기고 방 이름까지 붙여 `sensor.cimsil2_bedroom2_air_quality_ondo` 같은 ID 를 만드므로, `--rename-matter` 로 `sensor.bedroom2_air_quality_temperature` 처럼 기기 이름과 측정 항목의 영문으로 바꿉니다. 표시 이름은 한국어 그대로이고, 허브 DB 의 `hass.device` 에는 바꾼 ID 가 들어갑니다. `--assign-areas` 는 Zigbee·Matter 기기를 이름의 방 부분(`bedroom2-th` 의 `bedroom2`)에 맞는 영역으로 옮깁니다. 방 코드는 스크립트의 `ROOMS` 로 한국어 영역 이름(`침실2`)이 되고, 그 영역이 없으면 방 코드를 별칭으로 붙여 새로 만듭니다. 그래서 기기를 추가하거나 다른 방으로 옮길 때는 이름만 바꾸고 이 명령을 실행하면 됩니다. SmartThings 같은 다른 컨트롤러에서 공유받은 Matter 기기는 그쪽 이름이 HA 기본 이름으로 들어오므로, 여러 대를 한 번에 규칙대로 바꿀 때는 `--set-name [SERIAL]=[DEVICE_NAME]` 을 기기마다 같은 명령에 붙입니다. 시리얼은 HA 의 기기 화면에서 확인합니다. 이름을 바꾸면 중앙에는 새 ID 가 올라오고 옛 ID 는 잔재가 되므로, 새 엔티티가 보인 뒤 위의 중앙 명령을 한 번 더 실행합니다.
 
 ```bash
 # control plane. 지역 HA
@@ -959,7 +982,7 @@ unset T
 > 지역 HA 가 내려가 있으면 그 지역 엔티티가 모두 상태가 없는 것으로 보입니다. 이때 `--prune-remote-orphans` 가 전부 지우지 않도록, 연결된 엔티티가 하나도 없는 지역은 `건너뜀` 으로 표시하고 두게 했습니다. 이 표시가 나오면 지역 HA 가 다시 뜬 뒤 실행합니다.
 {: .prompt-warning }
 
-- **확인:** `--dry-run` 없이 실행한 출력에 `방 삭제`, `엔티티 삭제`, `활성화`, `이름 변경`, `영역 지정` 줄이 나오고, 다시 `--dry-run` 으로 실행하면 아무것도 나오지 않습니다.
+- **확인:** `--dry-run` 없이 실행한 출력에 `방 삭제`, `엔티티 삭제`, `활성화`, `기기 이름`, `이름 변경`, `영역 지정` 줄이 나오고, 다시 `--dry-run` 으로 실행하면 아무것도 나오지 않습니다.
 
 ## 8. 확인
 

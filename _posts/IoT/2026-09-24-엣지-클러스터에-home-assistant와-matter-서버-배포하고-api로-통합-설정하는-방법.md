@@ -7,12 +7,12 @@ tags: [iot, home-assistant, matter, thread, mqtt, telegraf, kubernetes, argo-cd,
 permalink: /posts/48/
 ---
 
-엣지 클러스터에 **Home Assistant**(HA)와 **matterjs-server**(Matter 컨트롤러)를 배포하고, HA 의 통합 설정을 스크립트로 넣은 뒤 밖에서 `ha-[SITE_CODE].[DOMAIN]` 으로 엽니다. HA 는 Matter 기기 등록 화면과 제어·자동화 대시보드로만 쓰고 수집 경로에는 두지 않습니다. Zigbee 는 [Zigbee2MQTT](/posts/44/)가 브로커로 바로 보내고, Matter 기기 상태만 HA 자동화가 브로커로 다시 발행해 [수집 파이프라인](/posts/43/)을 탑니다. 통합 추가, Thread 기본 네트워크 지정, 역방향 프록시 신뢰 설정은 모두 HA API 로 하므로 새 서버에서도 같은 명령 한 번이면 됩니다.
+엣지 클러스터에 **Home Assistant**(HA)와 **matterjs-server**(Matter 컨트롤러)를 배포하고, HA 의 통합 설정을 스크립트로 넣은 뒤 밖에서 `ha-[SITE_CODE].[DOMAIN]` 으로 엽니다. HA 는 Matter 기기 등록 화면과 제어·자동화 대시보드로만 쓰고 수집 경로에는 두지 않습니다. Zigbee 는 [Zigbee2MQTT](/posts/44/)가 브로커로 바로 보내고, Matter 기기 상태와 HA 에서 내린 기기 제어 기록만 HA 자동화가 브로커로 발행해 [수집 파이프라인](/posts/43/)을 탑니다. 통합 추가, Thread 기본 네트워크 지정, 역방향 프록시 신뢰 설정은 모두 HA API 로 하므로 새 서버에서도 같은 명령 한 번이면 됩니다.
 
 1. 매니페스트 추가와 배포
 2. 온보딩과 장기 액세스 토큰
 3. 통합 설정 스크립트 실행
-4. Matter 상태를 수집 파이프라인에 연결
+4. Matter 상태와 제어 기록을 수집 파이프라인에 연결
 5. 밖에서 열기와 2단계 인증
 6. 확인
 
@@ -39,14 +39,14 @@ permalink: /posts/48/
 
 ## 1. 매니페스트 추가와 배포
 
-HA 와 Matter 서버는 기기 탐색(mDNS)과 IPv6 로 LAN 의 기기와 직접 통신해야 해서 `hostNetwork` 로 띄웁니다. 파드 네트워크(Flannel)는 IPv4 만 다루기 때문입니다. HA 는 `configuration.yaml` 을 스스로 만들고 고치므로 PVC 에 두고, initContainer 가 재발행 자동화 파일을 복사하고 그 파일을 읽는 줄만 한 번 덧붙입니다. 자동화는 **Matter 통합에 속한 엔티티**(`integration_entities('matter')`)의 상태가 바뀔 때만 발행합니다. Zigbee 기기도 HA 에 보이지만 MQTT 통합 소속이고 이미 Zigbee2MQTT 경로로 수집되므로 걸리지 않습니다. 기기 이름과 무관하게 거르므로 Matter 기기를 등록할 때 이름 규칙을 지킬 필요가 없습니다.
+HA 와 Matter 서버는 기기 탐색(mDNS)과 IPv6 로 LAN 의 기기와 직접 통신해야 해서 `hostNetwork` 로 띄웁니다. 파드 네트워크(Flannel)는 IPv4 만 다루기 때문입니다. HA 는 `configuration.yaml` 을 스스로 만들고 고치므로 PVC 에 두고, initContainer 가 자동화 파일을 복사하고 그 파일을 읽는 줄만 한 번 덧붙입니다. 파일에는 자동화가 두 개 있습니다. `matter_statestream` 은 **Matter 통합에 속한 엔티티**(`integration_entities('matter')`)의 상태나 속성이 바뀔 때 발행하고, `control_events` 는 기기로 간 명령과 자동화 실행을 누가 했는지와 함께 발행합니다(4단계). Zigbee 기기도 HA 에 보이지만 MQTT 통합 소속이고 이미 Zigbee2MQTT 경로로 수집되므로 걸리지 않습니다. 기기 이름과 무관하게 거르므로 Matter 기기를 등록할 때 이름 규칙을 지킬 필요가 없습니다.
 
 > HA 의 `mqtt_statestream` 도 같은 토픽 형식으로 발행하지만 도메인·엔티티 이름으로만 거를 수 있고 통합 단위로는 거르지 못합니다. 그래서 `matter_*` 같은 이름 규칙이 필요해지고, 기기 이름에서 자동으로 만들어진 엔티티는 빠집니다.
 {: .prompt-info }
 
 ```yaml
 # 엣지의 Home Assistant. Matter 커미셔닝 UI 와 제어·자동화 대시보드로만 쓰고, 수집 경로에는 두지 않습니다.
-# Matter 통합의 엔티티 상태만 자동화(matter-statestream.yaml)로 브로커에 재발행해 Telegraf 가 받게 합니다 (initContainer 가 /config 로 복사하고 configuration.yaml 에 include 를 한 번 덧붙임).
+# Matter 통합의 엔티티 상태·속성과 기기 제어 기록을 자동화(matter-statestream.yaml)로 브로커에 발행해 Telegraf 가 받게 합니다 (initContainer 가 /config 로 복사하고 configuration.yaml 에 include 를 한 번 덧붙임).
 resources:
   - deployment.yaml
   - pvc.yaml
@@ -59,13 +59,23 @@ configMapGenerator:
 
 {% raw %}
 ```yaml
-# Matter 통합의 엔티티 상태를 MQTT 로 재발행해 Telegraf 가 허브 DB 에 넣습니다. initContainer 가 매 기동 /config 로 복사합니다.
-# mqtt_statestream 은 통합 단위로 거르지 못해 엔티티 이름 규칙이 필요했으므로, 소속 통합(integration_entities)으로 거르는 자동화로 대신합니다.
-# Zigbee 기기는 MQTT 통합 소속이라 여기 걸리지 않고 zigbee2mqtt/ 토픽으로 따로 수집됩니다. 토픽은 mqtt_statestream 과 같습니다.
-# 값은 JSON 입니다. Telegraf 가 Zigbee 와 같은 테이블(readings)에 "기기 하나의 속성 하나" 로 넣도록 상태(state)에 다음을 붙입니다:
-#   device(HA 기기 이름, <방>-<용도>), property(엔티티 ID 에서 기기 이름을 뗀 측정 항목, 예: pm25), unit(엔티티의 unit_of_measurement, 예: µg/m³)
-#   node(패브릭-노드 ID, 다시 커미셔닝하면 바뀜), serial(기기 시리얼, 바뀌지 않음), model, vendor
-# 측정값이 아닌 button(식별)·update(펌웨어) 도메인은 발행하지 않습니다.
+# HA 에서 허브 DB 로 보낼 것을 MQTT 로 발행하는 자동화 두 개입니다. initContainer 가 매 기동 /config 로 복사합니다.
+# 수집 원칙은 "기본은 모두 수집" 이고, 빼는 것은 중복(Zigbee 기기 상태는 zigbee2mqtt/ 토픽으로 따로 수집)과 수집 자동화 자신의 실행뿐입니다.
+#
+# 1) matter_statestream: Matter 통합 엔티티의 상태와 속성(readings 테이블)
+#    mqtt_statestream 은 통합 단위로 거르지 못해 엔티티 이름 규칙이 필요했으므로, 소속 통합(integration_entities)으로 거르는 자동화로 대신합니다.
+#    상태가 바뀌면 hass/<도메인>/<엔티티>/state, 속성(펌웨어 버전 등)이 바뀌면 바뀐 속성마다 hass/<도메인>/<엔티티>/attr/<속성> 에 발행합니다.
+#    값은 JSON 입니다. Telegraf 가 Zigbee 와 같은 테이블(readings)에 "기기 하나의 속성 하나" 로 넣도록 값(state)에 다음을 붙입니다:
+#      device(HA 기기 이름, <방>-<종류>[-<기준>][번호]), property(엔티티 ID 에서 기기 이름을 뗀 측정 항목, 예: pm25. 속성은 <측정 항목>_<속성>)
+#      unit(엔티티의 unit_of_measurement, 예: µg/m³. 속성은 비움), node(패브릭-노드 ID, 다시 커미셔닝하면 바뀜), serial(기기 시리얼, 바뀌지 않음), model, vendor
+#      time(상태는 바뀐 시각 last_changed, 속성은 last_updated. UTC RFC 3339). Telegraf 가 수신 시각 대신 써서, 늦게 도착하거나 유지 메시지로 다시 와도 시각이 맞습니다
+#
+# 2) control_events: 기기 제어 기록(events 테이블). 사람이 제어했는지 자동화가 제어했는지를 남겨 자동화의 효과(에너지 절감 등)를 평가합니다.
+#    call_service: Matter·MQTT(=Zigbee) 통합 엔티티로 간 서비스 호출마다 hass/events/call_service 에 발행합니다 (scene·script 안의 호출 포함)
+#      action(<도메인>.<서비스>), data(대상을 뺀 서비스 데이터 JSON), origin/actor(아래), context_id, parent_id
+#      origin: user(context 에 사용자 있음, actor 는 person 이름), automation(자동화·스크립트, actor 는 그 entity_id. 못 찾으면 비움), system(그 밖)
+#    automation_triggered, script_started: 자동화·스크립트가 실행될 때마다 hass/events/run 에 발행합니다. 자동화가 보낸 명령과 context_id 가 같습니다
+#    명령 없이 상태만 바뀐 것(기기 버튼 조작)은 events 에 없고 readings 의 상태 행으로만 남습니다.
 - id: matter_statestream
   alias: Matter 상태를 MQTT 로 재발행
   mode: parallel
@@ -77,30 +87,168 @@ configMapGenerator:
     - condition: template
       value_template: >-
         {{ trigger.event.data.new_state is not none
-           and (trigger.event.data.old_state is none
-                or trigger.event.data.old_state.state != trigger.event.data.new_state.state)
-           and trigger.event.data.entity_id.split('.')[0] not in ['button', 'update']
            and trigger.event.data.entity_id in integration_entities('matter') }}
   actions:
-    - action: mqtt.publish
-      data:
-        topic: "hass/{{ trigger.event.data.entity_id | replace('.', '/') }}/state"
-        payload: >-
-          {%- set did = device_id(trigger.event.data.entity_id) %}
+    - variables:
+        info: >-
+          {%- set entity = trigger.event.data.entity_id %}
+          {%- set did = device_id(entity) %}
           {%- set ids = (device_attr(did, 'identifiers') or []) | map('last') | select('match', 'deviceid_') | list %}
           {%- set name = device_attr(did, 'name_by_user') or device_attr(did, 'name') or '' %}
-          {%- set object_id = trigger.event.data.entity_id.split('.')[1] %}
+          {%- set object_id = entity.split('.')[1] %}
           {%- set prefix = (name | slugify) ~ '_' %}
-          {{ {'state': trigger.event.data.new_state.state,
-              'device': name or object_id,
+          {{ {'device': name or object_id,
               'property': object_id[prefix | length:] if name and object_id.startswith(prefix) else object_id,
-              'unit': state_attr(trigger.event.data.entity_id, 'unit_of_measurement') or '',
               'node': ids[0][9:] | replace('-MatterNodeDevice', '') if ids else '',
               'serial': device_attr(did, 'serial_number') or '',
               'model': device_attr(did, 'model') or '',
-              'vendor': device_attr(did, 'manufacturer') or ''} | to_json }}
-        qos: 1
-        retain: true
+              'vendor': device_attr(did, 'manufacturer') or ''} }}
+        # 속성 이름이 StrEnum(update 의 auto_update 등)일 수 있어 ~ '' 로 순수 문자열로 바꿔야 목록으로 넘어갑니다 (| string 은 str 하위 타입을 그대로 둠)
+        changed_attributes: >-
+          {%- set old = trigger.event.data.old_state %}
+          {%- set ns = namespace(keys=[]) %}
+          {%- for k, v in trigger.event.data.new_state.attributes.items() %}
+            {%- if old is none or k not in old.attributes or old.attributes[k] != v %}
+              {%- set ns.keys = ns.keys + [k ~ ''] %}
+            {%- endif %}
+          {%- endfor %}
+          {{ ns.keys }}
+    - if:
+        - condition: template
+          value_template: >-
+            {{ trigger.event.data.old_state is none
+               or trigger.event.data.old_state.state != trigger.event.data.new_state.state }}
+      then:
+        - action: mqtt.publish
+          data:
+            topic: "hass/{{ trigger.event.data.entity_id | replace('.', '/') }}/state"
+            payload: >-
+              {{ dict(info,
+                      state=trigger.event.data.new_state.state,
+                      time=trigger.event.data.new_state.last_changed.isoformat(),
+                      unit=state_attr(trigger.event.data.entity_id, 'unit_of_measurement') or '') | to_json }}
+            qos: 1
+            retain: true
+    - repeat:
+        for_each: "{{ changed_attributes }}"
+        sequence:
+          - action: mqtt.publish
+            data:
+              topic: "hass/{{ trigger.event.data.entity_id | replace('.', '/') }}/attr/{{ repeat.item }}"
+              payload: >-
+                {%- set v = trigger.event.data.new_state.attributes[repeat.item] %}
+                {{ dict(info,
+                        property=info.property ~ '_' ~ repeat.item,
+                        state='' if v is none else (v if v is string else v | to_json),
+                        time=trigger.event.data.new_state.last_updated.isoformat(),
+                        unit='') | to_json }}
+              qos: 1
+              retain: true
+
+- id: control_events
+  alias: 기기 제어 기록을 MQTT 로 발행
+  mode: parallel
+  max: 100
+  triggers:
+    - trigger: event
+      event_type: call_service
+      id: call
+    - trigger: event
+      event_type: automation_triggered
+      id: run
+    - trigger: event
+      event_type: script_started
+      id: run
+  # 조건보다 먼저 계산됩니다. call_service 는 HA 안의 모든 호출(mqtt.publish 포함)에 걸리므로 대상 기기가 없는 호출은 조건에서 버립니다.
+  variables:
+    targets: >-
+      {%- if trigger.id == 'call' %}
+        {%- set sd = trigger.event.data.service_data or {} %}
+        {%- set ns = namespace(direct=[], expanded=[]) %}
+        {%- for key in ['entity_id', 'device_id', 'area_id', 'label_id', 'floor_id'] %}
+          {%- set v = sd.get(key, []) %}
+          {%- for x in ([v] if v is string else v) %}
+            {%- if key == 'entity_id' %}{% set ns.direct = ns.direct + [x] %}
+            {%- elif key == 'device_id' %}{% set ns.expanded = ns.expanded + device_entities(x) %}
+            {%- elif key == 'area_id' %}{% set ns.expanded = ns.expanded + area_entities(x) %}
+            {%- elif key == 'label_id' %}{% set ns.expanded = ns.expanded + label_entities(x) %}
+            {%- else %}{% for a in floor_areas(x) %}{% set ns.expanded = ns.expanded + area_entities(a) %}{% endfor %}
+            {%- endif %}
+          {%- endfor %}
+        {%- endfor %}
+        {%- set domain = trigger.event.data.domain %}
+        {%- set expanded = ns.expanded if domain == 'homeassistant' else ns.expanded | select('match', domain ~ '\\.') | list %}
+        {%- set watched = integration_entities('matter') + integration_entities('mqtt') %}
+        {{ (ns.direct + expanded) | select('in', watched) | unique | list }}
+      {%- else %}[]{% endif %}
+    own: >-
+      {{ states.automation | selectattr('attributes.id', 'in', ['matter_statestream', 'control_events'])
+         | map(attribute='entity_id') | list }}
+  conditions:
+    - condition: template
+      value_template: >-
+        {{ (trigger.id == 'call' and targets | count > 0)
+           or (trigger.id == 'run' and trigger.event.data.entity_id not in own) }}
+  actions:
+    - variables:
+        common: >-
+          {%- set c = trigger.event.context %}
+          {%- set runner = (states.automation | list) + (states.script | list) %}
+          {%- set by = runner | selectattr('context.id', 'eq', c.id) | map(attribute='entity_id') | first | default('') %}
+          {%- if c.user_id %}
+            {%- set origin = 'user' %}
+            {%- set actor = states.person | selectattr('attributes.user_id', 'eq', c.user_id) | map(attribute='name') | first | default(c.user_id) %}
+          {%- elif trigger.id == 'run' %}
+            {%- set origin, actor = 'automation', trigger.event.data.entity_id %}
+          {%- elif by or c.parent_id %}
+            {%- set origin, actor = 'automation', by %}
+          {%- else %}
+            {%- set origin, actor = 'system', '' %}
+          {%- endif %}
+          {{ {'time': trigger.event.time_fired.isoformat(), 'origin': origin, 'actor': actor,
+              'context_id': c.id, 'parent_id': c.parent_id or ''} }}
+    - if:
+        - condition: template
+          value_template: "{{ trigger.id == 'run' }}"
+      then:
+        - action: mqtt.publish
+          data:
+            topic: hass/events/run
+            payload: >-
+              {{ dict(common,
+                      action=trigger.event.event_type,
+                      data={'name': trigger.event.data.name,
+                            'source': trigger.event.data.source | default('')} | to_json) | to_json }}
+            qos: 1
+      else:
+        - repeat:
+            for_each: "{{ targets }}"
+            sequence:
+              - action: mqtt.publish
+                data:
+                  topic: hass/events/call_service
+                  payload: >-
+                    {%- set entity = repeat.item %}
+                    {%- set did = device_id(entity) %}
+                    {%- set idents = (device_attr(did, 'identifiers') or []) | map('last') | list %}
+                    {%- set nodes = idents | select('match', 'deviceid_') | list %}
+                    {%- set ieee = idents | select('match', 'zigbee2mqtt_0x') | list %}
+                    {%- set name = device_attr(did, 'name_by_user') or device_attr(did, 'name') or '' %}
+                    {%- set object_id = entity.split('.')[1] %}
+                    {%- set prefix = (name | slugify) ~ '_' %}
+                    {%- set sd = trigger.event.data.service_data or {} %}
+                    {%- set rest = sd.items() | rejectattr('0', 'in', ['entity_id', 'device_id', 'area_id', 'label_id', 'floor_id']) | list %}
+                    {{ dict(common,
+                            device=name or object_id,
+                            property=object_id[prefix | length:] if name and object_id.startswith(prefix) else object_id,
+                            protocol='matter' if entity in integration_entities('matter') else 'zigbee',
+                            node=nodes[0][9:] | replace('-MatterNodeDevice', '') if nodes else '',
+                            serial=device_attr(did, 'serial_number') or (ieee[0][12:] if ieee else ''),
+                            model=device_attr(did, 'model') or '',
+                            vendor=device_attr(did, 'manufacturer') or '',
+                            action=trigger.event.data.domain ~ '.' ~ trigger.event.data.service,
+                            data=dict(rest) | to_json) | to_json }}
+                  qos: 1
 ```
 {: file="iot/edge/home-assistant/matter-statestream.yaml" }
 {% endraw %}
@@ -583,29 +731,41 @@ bash setup-home-assistant.sh http://[EDGE_IP]:8123
 
 - **확인:** 마지막에 `통합 상태` 표에 `mqtt`, `matter`, `otbr`, `thread` 가 모두 `loaded`, 그 아래에 `Thread: … 을 기본 네트워크로 지정` 과 `확정: {'use_x_forwarded_for': True, …}` 가 보입니다. HTTP 설정 단계에서 HA 가 한 번 재시작하므로 30초쯤 걸립니다. 다시 실행하면 모든 줄이 `건너뜀` 입니다.
 
-## 4. Matter 상태를 수집 파이프라인에 연결
+## 4. Matter 상태와 제어 기록을 수집 파이프라인에 연결
 
-1단계의 자동화는 Matter 엔티티 상태가 바뀔 때마다 `hass/[도메인]/[엔티티]/state` 토픽에 JSON 을 발행합니다. `state` 는 상태값(`21.5`, `on`, `off`, `unavailable`)이고, 나머지는 Zigbee 기기와 같은 `readings` 테이블에 넣기 위한 기기 이름·측정 항목과 HA 기기 레지스트리에서 가져온 실물 기기 정보입니다. 측정값이 아닌 `button`(식별), `update`(펌웨어) 엔티티는 발행하지 않습니다.
+1단계의 `matter_statestream` 은 Matter 엔티티 상태가 바뀔 때마다 `hass/[도메인]/[엔티티]/state` 토픽에 JSON 을 발행합니다. `state` 는 상태값(`21.5`, `on`, `off`, `unavailable`)이고, 나머지는 Zigbee 기기와 같은 `readings` 테이블에 넣기 위한 기기 이름·측정 항목과 HA 기기 레지스트리에서 가져온 실물 기기 정보입니다. 수집은 모두 수집이 기본이라 식별 버튼(`button`), 펌웨어(`update`), 전원 복구 설정(`select`) 엔티티도 발행합니다. 엔티티 속성은 바뀐 것만 `hass/[도메인]/[엔티티]/attr/[속성]` 에 같은 모양으로 발행하고 `property` 는 `[측정 항목]_[속성]` 입니다. 그래서 펌웨어 버전은 `firmware_installed_version` 행으로 남습니다.
 
 | 키 | 예 | 내용 |
 |---|---|---|
-| `device` | `bedroom2-air-quality` | HA 기기 이름. Zigbee 기기처럼 `[방]-[종류]` 로 지어야 기록되고, DB 에는 `room`(`bedroom2`)과 `device`(`air-quality`)로 나뉘어 들어갑니다 |
+| `time` | `2026-09-26T03:12:45.123456+00:00` | 상태가 바뀐 시각(`last_changed`, 속성은 `last_updated`). Telegraf 가 수신 시각 대신 이 값을 기록 시각으로 써서, 브로커에 쌓였다가 늦게 도착한 값도 시각이 맞습니다 |
+| `device` | `bedroom2-air_quality` | HA 기기 이름. Zigbee 기기처럼 `<방>-<종류>[-<기준>][번호]` 로 지어야 기록되고, DB 에는 `room`(`bedroom2`), `device`(`air_quality`), `anchor`(기준이 있을 때)로 나뉘어 들어갑니다 |
 | `property` | `pm25` | 엔티티 ID 에서 기기 이름을 뗀 측정 항목 |
 | `unit` | `μg/m³` | 엔티티의 단위(`unit_of_measurement`). 단위가 없는 엔티티는 빈 값입니다 |
 | `node` | `CFEE358179DBE7B6-0000000000000001` | 패브릭 ID 와 노드 ID. 기기를 다시 커미셔닝하면 바뀝니다 |
 | `serial` | `602EPDJ02346` | 기기 시리얼. Zigbee 의 IEEE 주소처럼 바뀌지 않습니다. `hw_id` 컬럼으로 들어갑니다 |
 | `model`, `vendor` | `LG Air Quality Sensor`, `LG Electronics` | 모델과 제조사 |
 
-Telegraf 에 이 토픽을 받는 입력을 Zigbee2MQTT 입력 바로 아래에 추가합니다. 입력은 JSON 의 기기 정보를 태그로 받고 `protocol = "matter"`, `source = "hass"` 를 붙이기만 합니다. `state` 를 `value`(숫자, `on`/`off` 는 1/0)와 `value_text` 로 나누는 일은 [Telegraf 글](/posts/43/)에서 둔 공통 starlark 프로세서가 그대로 맡습니다.
+`control_events` 는 HA 의 `call_service` 이벤트 가운데 Matter·MQTT(Zigbee) 통합 엔티티로 간 호출을 `hass/events/call_service` 에, 자동화·스크립트 실행을 `hass/events/run` 에 발행합니다. 자동화가 에너지를 얼마나 아꼈는지처럼 제어 주체별로 평가하려면 명령마다 누가 보냈는지가 있어야 하기 때문입니다. HA 는 명령마다 context 를 붙이는데, 앱·UI 에서 사람이 보냈으면 `user_id` 가 있어 `origin` 이 `user`, `actor` 가 그 사람의 `person` 이름이 됩니다. 자동화·스크립트가 보냈으면 그 실행과 context 가 같아 `origin` 이 `automation`, `actor` 가 `automation.…` 입니다. 기기 버튼으로 직접 조작한 것은 명령이 없으므로 events 에 행이 없고 readings 의 상태 행으로만 남습니다. 수집 자동화 자신의 실행은 기록하지 않습니다. 빼지 않으면 상태가 바뀔 때마다 행이 생기고 `control_events` 가 자기 실행에 다시 걸려 끝없이 돕니다.
+
+| 키 | 예 | 내용 |
+|---|---|---|
+| `action` | `switch.turn_off`, `button.press` | 서비스 이름. 실행 행은 `automation_triggered`·`script_started` |
+| `data` | `{"brightness": 120}` | 대상을 뺀 서비스 데이터 JSON. 실행 행은 자동화 이름과 트리거 설명 |
+| `origin`, `actor` | `user`·`eu4ng`, `automation`·`automation.night_off` | 누가 보냈는지. 둘 다 없으면 `system` |
+| `context_id`, `parent_id` | `01M3EPCBAYEHP7BH5K7FJWERAE` | HA context. 자동화 실행 행과 그 자동화가 보낸 명령이 `context_id` 로 이어집니다 |
+| `device`, `property`, `protocol`, `serial` … | `bedroom2-plug-charger_qh_z19`, `outlet` | 상태 발행과 같은 기기 정보. `protocol` 은 `matter`·`zigbee` 입니다 |
+
+Telegraf 에 두 입력을 Zigbee2MQTT 입력 바로 아래에 추가합니다. 상태·속성 입력은 JSON 의 기기 정보를 태그로 받고 `time` 을 기록 시각으로 쓰며 `protocol = "matter"`, `source = "hass"` 를 붙입니다. `state` 를 `value`(숫자, `on`/`off` 는 1/0)와 `value_text` 로 나누는 일은 [Telegraf 글](/posts/43/)에서 둔 공통 starlark 프로세서가 그대로 맡습니다. 제어 기록 입력은 `name_override = "events"` 로 그 글의 두 번째 출력을 거쳐 `events` 테이블에 들어갑니다.
 
 {% raw %}
 ```toml
-# Home Assistant 가 재발행한 Matter 기기 상태. 토픽 hass/<도메인>/<엔티티>/state, 값은 JSON
-#   {"state": "21.5"|"on"|"unavailable", "device", "property", "unit", "node", "serial", "model", "vendor"}
-# HA 자동화가 Matter 통합 소속 엔티티만 발행하므로 Zigbee 기기와 중복되지 않습니다. 시각은 수신 시각입니다.
+# Home Assistant 가 재발행한 Matter 기기 상태와 속성. 토픽 hass/<도메인>/<엔티티>/state, hass/<도메인>/<엔티티>/attr/<속성>, 값은 JSON
+#   {"state": "21.5"|"on"|"unavailable", "time", "device", "property", "unit", "node", "serial", "model", "vendor"}
+# 속성은 바뀔 때만 오고 property 가 <측정 항목>_<속성>(예: firmware_installed_version)입니다.
+# HA 자동화가 Matter 통합 소속 엔티티만 발행하므로 Zigbee 기기와 중복되지 않습니다.
 [[inputs.mqtt_consumer]]
   servers = ["tcp://mosquitto.mosquitto.svc.cluster.local:1883"]
-  topics = ["hass/+/+/state"]
+  topics = ["hass/+/+/state", "hass/+/+/attr/+"]
   username = "${MQTT_USER}"
   password = "${MQTT_PASSWORD}"
   client_id = "telegraf-hass"
@@ -615,9 +775,34 @@ Telegraf 에 이 토픽을 받는 입력을 Zigbee2MQTT 입력 바로 아래에 
   name_override = "readings"
   data_format = "json"
   json_string_fields = ["state"]      # 상태는 숫자·문자가 섞여 있어 문자열로 받고 아래 starlark 가 나눕니다
+  json_time_key = "time"              # 상태가 바뀐 시각(HA last_changed). 수신 시각 대신 써서 지연 도착해도 시각이 맞습니다
+  json_time_format = "2006-01-02T15:04:05Z07:00"   # RFC 3339. 소수점 초가 있어도 파싱됩니다
   tag_keys = ["device", "property", "unit", "node", "serial", "model", "vendor"]
   [inputs.mqtt_consumer.tags]
     protocol = "matter"
+    source = "hass"
+
+# 기기 제어 기록(events 테이블). HA 자동화 control_events 가 발행합니다. 유지 메시지가 아니라 한 번씩만 옵니다.
+#   hass/events/call_service: Matter·Zigbee 기기로 간 서비스 호출 하나 = 행 하나
+#     {"time", "device", "property", "protocol", "node", "serial", "model", "vendor", "action": "switch.turn_off", "data": "{…}",
+#      "origin": "user"|"automation"|"system", "actor": "사람 이름"|"automation.…", "context_id", "parent_id"}
+#   hass/events/run: 자동화·스크립트 실행. device 가 비어 있고 action 은 automation_triggered|script_started, actor 는 그 entity_id 입니다
+[[inputs.mqtt_consumer]]
+  servers = ["tcp://mosquitto.mosquitto.svc.cluster.local:1883"]
+  topics = ["hass/events/+"]
+  username = "${MQTT_USER}"
+  password = "${MQTT_PASSWORD}"
+  client_id = "telegraf-hass-events"
+  persistent_session = true
+  qos = 1
+  topic_tag = ""
+  name_override = "events"
+  data_format = "json"
+  json_string_fields = ["action", "data", "context_id", "parent_id"]
+  json_time_key = "time"              # 이벤트가 난 시각(HA time_fired)
+  json_time_format = "2006-01-02T15:04:05Z07:00"
+  tag_keys = ["device", "property", "protocol", "origin", "actor", "node", "serial", "model", "vendor"]
+  [inputs.mqtt_consumer.tags]
     source = "hass"
 ```
 {: file="iot/edge/telegraf/telegraf.conf (추가 부분)" }
@@ -626,13 +811,13 @@ Telegraf 에 이 토픽을 받는 입력을 Zigbee2MQTT 입력 바로 아래에 
 ```bash
 # 커밋하고 push
 git add iot/edge/telegraf/telegraf.conf
-git commit -m "feat(iot): Telegraf 에 Home Assistant 재발행(Matter 기기) 입력 추가"
+git commit -m "feat(iot): Telegraf 에 Home Assistant 재발행(Matter 기기)과 제어 기록 입력 추가"
 git push
 ```
 
-Telegraf 는 기기 이름이 `[방]-[종류]` 규칙(영문 소문자·숫자)에 맞는 값만 기록하므로, 등록 직후의 기본 이름(`Air Quality Sensor` 등)으로 보낸 값은 DB 에 남지 않습니다. Matter 기기를 하나 등록하고 이름을 규칙대로 바꾼 뒤 **개발자 도구** > **상태** 에서 그 기기의 센서 엔티티 상태를 임의 값으로 바꿔 보면, 실제 값이 바뀔 때까지 기다리지 않고 경로 전체를 확인할 수 있습니다.
+Telegraf 는 기기 이름이 `<방>-<종류>[-<기준>][번호]` 규칙(칸은 `-` 로 나누고 칸 안의 단어는 `_` 로 잇는 영문 소문자·숫자)에 맞는 값만 기록하므로, 등록 직후의 기본 이름(`Air Quality Sensor` 등)으로 보낸 값은 DB 에 남지 않습니다. Matter 기기를 하나 등록하고 이름을 규칙대로 바꾼 뒤 **개발자 도구** > **상태** 에서 그 기기의 센서 엔티티 상태를 임의 값으로 바꿔 보면, 실제 값이 바뀔 때까지 기다리지 않고 경로 전체를 확인할 수 있습니다. 스마트 플러그는 종류를 `plug` 로 두고 기준 칸에 꽂은 제품을 적습니다(`bedroom2-plug-monitor_27gp850`). 다른 제품을 꽂으면 기준 칸만 바꾸면 되고, 과거 행은 옛 제품으로 남습니다.
 
-- **확인:** 허브에서 `kubectl -n timescaledb exec deploy/timescaledb -- psql -U iot -d iot -c "select time, site, room, device, property, value, value_text, hw_id, node from readings where protocol = 'matter' order by time desc limit 5;"` 에 `site` 가 `[SITE]`, `room`·`device` 가 HA 기기 이름을 나눈 방과 종류, `property` 가 측정 항목인 행이 보이고, 숫자 상태는 `value`, `on` 은 `value` 1 과 `value_text` `on` 으로 들어갑니다. `hw_id` 에는 시리얼, `node` 에는 노드 ID 가 들어갑니다. Telegraf 가 다시 붙을 때 브로커가 유지 메시지를 다시 보내므로 재시작 직후 각 엔티티의 마지막 값이 한 번 더 들어올 수 있습니다.
+- **확인:** 허브에서 `kubectl -n timescaledb exec deploy/timescaledb -- psql -U iot -d iot -c "select time, site, room, device, anchor, property, value, value_text, hw_id, node from readings where protocol = 'matter' order by time desc limit 5;"` 에 `site` 가 `[SITE]`, `room`·`device`·`anchor` 가 HA 기기 이름을 나눈 방·종류·기준, `property` 가 측정 항목인 행이 보이고, 숫자 상태는 `value`, `on` 은 `value` 1 과 `value_text` `on` 으로 들어갑니다. `hw_id` 에는 시리얼, `node` 에는 노드 ID 가 들어갑니다. Telegraf 가 다시 붙을 때 브로커가 유지 메시지를 다시 보내므로 재시작 직후 각 엔티티의 마지막 값이 원래 시각으로 한 번 더 들어올 수 있습니다. HA 앱에서 플러그를 껐다 켜면 `select time, anchor, property, action, origin, actor from events order by time desc limit 2;` 에 `switch.turn_off`·`switch.turn_on` 두 행이 `origin` `user`, `actor` 에 사람 이름으로 보이고, readings 에는 0.1초쯤 뒤 같은 플러그의 `outlet` 상태 행이 보입니다.
 
 > `property` 는 엔티티 ID 에서 기기 이름을 떼어 만듭니다. 한국어 HA 는 기기 이름을 바꾸고 방을 지정할 때 엔티티 ID 를 `방 + 기기 이름 + 엔티티 이름` 의 로마자로 다시 만듭니다(`sensor.cimsil2_bedroom2_air_quality_ondo`). 기기를 등록하고 이름을 정한 직후 [중앙 HA 글](/posts/49/)의 `ha-registry.py --rename-matter --assign-areas` 를 실행해 `sensor.bedroom2_air_quality_temperature` 처럼 영문 ID 로 맞추고 영역도 이름의 방으로 지정합니다. 영문 ID 여야 `property` 가 `temperature` 처럼 깔끔하게 남습니다. 화면의 표시 이름은 한국어 그대로입니다. 엔티티 ID 가 바뀌어도 `hw_id`(시리얼)는 그대로이므로, 옛 ID 로 쌓인 기록도 `hw_id` 로 같은 기기에 묶어 볼 수 있습니다.
 {: .prompt-tip }
@@ -755,7 +940,7 @@ kubectl $E -n home-assistant logs deploy/home-assistant | grep -E "automation|re
 curl -s http://[EDGE_IP]:8081/node/state
 ```
 
-- **확인:** HA 로그에 자동화 설정 오류나 reverse proxy 오류가 없고, **설정 > 자동화 및 장면** 에 `Matter 상태를 MQTT 로 재발행` 이 보입니다. OTBR 상태는 `"leader"` 입니다. HA 의 **설정 > 기기 및 서비스**에 MQTT 아래 Zigbee2MQTT 브리지와 기기들이 자동으로 보입니다.
+- **확인:** HA 로그에 자동화 설정 오류나 reverse proxy 오류가 없고, **설정 > 자동화 및 장면** 에 `Matter 상태를 MQTT 로 재발행` 과 `기기 제어 기록을 MQTT 로 발행` 이 보입니다. OTBR 상태는 `"leader"` 입니다. HA 의 **설정 > 기기 및 서비스**에 MQTT 아래 Zigbee2MQTT 브리지와 기기들이 자동으로 보입니다.
 
 ## 트러블슈팅
 
