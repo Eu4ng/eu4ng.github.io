@@ -390,6 +390,7 @@ Telegraf 설정 하나를 모든 지역이 공유합니다. 지역 이름과 허
 # 엣지 Telegraf. env 는 Secret telegraf-credentials(MQTT_USER, MQTT_PASSWORD, HUB_PG_PASSWORD)와 오버레이(SITE, HUB_PG_HOST, HUB_PG_PORT)가 넣습니다.
 [global_tags]
   site = "${SITE}"                    # 모든 행에 지역 이름. 허브에서 지역이 섞여도 구분됩니다
+  processing = "raw"                  # 기기가 보낸 값 그대로입니다. 보정(corrected)·계산(derived) 값은 허브의 가공 스크립트가 새 행으로 넣습니다
 
 [agent]
   interval = "10s"                    # 입력이 push 라 수집 주기는 의미 없고 flush 주기만 유효합니다
@@ -403,11 +404,12 @@ Telegraf 설정 하나를 모든 지역이 공유합니다. 지역 이름과 허
 
 # 모든 기기 값은 테이블 readings 하나에 "행 하나 = 기기 하나의 속성 하나" 로 들어갑니다.
 # 수집기(Zigbee2MQTT, Home Assistant …)마다 다른 메시지 모양은 입력과 아래 starlark 에서만 흡수하므로, 수집기를 바꿔도 입력 블록만 새로 쓰면 됩니다.
-#   컬럼 순서: time, site, room, device, position, property, value, unit, value_text, protocol, source, vendor, model, hw_id, node (아래 create_templates)
+#   컬럼 순서: time, site, room, device, position, property, processing, value, unit, value_text, protocol, source, vendor, model, hw_id, node (아래 create_templates)
 #   기기 이름 <방>-<종류>[-<위치>][번호] 는 - 에서 나눠 room(방), device(종류), position(위치, 없으면 비움)에 넣습니다. 번호는 마지막 칸에 붙어 들어갑니다.
 #   device 는 방마다 겹칠 수 있고 실물 식별은 hw_id 가 맡습니다
 #   필드(컬럼): value(숫자. on/off·true/false·online/offline 은 1/0), value_text(문자열 원문)
 #   기기 연결 상태는 property 가 availability 인 행입니다(Zigbee2MQTT 가 알리는 online/offline)
+#   processing 은 원본(raw)·보정(corrected)·계산(derived) 구분입니다. 이 Telegraf 는 raw 만 넣고, 원본 행은 고치지 않습니다
 #   unit 은 기기 정의의 단위입니다(Zigbee2MQTT bridge/devices 의 exposes, HA 의 unit_of_measurement). 단위가 없는 값(presence 등)은 비어 있습니다
 
 # Zigbee2MQTT 기기 메시지. 한 단계(+)만 구독하면 bridge/#, <기기>/set|get|availability 는 자연히 빠집니다 (friendly_name 에 / 를 쓰지 않는 전제). availability 는 아래 입력이 받습니다.
@@ -578,17 +580,18 @@ def apply(metric):
 
 # 허브 TimescaleDB. 태그를 외래 키 테이블로 빼지 않고 컬럼으로 두어 지역 간 병합과 중복 제거가 쉽게 합니다.
 # 테이블은 컬럼 순서를 정해 두려고 직접 만들고, 이후 새 태그는 Telegraf 가 끝에 컬럼으로 붙입니다.
-# 압축은 시계열 하나(site, room, device, position, property)끼리 묶어 값이 비슷한 것끼리 모이게 합니다.
+# 압축은 시계열 하나(site, room, device, position, property, processing)끼리 묶어 값이 비슷한 것끼리 모이게 합니다.
 [[outputs.postgresql]]
   connection = "host=${HUB_PG_HOST} port=${HUB_PG_PORT} user=iot password=${HUB_PG_PASSWORD} dbname=iot sslmode=disable connect_timeout=10"
   startup_error_behavior = "retry"    # 허브가 안 닿는 상태로 파드가 떠도 종료하지 않고 버퍼에 쌓으며 연결을 재시도합니다 (기본값은 종료)
   tags_as_foreign_keys = false
   timestamp_column_type = "timestamp with time zone"
   create_templates = [
-    '''CREATE TABLE {{ .table }} (time timestamptz NOT NULL, site text, room text, device text, position text, property text, value double precision, unit text, value_text text,
+    '''CREATE TABLE {{ .table }} (time timestamptz NOT NULL, site text, room text, device text, position text, property text,
+        processing text NOT NULL CHECK (processing IN ('raw', 'corrected', 'derived')), value double precision, unit text, value_text text,
         protocol text, source text, vendor text, model text, hw_id text, node text)''',
     '''SELECT create_hypertable({{ .table|quoteLiteral }}, 'time', chunk_time_interval => INTERVAL '7d')''',
-    '''ALTER TABLE {{ .table }} SET (timescaledb.compress, timescaledb.compress_segmentby = 'site, room, device, position, property', timescaledb.compress_orderby = 'time DESC')''',
+    '''ALTER TABLE {{ .table }} SET (timescaledb.compress, timescaledb.compress_segmentby = 'site, room, device, position, property, processing', timescaledb.compress_orderby = 'time DESC')''',
     '''SELECT add_compression_policy({{ .table|quoteLiteral }}, INTERVAL '30d')''',
   ]
 
@@ -692,6 +695,7 @@ spec:
 | `device` | `th`, `motion2` | 기기 종류. 위치가 없으면 번호까지 들어갑니다. 방마다 겹칠 수 있고, 실물 식별은 `hw_id` 가 맡습니다 |
 | `position` | `door`, `ceil` | 방 안의 위치. 이름에 위치 칸이 없으면 비어 있습니다 |
 | `property` | `temperature`, `presence`, `availability` | 측정 항목. `availability` 는 Zigbee 기기의 연결 상태(`online`/`offline`)로, 기기 시각이 없어 수신 시각으로 남습니다 |
+| `processing` | `raw` | 원본(`raw`)·보정(`corrected`)·계산(`derived`) 구분. 이 Telegraf 가 넣는 행은 모두 `raw` 입니다 |
 | `value` | `26.3`, `1` | 숫자 값. `on`/`off`, `true`/`false`, `online`/`offline` 은 1/0 |
 | `unit` | `°C`, `mV`, `μg/m³` | 단위. Zigbee 는 Zigbee2MQTT 기기 정의(`bridge/devices`), Matter 는 HA 의 `unit_of_measurement` 에서 가져옵니다. 단위가 없는 값(`presence` 등)은 비어 있습니다 |
 | `value_text` | `ON`, `false` | 문자열 원문 |
@@ -703,7 +707,9 @@ spec:
 
 기기 이름이 `<방>-<종류>[-<위치>][번호]` 규칙(칸은 `-` 로 나누고 칸 안의 단어는 `_` 로 잇는 영문 소문자·숫자)에 맞지 않으면 starlark 가 그 메시지를 버립니다. 페어링 직후 Zigbee 기기의 `0x…` 이름, 이름을 정하기 전 Matter 기기의 HA 기본 이름, 교체한 옛 기기의 `retired-…` 이름이 여기에 걸리므로 기기를 추가하면 바로 이름을 붙입니다.
 
-압축은 `site, room, device, position, property` 가 같은 행끼리 묶습니다. 묶음 하나가 시계열 하나(예: 한 기기의 온도)가 되어 값이 비슷한 것끼리 모이므로 압축이 잘 되고, 조회할 때도 필요한 묶음만 풉니다.
+`processing` 은 값이 원본인지 가공한 것인지 나눕니다. 원본 행은 고치지 않고, 센서 편차를 보정한 값이나 평균처럼 계산한 값은 같은 시각·속성에 `corrected`·`derived` 행으로 따로 넣습니다. 그래서 `where processing = 'raw'` 로 원본만, `<> 'raw'` 로 가공 값만 뽑을 수 있습니다. 기본값 없이 `NOT NULL` 과 `CHECK` 제약을 걸어, 가공 스크립트가 구분을 빠뜨리거나 다른 값을 넣으면 INSERT 가 실패합니다.
+
+압축은 `site, room, device, position, property, processing` 이 같은 행끼리 묶습니다. 묶음 하나가 시계열 하나(예: 한 기기의 온도)가 되어 값이 비슷한 것끼리 모이므로 압축이 잘 되고, 조회할 때도 필요한 묶음만 풉니다.
 
 - **확인:** 이 단계도 파일만 만듭니다.
 
