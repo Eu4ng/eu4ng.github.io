@@ -10,7 +10,8 @@
 # 사용법: bash cloudflare-setup.sh [DOMAIN] [EDGE_KUBECONFIG ...]   (EDGE_KUBECONFIG 는 control plane 기준 경로, 없으면 생략)
 # 준비:   설정용 API 토큰(사용자 소유·계정 소유 어느 쪽이든)을 실행 중 입력합니다.
 #         권한: Account/Account API Tokens/Edit, Zone/Zone/Edit, Zone/Zone Settings/Edit, Zone/Zone/Read,
-#         Zone Resources 는 "All zones from an account". 이 토큰은 저장소·클러스터 어디에도 넣지 않습니다.
+#         Zone Resources 는 "All zones from an account". Account API Tokens 는 존이 아니라 계정을 대상으로 하는 정책에
+#         넣습니다(존 대상 정책에 넣으면 토큰 목록 조회가 9109 로 거부됩니다). 이 토큰은 저장소·클러스터 어디에도 넣지 않습니다.
 # 필요:   curl, python3, ssh(컨트롤플레인 kubectl)
 
 set -euo pipefail
