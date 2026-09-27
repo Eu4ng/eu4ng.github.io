@@ -3,7 +3,7 @@
 # 바깥 날씨 수집기가 쓰는 Secret(weather/weather-credentials)을 엣지 클러스터에 만듭니다. GitOps 저장소에는 비밀 값을 넣지 않으므로 폴더를 push 하기 전에 실행합니다.
 # 수집기는 지역마다 엣지에서 돌며 지역 DB 와 허브 DB 에 함께 넣습니다.
 # 허브에 kubectl 로 접근할 수 있고 엣지 kubeconfig 가 있는 곳(control plane)에서 실행합니다: bash create-weather-secret.sh [EDGE_KUBECONFIG]
-# 인증키는 허브의 weather/weather-credentials 에 있으면 그것을 쓰고, 없으면 실행 중에 입력받습니다.
+# 인증키는 환경 변수 KMA_AUTH_KEY 가 있으면 그것을, 없으면 실행 중에 입력받습니다(값을 표준입력으로 넘겨도 됩니다).
 # DB 비밀번호는 허브·지역의 timescaledb/timescaledb-credentials 에서 복사합니다. 이미 있으면 건너뜁니다(바꾸려면 Secret 을 지우고 다시 실행).
 
 set -euo pipefail
@@ -33,8 +33,8 @@ PG_HUB=$(db_password) || true; PG_LOCAL=$(db_password "${EDGE[@]}") || true
 [ -n "$PG_LOCAL" ] || die "엣지 $DB_SECRET 에서 POSTGRES_PASSWORD 를 읽지 못했습니다(create-iot-secrets.sh 를 먼저 실행)."
 
 # ---------- 2. 인증키 ----------
-KMA_AUTH_KEY=$(kubectl -n "$NAMESPACE" get secret weather-credentials -o jsonpath='{.data.KMA_AUTH_KEY}' 2>/dev/null | base64 -d || true)
-if [ -n "$KMA_AUTH_KEY" ]; then echo "  인증키: 허브 $NAMESPACE/weather-credentials 에서 읽음"; else
+KMA_AUTH_KEY=${KMA_AUTH_KEY:-}
+if [ -n "$KMA_AUTH_KEY" ]; then echo "  인증키: 환경 변수 KMA_AUTH_KEY"; else
   log "기상청 API허브 인증키 입력 (화면에 표시되지 않음)"
   read -rsp "authKey: " KMA_AUTH_KEY; echo
   [ -n "$KMA_AUTH_KEY" ] || die "인증키가 비어 있습니다."
