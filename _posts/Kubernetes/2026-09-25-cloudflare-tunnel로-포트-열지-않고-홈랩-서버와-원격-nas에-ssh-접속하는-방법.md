@@ -477,7 +477,18 @@ else:
     body = {"Name": stack_name, "SwarmID": swarm_id, "RepositoryURL": os.environ["REPO_URL"], **git,
             "ComposeFile": os.environ["COMPOSE_PATH"], "AutoUpdate": {"Interval": os.environ["AUTO_UPDATE"]}}
     s = api("POST", f"/api/stacks/create/swarm/repository?endpointId={eid}", body)
-    print(f"- 스택 {stack_name}: 만듦 (id {s['Id']}, {os.environ['AUTO_UPDATE']} 마다 저장소 확인)")
+    sid = s["Id"]
+    print(f"- 스택 {stack_name}: 만듦 (id {sid})")
+
+# 4. 자동 반영 주기
+# Portainer 2.44 부터 저장소 확인 주기는 스택이 아니라 스택이 가리키는 Git Source 에 둡니다. 스택의 AutoUpdate.Interval 만
+# 주면 Source 는 주기 없이 만들어져 자동 반영이 일어나지 않습니다. 그보다 옛 버전(Source 가 없음)은 스택 설정으로 충분합니다.
+source_id = api("GET", f"/api/stacks/{sid}").get("GitSourceId")
+if source_id:
+    api("PUT", f"/api/gitops/sources/{source_id}", {"interval": os.environ["AUTO_UPDATE"]})
+    print(f"- Git Source {source_id}: {os.environ['AUTO_UPDATE']} 마다 저장소 확인")
+else:
+    print(f"- 스택 설정으로 {os.environ['AUTO_UPDATE']} 마다 저장소 확인 (Git Source 없는 버전)")
 PY
 
 log "완료. Portainer 의 Stacks 에서 $STACK_NAME 을 확인합니다."
