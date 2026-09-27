@@ -49,6 +49,17 @@ ssh-copy-id root@[PVE02_IP]
 두 Proxmox 노드와 NAS 를 같은 tailnet 에 넣습니다. 공유기 포트포워딩 없이 서로 직접 연결됩니다.
 
 1. NAS 의 **패키지 센터**에서 **Tailscale** 을 설치하고 로그인합니다.
+   패키지는 기본으로 userspace 모드라 들어오는 연결을 NAS 의 `127.0.0.1` 로 넘기기만 하고 NAS 에서 나가는 연결은 못 합니다. 나중에 NAS 에서 집으로 먼저 연결하는 서비스도 둘 수 있게 TUN 모드로 바꿉니다. DSM 은 부팅 때 `/usr/local/etc/rc.d/*.sh` 를 `start` 인자로 실행하므로 여기에 스크립트를 둡니다.
+   ```bash
+   # NAS 에 ssh 로 붙어 root 로 실행 (DSM 관리자 계정의 sudo)
+   sudo tee /usr/local/etc/rc.d/tailscale-tun.sh >/dev/null <<'RC'
+   #!/bin/sh
+   [ "$1" = start ] || exit 0
+   /var/packages/Tailscale/target/bin/tailscale configure-host
+   /usr/syno/bin/synosystemctl restart pkgctl-Tailscale.service
+   RC
+   sudo chmod 0755 /usr/local/etc/rc.d/tailscale-tun.sh && sudo /usr/local/etc/rc.d/tailscale-tun.sh start
+   ```
 2. Tailscale 관리 화면의 **Access controls** 정책에 태그 소유자를 추가합니다.
    ```json
    "tagOwners": {
@@ -64,7 +75,7 @@ ssh-copy-id root@[PVE02_IP]
 > 태그 없이 로그인한 기기는 노드 키가 180일 뒤 만료되어 QDevice 연결이 끊깁니다. NAS 처럼 사용자 계정으로 로그인한 기기는 **Machines** 에서 **Disable key expiry** 를 눌러 둡니다.
 {: .prompt-warning }
 
-- **확인:** 관리 화면의 **Machines** 에 NAS 가 보이고, `stat -c %a ~/.config/tailscale/authkey` 가 `600` 입니다.
+- **확인:** 관리 화면의 **Machines** 에 NAS 가 보이고, NAS 에서 `ip -br addr show tailscale0` 에 Tailscale IP 가 보이며, `stat -c %a ~/.config/tailscale/authkey` 가 `600` 입니다.
 
 ## 2. qnetd 이미지 만들기
 
@@ -111,7 +122,7 @@ ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 # 상태(인증서 DB, ssh 호스트 키)는 /etc/corosync/qnetd 볼륨에 둡니다. 처음 실행할 때만 만듭니다.
 # 환경 변수:
 #   AUTHORIZED_KEYS  root 로 ssh 할 수 있는 공개키(줄바꿈으로 여러 개). Proxmox 노드들의 /root/.ssh/id_rsa.pub
-#   LISTEN_ADDR      qnetd·sshd 가 받을 주소 (기본 127.0.0.1. NAS 의 Tailscale 이 userspace 모드라 Tailscale IP 로 온 연결이 여기로 옵니다)
+#   LISTEN_ADDR      qnetd·sshd 가 받을 주소 (기본 127.0.0.1. 사설망 IP 에만 열려면 그 주소)
 #   QNETD_PORT, SSH_PORT  기본 5403, 2222 (NAS 의 22 번은 DSM 이 씀)
 set -eu
 STATE=/etc/corosync/qnetd
@@ -138,13 +149,13 @@ exec corosync-qnetd -f -l "$LISTEN_ADDR" -p "${QNETD_PORT:-5403}"
 
 ## 3. NAS 에 qnetd 띄우기
 
-Synology 의 Tailscale 패키지는 userspace 모드로 돌아, NAS 의 Tailscale IP 로 들어온 연결을 NAS 의 `127.0.0.1` 로 넘깁니다. 그래서 qnetd(5403)와 sshd(2222)를 `127.0.0.1` 에만 열면 tailnet 에서만 닿고 NAS 의 LAN 에는 드러나지 않습니다. 공개키 자리에는 두 Proxmox 노드의 `/root/.ssh/id_rsa.pub` 를 넣습니다(없으면 5단계 플레이북이 만들므로, 그 뒤에 넣고 스택을 다시 배포해도 됩니다).
+qnetd(5403)와 sshd(2222)를 NAS 의 Tailscale IP 에만 열어 tailnet 에서만 닿고 NAS 의 LAN 에는 드러나지 않게 합니다. NAS 부팅 때 `tailscale0` 이 늦게 올라오면 바인드에 실패해 재시작되다가, 올라오면 뜹니다. 공개키 자리에는 두 Proxmox 노드의 `/root/.ssh/id_rsa.pub` 를 넣습니다(없으면 5단계 플레이북이 만들므로, 그 뒤에 넣고 스택을 다시 배포해도 됩니다).
 
 ```yaml
 # 원격지 NAS(Synology, Portainer Swarm)의 corosync-qnetd. Proxmox 클러스터(두 노드)에 세 번째 표(QDevice)를 줍니다.
 # 한 노드가 꺼져도 남은 노드 + 이 표로 과반이 유지됩니다. 이 컨테이너가 멈춰도 두 노드끼리 과반이라 클러스터는 그대로입니다.
-# Proxmox 노드는 Tailscale 로 NAS 에 붙습니다. NAS 의 Tailscale 패키지는 userspace 모드라 Tailscale IP 로 온 연결을 NAS 의
-# 127.0.0.1 로 넘기므로, 127.0.0.1 에만 열어 LAN 에는 노출하지 않습니다.
+# Proxmox 노드는 Tailscale 로 NAS 에 붙습니다. NAS 의 Tailscale 은 TUN 모드라 NAS 의 Tailscale IP 에만
+# 열어 LAN 에는 노출하지 않습니다. 부팅 때 tailscale0 이 늦게 올라오면 바인드에 실패해 재시작되다가 올라오면 뜹니다.
 # Portainer 의 Stacks 에 Git 저장소 스택 또는 웹 에디터로 등록합니다
 # 연결: playbooks/pve-cluster.yml (pvecm qdevice setup, 노드의 ssh 설정에 Port 2222)
 version: "3.8"
@@ -152,7 +163,7 @@ services:
   qnetd:
     image: [REGISTRY]/qnetd:3.0.3-2           # 2단계에서 빌드한 이미지
     environment:
-      - LISTEN_ADDR=127.0.0.1
+      - LISTEN_ADDR=[NAS_TAILSCALE_IP]
       - QNETD_PORT=5403
       - SSH_PORT=2222
       # pvecm qdevice setup 이 root 로 ssh 해 인증서를 만듭니다. Proxmox 노드의 /root/.ssh/id_rsa.pub (공개키라 저장소에 둡니다)
