@@ -46,7 +46,7 @@ permalink: /posts/43/
 
 ## 1. 비밀 값 만들기
 
-DB 비밀번호와 브로커 계정은 GitOps 저장소에 넣지 않고 두 클러스터에 Secret 으로 미리 만듭니다. 스크립트가 허브에는 TimescaleDB 비밀번호와 Grafana 읽기 계정 비밀번호를, 엣지에는 브로커 계정 파일(`mosquitto_passwd` 해시)과 클라이언트 자격 증명, 지역 DB·지역 Grafana 의 Secret 을 만듭니다. DB 계정 비밀번호는 허브 DB 와 지역 DB 가 같습니다. 브로커 계정은 `zigbee2mqtt`, `telegraf`, `homeassistant`, `devices`(ESPHome 같은 LAN 기기용) 네 개이고, 해시 파일은 control plane 에 docker 가 없으므로 엣지에서 일회용 파드로 만듭니다.
+DB 비밀번호와 브로커 계정은 GitOps 저장소에 넣지 않고 두 클러스터에 Secret 으로 미리 만듭니다. 스크립트가 허브에는 TimescaleDB 비밀번호와 Grafana 읽기 계정 비밀번호를, 엣지에는 브로커 계정 파일(`mosquitto_passwd` 해시)과 클라이언트 자격 증명, 지역 DB·지역 Grafana 의 Secret 을 만듭니다. DB 계정 비밀번호는 허브 DB 와 지역 DB 가 같습니다. 브로커 계정은 `zigbee2mqtt`, `telegraf`, `homeassistant`, `devices`(ESPHome·서버의 Telegraf 같은 LAN 기기용) 네 개이고, 해시 파일은 control plane 에 docker 가 없으므로 엣지에서 일회용 파드로 만듭니다.
 
 ```bash
 # control plane 에서 스크립트 내려받기
@@ -69,7 +69,7 @@ set -euo pipefail
 
 # ---------- 환경에 맞게 수정 ----------
 MOSQUITTO_IMAGE=eclipse-mosquitto:2.0.22   # 계정 파일(해시)을 만들 때 쓰는 이미지. 배포하는 버전과 맞춥니다
-MQTT_USERS=(zigbee2mqtt telegraf homeassistant devices)   # 브로커 계정. devices 는 ESPHome 같은 LAN 기기용
+MQTT_USERS=(zigbee2mqtt telegraf homeassistant devices)   # 브로커 계정. devices 는 ESPHome·서버의 Telegraf 같은 LAN 기기용
 # --------------------------------------
 
 log() { echo -e "\n\033[1;32m==>\033[0m $*"; }
@@ -282,7 +282,7 @@ spec:
 {: file="iot/edge/mosquitto/deployment.yaml" }
 
 ```yaml
-# LAN 의 기기(ESPHome 등)와 디버깅용 mosquitto_sub 이 [엣지 VIP]:1883 표준 포트로 붙습니다. VIP 는 지역 오버레이가 kube-vip.io/loadbalancerIPs 로 줍니다.
+# LAN 의 기기(ESPHome, 서버의 Telegraf 등)와 디버깅용 mosquitto_sub 이 [엣지 VIP]:1883 표준 포트로 붙습니다. VIP 는 지역 오버레이가 kube-vip.io/loadbalancerIPs 로 줍니다.
 apiVersion: v1
 kind: Service
 metadata:
@@ -312,7 +312,7 @@ Telegraf 설정 하나를 모든 지역이 공유합니다. 지역 이름과 허
 
 입력은 `name_override = "readings"` 로 모두 같은 테이블에 보내고, starlark 프로세서가 메시지의 필드 하나를 행 하나로 쪼갭니다. Zigbee2MQTT 메시지 `{"temperature": 21.5, "humidity": 40}` 은 `property` 가 `temperature`, `humidity` 인 두 행이 됩니다. 수집기마다 다른 메시지 모양은 입력 블록과 이 프로세서에서만 흡수하므로, 나중에 Zigbee2MQTT 를 다른 수집기로 바꿔도 입력 블록만 새로 쓰면 되고 테이블과 대시보드는 그대로입니다.
 
-수집은 **모두 수집**이 기본입니다. 감도·보정값 같은 기기 설정과 펌웨어 업데이트 정보도 측정값과 똑같이 행으로 남깁니다. 설정이 바뀌면 같은 상황에서도 값이 달라지기 때문입니다. 메시지마다 같은 값이 반복되는 기기 정보(`device{…}`)만 버리고, 대신 기기 정의(`bridge/devices`)에서 값이 바뀔 때만 `device_software_build_id` 같은 행으로 남깁니다. 기기로 간 명령(`zigbee2mqtt/[기기]/set`)은 `name_override = "events"` 로 `events` 테이블용 출력이 받습니다. Home Assistant 가 재발행한 Matter 기기 상태를 받는 입력 두 개(`hass/…`)는 [Home Assistant 글](/posts/48/)에서 추가하므로 아래 파일에서는 빠져 있습니다.
+수집은 **모두 수집**이 기본입니다. 감도·보정값 같은 기기 설정과 펌웨어 업데이트 정보도 측정값과 똑같이 행으로 남깁니다. 설정이 바뀌면 같은 상황에서도 값이 달라지기 때문입니다. 메시지마다 같은 값이 반복되는 기기 정보(`device{…}`)만 버리고, 대신 기기 정의(`bridge/devices`)에서 값이 바뀔 때만 `device_software_build_id` 같은 행으로 남깁니다. 기기로 간 명령(`zigbee2mqtt/[기기]/set`)은 `name_override = "events"` 로 `events` 테이블용 출력이 받습니다. Home Assistant 가 재발행한 Matter 기기 상태를 받는 입력 두 개(`hass/…`)는 [Home Assistant 글](/posts/48/)에서, 서버·PC 자체의 부하를 받는 입력 두 개(`hosts/…`)는 [호스트 부하 글](/posts/74/)에서 추가하므로 아래 파일에서는 빠져 있습니다. starlark 의 호스트 처리(`host_sensors`)는 그 입력이 없으면 쓰이지 않습니다.
 
 {% raw %}
 ```toml
@@ -438,11 +438,11 @@ Telegraf 설정 하나를 모든 지역이 공유합니다. 지역 이름과 허
 
 # 필드 하나를 행 하나로 쪼개고 값을 value(숫자)와 value_text(문자열)로 나눕니다. 실물 기기 태그 이름도 여기서 통일합니다.
 # 메시지에 property 태그가 있으면(HA) 그 값이 속성 이름이고, 없으면(Zigbee2MQTT) 필드 이름이 속성 이름입니다.
-# 단위는 HA 메시지에는 unit 태그로 실려 오고, Zigbee2MQTT 는 기기 정의(z2m_devices)에서 기억해 둔 값을 붙입니다.
+# 단위는 HA 메시지에는 unit 태그로 실려 오고, Zigbee2MQTT 는 기기 정의(z2m_devices)에서, 호스트는 발견 설정(host_sensors)에서 기억해 둔 값을 붙입니다.
 # Zigbee2MQTT 연결 상태 메시지처럼 실물 정보가 없는 메시지에도 기기 정의에서 기억해 둔 hw_id·model·vendor 를 붙입니다.
 # 기기 정의에서는 기기 정보가 바뀐 것만 device_<키> 행으로 냅니다. 제어 기록(events)은 이름만 나누고 필드는 그대로 둡니다(z2m set 은 필드마다 행).
 [[processors.starlark]]
-  namepass = ["readings", "z2m_devices", "events"]
+  namepass = ["readings", "z2m_devices", "events", "host_sensors"]
   order = 1
   source = '''
 load("json.star", "json")
@@ -551,6 +551,23 @@ def remember_devices(metric):
     state["hw"] = hw
     return out
 
+def remember_host_sensor(metric):
+    # homeassistant/sensor/<기기>/<필드>/config 중 호스트 Telegraf 가 낸 것만. 빈 메시지는 센서가 지워진 것입니다
+    raw = metric.fields.get("value", "")
+    if not raw:
+        return []
+    c = json.decode(raw)
+    if (c.get("origin") or {}).get("name") != "host-metrics":
+        return []
+    device = (c.get("device") or {}).get("name", "")
+    field = c.get("unique_id", "")[len(device) + 1:]
+    units = state.setdefault("host_units", {}).setdefault(device, {})
+    if c.get("unit_of_measurement"):
+        units[field] = c["unit_of_measurement"]
+    d = c.get("device") or {}
+    state.setdefault("host_hw", {})[device] = {"vendor": d.get("manufacturer") or "", "model": d.get("model") or ""}
+    return []
+
 def event(metric):
     tags = clean_tags(metric)
     if "device" in tags:
@@ -581,13 +598,19 @@ def event(metric):
 def apply(metric):
     if metric.name == "z2m_devices":
         return remember_devices(metric)
+    if metric.name == "host_sensors":
+        return remember_host_sensor(metric)
     if metric.name == "events":
         return event(metric)
     tags = clean_tags(metric)
     if not valid_name(tags.get("device", "")):
         return []                     # 이름이 없거나(옛 형식의 유지 메시지 등) 이름 규칙에 맞지 않는 기기는 버립니다
     name = tags["device"]
-    units = state.get("units", {}).get(name, {})
+    units = state.get("host_units" if tags.get("source") == "telegraf" else "units", {}).get(name, {})
+    if tags.get("source") == "telegraf":
+        for k, v in state.get("host_hw", {}).get(name, {}).items():
+            if v != "":
+                tags[k] = v
     if tags.get("source") == "z2m" and "hw_id" not in tags:
         for k, v in state.get("hw", {}).get(name, {}).items():
             if v != "":
@@ -619,9 +642,9 @@ def apply(metric):
     '''CREATE TABLE {{ .table }} (time timestamptz NOT NULL, site text, room text, device text, anchor text, property text,
         processing text NOT NULL CHECK (processing IN ('raw', 'corrected', 'derived')), value double precision, unit text, value_text text,
         protocol text, source text, vendor text, model text, hw_id text, node text)''',
-    '''SELECT create_hypertable({{ .table|quoteLiteral }}, 'time', chunk_time_interval => INTERVAL '7d')''',
+    '''SELECT create_hypertable({{ .table|quoteLiteral }}, 'time', chunk_time_interval => INTERVAL '1d')''',
     '''ALTER TABLE {{ .table }} SET (timescaledb.compress, timescaledb.compress_segmentby = 'site, room, device, anchor, property, processing', timescaledb.compress_orderby = 'time DESC')''',
-    '''SELECT add_compression_policy({{ .table|quoteLiteral }}, INTERVAL '30d')''',
+    '''SELECT add_compression_policy({{ .table|quoteLiteral }}, INTERVAL '1d')''',
   ]
 
 [[outputs.postgresql]]
@@ -643,6 +666,9 @@ def apply(metric):
 # 허브 TimescaleDB(두 번째 출력). 태그를 외래 키 테이블로 빼지 않고 컬럼으로 두어 지역 간 병합과 중복 제거가 쉽게 합니다.
 # 테이블은 컬럼 순서를 정해 두려고 직접 만들고, 이후 새 태그는 Telegraf 가 끝에 컬럼으로 붙입니다.
 # 압축은 시계열 하나(site, room, device, anchor, property, processing)끼리 묶어 값이 비슷한 것끼리 모이게 합니다.
+# 청크와 압축은 1일 단위입니다. 호스트 값(hosts/+)이 호스트마다 10초에 100여 행이라, 압축 전 데이터가 하루치 넘게 쌓이지 않게 합니다.
+# 압축된 청크에도 INSERT·UPDATE·DELETE 는 되므로(늦게 온 버퍼, 날씨 백필, 보정) 느려질 뿐 막히지 않습니다.
+# 이미 있는 테이블은 iot/hub/timescaledb/migrations/2026-09-28-readings-compress-1d.sql 로 바꿉니다(지역·허브 DB 모두).
 [[outputs.postgresql]]
   namepass = ["readings"]
   connection = "host=${HUB_PG_HOST} port=${HUB_PG_PORT} user=iot password=${HUB_PG_PASSWORD} dbname=iot sslmode=disable connect_timeout=10"
@@ -653,9 +679,9 @@ def apply(metric):
     '''CREATE TABLE {{ .table }} (time timestamptz NOT NULL, site text, room text, device text, anchor text, property text,
         processing text NOT NULL CHECK (processing IN ('raw', 'corrected', 'derived')), value double precision, unit text, value_text text,
         protocol text, source text, vendor text, model text, hw_id text, node text)''',
-    '''SELECT create_hypertable({{ .table|quoteLiteral }}, 'time', chunk_time_interval => INTERVAL '7d')''',
+    '''SELECT create_hypertable({{ .table|quoteLiteral }}, 'time', chunk_time_interval => INTERVAL '1d')''',
     '''ALTER TABLE {{ .table }} SET (timescaledb.compress, timescaledb.compress_segmentby = 'site, room, device, anchor, property, processing', timescaledb.compress_orderby = 'time DESC')''',
-    '''SELECT add_compression_policy({{ .table|quoteLiteral }}, INTERVAL '30d')''',
+    '''SELECT add_compression_policy({{ .table|quoteLiteral }}, INTERVAL '1d')''',
   ]
 
 # 허브 TimescaleDB 의 제어 기록 테이블 events. "행 하나 = 기기 하나에 간 명령 하나"(또는 자동화·스크립트 실행 하나)이고 값을 가공하지 않으므로 processing 이 없습니다.
@@ -682,7 +708,7 @@ def apply(metric):
   service_address = "http://:8888"
   namepass = ["__none__"]
 ```
-{: file="iot/edge/telegraf/telegraf.conf (Home Assistant 입력 제외)" }
+{: file="iot/edge/telegraf/telegraf.conf (Home Assistant·호스트 입력 제외)" }
 {% endraw %}
 
 ```yaml
@@ -768,7 +794,7 @@ spec:
 ```
 {: file="iot/edge/telegraf/pvc.yaml" }
 
-`tags_as_foreign_keys = false` 라 태그가 모두 본 테이블의 컬럼이 됩니다. 행 하나만 봐도 어느 지역의 어느 기기인지 알 수 있어 지역 DB 와 허브 DB 를 서로 채우거나 비교하고 중복을 걸러 내기 쉽습니다. 테이블은 첫 메시지가 올 때 Telegraf 가 DB 마다 `create_templates` 대로 만들고(하이퍼테이블, 7일 청크, 30일 뒤 압축), 새 태그가 보이면 끝에 컬럼을 추가합니다. 컬럼 순서를 정해 두려고 `CREATE TABLE` 에 컬럼을 직접 적었으며, 아래 표가 그 순서입니다.
+`tags_as_foreign_keys = false` 라 태그가 모두 본 테이블의 컬럼이 됩니다. 행 하나만 봐도 어느 지역의 어느 기기인지 알 수 있어 지역 DB 와 허브 DB 를 서로 채우거나 비교하고 중복을 걸러 내기 쉽습니다. 테이블은 첫 메시지가 올 때 Telegraf 가 DB 마다 `create_templates` 대로 만들고(하이퍼테이블. `readings` 는 1일 청크·1일 뒤 압축, `events` 는 7일 청크·30일 뒤 압축), 새 태그가 보이면 끝에 컬럼을 추가합니다. 컬럼 순서를 정해 두려고 `CREATE TABLE` 에 컬럼을 직접 적었으며, 아래 표가 그 순서입니다.
 
 | 컬럼 | 예 | 내용 |
 |---|---|---|
@@ -792,7 +818,7 @@ spec:
 
 `processing` 은 값이 원본인지 가공한 것인지 나눕니다. 원본 행은 고치지 않고, 센서 편차를 보정한 값이나 평균처럼 계산한 값은 같은 시각·속성에 `corrected`·`derived` 행으로 따로 넣습니다. 그래서 `where processing = 'raw'` 로 원본만, `<> 'raw'` 로 가공 값만 뽑을 수 있습니다. 기본값 없이 `NOT NULL` 과 `CHECK` 제약을 걸어, 가공 스크립트가 구분을 빠뜨리거나 다른 값을 넣으면 INSERT 가 실패합니다.
 
-압축은 `site, room, device, anchor, property, processing` 이 같은 행끼리 묶습니다. 묶음 하나가 시계열 하나(예: 한 기기의 온도)가 되어 값이 비슷한 것끼리 모이므로 압축이 잘 되고, 조회할 때도 필요한 묶음만 풉니다.
+압축은 `site, room, device, anchor, property, processing` 이 같은 행끼리 묶습니다. 묶음 하나가 시계열 하나(예: 한 기기의 온도)가 되어 값이 비슷한 것끼리 모이므로 압축이 잘 되고, 조회할 때도 필요한 묶음만 풉니다. 청크와 압축은 1일 단위라 압축 전 데이터가 하루치를 넘지 않습니다. 압축된 청크에도 INSERT·UPDATE·DELETE 는 되므로 늦게 도착한 버퍼나 보정은 느려질 뿐 그대로 들어갑니다.
 
 `events` 테이블은 "행 하나 = 기기 하나에 간 명령 하나" 입니다. 이 글에서는 Zigbee 명령만 들어오고, [Home Assistant 글](/posts/48/)에서 HA 로 제어한 명령과 자동화 실행이 누가 했는지와 함께 들어옵니다. 기기 컬럼은 `readings` 와 같아 명령 직후의 전력 변화처럼 두 테이블을 조인해 볼 수 있습니다. 값을 가공하지 않으므로 `processing` 은 없습니다.
 
@@ -938,12 +964,12 @@ configMapGenerator:
 ```
 {: file="iot/hub/timescaledb/kustomization.yaml" }
 
-대시보드(uid `iot-records`)는 2단계의 `TimescaleDB` 데이터소스로 읽기 전용 조회만 합니다. DB 에 잘 저장되는지 확인하는 용도라 컬럼을 가공하지 않고 `SELECT *` 로 그대로 보여 주며, 컬럼이 늘거나 줄면 표에 바로 반영됩니다. 위쪽의 `site`, `processing`, `room`, `device`, `property` 변수로 범위를 좁히고, 오른쪽 위 시간 범위가 모든 패널에 적용됩니다.
+대시보드(uid `iot-records`)는 2단계의 `TimescaleDB` 데이터소스로 읽기 전용 조회만 합니다. DB 에 잘 저장되는지 확인하는 용도라 컬럼을 가공하지 않고 `SELECT *` 로 그대로 보여 주며, 컬럼이 늘거나 줄면 표에 바로 반영됩니다. 위쪽의 `site`, `processing`, `room`, `device`, `property` 변수로 범위를 좁히고, 오른쪽 위 시간 범위가 모든 패널에 적용됩니다. 서버·PC 자체의 값(`device` 가 `host`, [호스트 부하 글](/posts/74/))은 속성이 많고 행이 많아 `device` 변수에서 `host` 를 직접 고를 때만 나옵니다.
 
 | 패널 | 내용 |
 |---|---|
 | readings 컬럼 | `information_schema` 에서 읽은 `readings` 의 지금 컬럼(순서, 이름, 형식, NULL 허용) |
-| 청크 | `readings` 하이퍼테이블의 청크(7일)와 압축 여부 |
+| 청크 | `readings` 하이퍼테이블의 청크(1일)와 압축 여부 |
 | 기기·속성별 최신 행 | `site`·`room`·`device`·`anchor`·`property`·`processing` 마다 마지막 행의 모든 컬럼 |
 | 최근 행 | 가장 최근에 저장된 500행의 모든 컬럼 |
 | 미세먼지 | 이름이 `pm` 으로 시작하는 속성(`pm1`, `pm25`, `pm10` …)을 한 그래프에 |

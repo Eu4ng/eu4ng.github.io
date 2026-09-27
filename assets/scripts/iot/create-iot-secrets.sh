@@ -10,7 +10,7 @@ set -euo pipefail
 
 # ---------- 환경에 맞게 수정 ----------
 MOSQUITTO_IMAGE=eclipse-mosquitto:2.0.22   # 계정 파일(해시)을 만들 때 쓰는 이미지. 배포하는 버전과 맞춥니다
-MQTT_USERS=(zigbee2mqtt telegraf homeassistant devices)   # 브로커 계정. devices 는 ESPHome 같은 LAN 기기용
+MQTT_USERS=(zigbee2mqtt telegraf homeassistant devices)   # 브로커 계정. devices 는 ESPHome·서버의 Telegraf 같은 LAN 기기용
 # --------------------------------------
 
 log() { echo -e "\n\033[1;32m==>\033[0m $*"; }
