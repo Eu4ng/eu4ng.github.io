@@ -7,7 +7,7 @@ tags: [kubernetes, longhorn, patroni, timescaledb, postgresql, high-availability
 permalink: /posts/54/
 ---
 
-local-path 볼륨은 한 노드의 디스크에만 있어서 그 서버가 죽으면 파드가 다른 노드에서 떠도 데이터가 없습니다. 이중화는 데이터 종류에 따라 둘로 나눕니다. Home Assistant 설정이나 Grafana 데이터처럼 작은 파일은 Longhorn 이 블록 단위로 두 worker 에 복제하고, 노드가 죽으면 파드를 다른 worker 로 옮깁니다. TimescaleDB 는 Longhorn 에 올리지 않고 Patroni 로 DB 자체를 복제합니다. 멤버마다 자기 노드의 로컬 디스크에 전체 데이터를 두고, Patroni 가 주 DB 하나를 고르면 나머지는 스트리밍 복제로 따라갑니다. 세 번째 멤버는 원격지 NAS 컨테이너에 둡니다. 기존 단일 DB 의 데이터는 `pg_dump`·`pg_restore` 로 옮깁니다.
+local-path 볼륨은 한 노드의 디스크에만 있어서 그 서버가 죽으면 파드가 다른 노드에서 떠도 데이터가 없습니다. 이중화는 데이터 종류에 따라 둘로 나눕니다. Home Assistant 설정이나 Grafana 데이터처럼 작은 파일은 [Longhorn 이 블록 단위로](/posts/72/) 두 worker 에 복제하고, 노드가 죽으면 파드를 다른 worker 로 옮깁니다. TimescaleDB 는 Longhorn 에 올리지 않고 Patroni 로 DB 자체를 복제합니다. 멤버마다 자기 노드의 로컬 디스크에 전체 데이터를 두고, Patroni 가 주 DB 하나를 고르면 나머지는 [스트리밍 복제](/posts/73/)로 따라갑니다. 세 번째 멤버는 원격지 NAS 컨테이너에 둡니다. 기존 단일 DB 의 데이터는 `pg_dump`·`pg_restore` 로 옮깁니다.
 
 1. worker 에 Longhorn 디스크 준비
 2. Longhorn 배포

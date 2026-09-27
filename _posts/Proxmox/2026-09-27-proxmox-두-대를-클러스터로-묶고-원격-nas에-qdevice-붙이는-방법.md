@@ -7,7 +7,7 @@ tags: [proxmox, ansible, corosync, qdevice, tailscale, synology, homelab]
 permalink: /posts/53/
 ---
 
-Proxmox 서버를 한 대 더 들여 클러스터로 묶습니다. 노드가 두 대뿐이면 한 대가 꺼졌을 때 남은 노드가 과반(2표 중 2표)을 잃어 VM 을 시작하거나 설정을 바꿀 수 없고, 정전 뒤 한 대만 켜지면 자동 시작 게스트도 뜨지 않습니다. 그래서 집 밖의 NAS 에 corosync-qnetd 컨테이너를 두고 두 노드가 Tailscale 로 붙어 세 번째 표를 받게 합니다. 두 노드는 집 LAN 을 tailnet 에 광고하는 서브넷 라우터도 맡아, 원격 NAS 와 LAN 의 VM 이 서로 닿게 합니다. 호스트 이름 정리, 클러스터 생성·합류, Tailscale 과 서브넷 라우팅, QDevice 연결까지 플레이북 하나로 진행하고, 여러 번 실행해도 결과가 같습니다. 공식 문서는 QDevice 서버를 일반 Debian 호스트에 패키지로 설치하지만, 이 글은 NAS 의 Docker(Portainer Swarm) 컨테이너에서 돌립니다.
+Proxmox 서버를 한 대 더 들여 클러스터로 묶습니다. 노드가 두 대뿐이면 한 대가 꺼졌을 때 남은 노드가 [과반](/posts/64/)(2표 중 2표)을 잃어 VM 을 시작하거나 설정을 바꿀 수 없고, 정전 뒤 한 대만 켜지면 자동 시작 게스트도 뜨지 않습니다. 그래서 집 밖의 NAS 에 corosync-qnetd 컨테이너를 두고 두 노드가 Tailscale 로 붙어 세 번째 표를 받게 합니다. 두 노드는 집 LAN 을 tailnet 에 광고하는 서브넷 라우터도 맡아, 원격 NAS 와 LAN 의 VM 이 서로 닿게 합니다. 호스트 이름 정리, 클러스터 생성·합류, Tailscale 과 서브넷 라우팅, QDevice 연결까지 플레이북 하나로 진행하고, 여러 번 실행해도 결과가 같습니다. 공식 문서는 QDevice 서버를 일반 Debian 호스트에 패키지로 설치하지만, 이 글은 NAS 의 Docker(Portainer Swarm) 컨테이너에서 돌립니다.
 
 1. Tailscale 준비
 2. qnetd 이미지 만들기
@@ -249,7 +249,7 @@ ansible-galaxy collection install ansible.posix
 
 플레이북은 여섯 플레이입니다. 노드 준비(구독 없는 apt 저장소, 호스트 이름), 클러스터 만들기, 합류, Tailscale, QDevice, 확인 순서입니다. 합류와 QDevice 는 이미 되어 있으면 건너뜁니다.
 
-Tailscale 플레이는 로그인 뒤 두 노드를 서브넷 라우터로 만듭니다. IP 포워딩을 켜고 `tailscale set --advertise-routes` 로 집 LAN 을 광고합니다. 두 노드가 같은 대역을 광고하면 Tailscale 은 한 노드를 주 라우터로 쓰고 다른 노드를 대기로 둡니다. 원격 노드는 LAN 대역으로 가는 응답을 주 라우터로만 보내므로, VM 이 tailnet 으로 보내는 패킷은 자기 Proxmox 노드의 Tailscale IP 로 바꿔(마스커레이드) 내보냅니다. 이 규칙은 부팅 때 `tailscaled` 뒤에 적용되도록 systemd 유닛(`tailscale-lan-masquerade`)으로 둡니다.
+Tailscale 플레이는 로그인 뒤 두 노드를 서브넷 라우터로 만듭니다. IP 포워딩을 켜고 `tailscale set --advertise-routes` 로 집 LAN 을 광고합니다. 두 노드가 같은 대역을 광고하면 Tailscale 은 한 노드를 주 라우터로 쓰고 다른 노드를 대기로 둡니다. 원격 노드는 LAN 대역으로 가는 응답을 주 라우터로만 보내므로, VM 이 tailnet 으로 보내는 패킷은 자기 Proxmox 노드의 Tailscale IP 로 바꿔([마스커레이드](/posts/68/)) 내보냅니다. 이 규칙은 부팅 때 `tailscaled` 뒤에 적용되도록 systemd 유닛(`tailscale-lan-masquerade`)으로 둡니다.
 
 ```bash
 # 플레이북과 이름 바꾸기 스크립트 내려받기

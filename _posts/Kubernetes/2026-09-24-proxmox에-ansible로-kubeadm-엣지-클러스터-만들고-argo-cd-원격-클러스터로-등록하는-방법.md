@@ -7,7 +7,7 @@ tags: [proxmox, ansible, kubeadm, kubernetes, kube-vip, longhorn, argo-cd, gitop
 permalink: /posts/42/
 ---
 
-허브 클러스터를 만든 플레이북 `k8s-cluster.yml` 에 지역 하나를 더 적어 **지역 엣지 클러스터**를 만들고, 허브의 **Argo CD** 에 원격 클러스터로 등록합니다. 엣지를 허브의 worker 로 붙이지 않고 별도 클러스터로 두는 이유는, 허브나 인터넷이 끊겨도 지역 안의 수집·제어가 자체 control plane 으로 계속 돌아야 하기 때문입니다. 엣지는 control plane 두 대와 worker 두 대를 두 Proxmox 노드에 나눠 두고, etcd 세 번째 투표자를 원격 NAS 컨테이너로 붙여 서버 한 대가 죽어도 버티게 합니다. Argo CD 등록은 API 서버 로그인 대신 CLI 의 core 모드로 쿠버네티스 API 에 직접 써서 비밀번호 없이 끝냅니다.
+허브 클러스터를 만든 플레이북 `k8s-cluster.yml` 에 지역 하나를 더 적어 **지역 엣지 클러스터**를 만들고, 허브의 **Argo CD** 에 원격 클러스터로 등록합니다. 엣지를 허브의 worker 로 붙이지 않고 별도 클러스터로 두는 이유는, [허브나 인터넷이 끊겨도](/posts/62/) 지역 안의 수집·제어가 자체 control plane 으로 계속 돌아야 하기 때문입니다. 엣지는 control plane 두 대와 worker 두 대를 두 Proxmox 노드에 나눠 두고, etcd 세 번째 투표자를 원격 NAS 컨테이너로 붙여 서버 한 대가 죽어도 버티게 합니다. Argo CD 등록은 API 서버 로그인 대신 CLI 의 core 모드로 쿠버네티스 API 에 직접 써서 비밀번호 없이 끝냅니다.
 
 1. 지역 클러스터 값 추가
 2. 플레이북 실행
@@ -72,7 +72,7 @@ k8s_clusters:
 - `service_vip`: 지역의 LoadBalancer Service(Home Assistant, Zigbee2MQTT, Mosquitto, Grafana 등)가 포트만 달리해 함께 쓰는 주소입니다. 각 서비스는 GitOps 저장소의 지역 오버레이에서 `kube-vip.io/loadbalancerIPs` 주석으로 이 주소를 받습니다.
 - `lan_dns_names`: 내부망 DNS 가 이 지역의 서비스 VIP 로 답할 이름입니다. 그 이름을 받는 지역 인그레스는 [지역 엣지에 TimescaleDB와 Grafana를 두어 인터넷 없이도 기록하고 보는 방법](/posts/56/)에서 만듭니다.
 
-> 서비스 VIP 는 kube-vip 의 `--services` 만 켜고 `--servicesElection` 은 쓰지 않습니다. 플레이북(`playbooks/tasks/kube-vip.yml`)도 그렇게 만듭니다. 서비스별 선출을 켜면 서비스마다 리더를 따로 뽑아, 여러 서비스가 한 IP 를 나눠 쓸 때 그 IP 가 두 노드에 동시에 붙습니다. ARP 응답이 엇갈려 서비스 VIP 로 가는 연결이 간헐적으로 끊깁니다.
+> 서비스 VIP 는 kube-vip 의 `--services` 만 켜고 `--servicesElection` 은 쓰지 않습니다. 플레이북(`playbooks/tasks/kube-vip.yml`)도 그렇게 만듭니다. 서비스별 선출을 켜면 서비스마다 리더를 따로 뽑아, 여러 서비스가 한 IP 를 나눠 쓸 때 그 IP 가 두 노드에 동시에 붙습니다. [ARP 응답이 엇갈려](/posts/69/) 서비스 VIP 로 가는 연결이 간헐적으로 끊깁니다.
 {: .prompt-warning }
 
 - **확인:** `ansible-inventory --graph` 가 오류 없이 끝나고, `ansible localhost -m debug -a "var=k8s_clusters.[SITE].vip"` 이 `[EDGE_API_VIP]` 를 출력합니다.
@@ -100,7 +100,7 @@ ansible-playbook playbooks/k8s-cluster.yml -e k8s_cluster=[SITE]
 
 ## 3. etcd 세 번째 투표자 붙이기
 
-control plane 이 두 대면 etcd 멤버도 두 개라, 서버 한 대가 죽으면 과반(2표 중 2표)을 잃어 API 서버가 멈춥니다. 원격 NAS 에 etcd 컨테이너를 세 번째 투표자로 두어 3표 중 2표가 남게 합니다. 투표자는 클러스터마다 따로 두며, 허브 투표자와 같은 NAS 에 둘 때는 포트만 바꿉니다(예: 허브 `2379/2380`, 지역 `12379/12380`). 인터넷이 끊겨도 지역의 두 control plane 끼리 과반이라 엣지는 계속 돕니다.
+control plane 이 두 대면 etcd 멤버도 두 개라, 서버 한 대가 죽으면 [과반](/posts/61/)(2표 중 2표)을 잃어 API 서버가 멈춥니다. 원격 NAS 에 etcd 컨테이너를 세 번째 투표자로 두어 3표 중 2표가 남게 합니다. 투표자는 클러스터마다 따로 두며, 허브 투표자와 같은 NAS 에 둘 때는 포트만 바꿉니다(예: 허브 `2379/2380`, 지역 `12379/12380`). 인터넷이 끊겨도 지역의 두 control plane 끼리 과반이라 엣지는 계속 돕니다.
 
 붙이는 방법은 [쿠버네티스 etcd 세 번째 투표자를 원격 NAS 컨테이너로 붙이는 방법](/posts/55/)을 따르되, 인증서를 만들 때 클러스터 인자에 지역 이름(`[SITE]`)을 주고 멤버 추가·승격은 지역의 첫 control plane 에서 실행합니다.
 
@@ -226,7 +226,7 @@ kubeadm 으로 만든 클러스터끼리는 kubeconfig 의 클러스터·사용�
 
 ## 5. 지역 폴더 규칙과 ApplicationSet 추가
 
-기존 `services/` 폴더는 허브로만 배포됩니다. 어느 폴더가 어느 클러스터로 가는지는 ApplicationSet 이 정하므로, 프로젝트 폴더 `iot/` 와 그 규칙을 저장소에 추가합니다. 지역 폴더의 두 번째 세그먼트가 그대로 Argo CD 의 클러스터 이름이 되므로, 4단계에서 등록한 이름과 폴더 이름이 같아야 합니다. 저장소를 처음 연결할 때 만든 `services` ApplicationSet 은 그대로 두고, 프로젝트의 ApplicationSet 은 `services/argocd/` 폴더에 매니페스트로 두어 GitOps 로 관리합니다.
+기존 `services/` 폴더는 허브로만 배포됩니다. 어느 폴더가 어느 클러스터로 가는지는 [ApplicationSet](/posts/58/) 이 정하므로, 프로젝트 폴더 `iot/` 와 그 규칙을 저장소에 추가합니다. 지역 폴더의 두 번째 세그먼트가 그대로 Argo CD 의 클러스터 이름이 되므로, 4단계에서 등록한 이름과 폴더 이름이 같아야 합니다. 저장소를 처음 연결할 때 만든 `services` ApplicationSet 은 그대로 두고, 프로젝트의 ApplicationSet 은 `services/argocd/` 폴더에 매니페스트로 두어 GitOps 로 관리합니다.
 
 ```text
 services/[이름]/              # 플랫폼 서비스 → 허브 (기존)

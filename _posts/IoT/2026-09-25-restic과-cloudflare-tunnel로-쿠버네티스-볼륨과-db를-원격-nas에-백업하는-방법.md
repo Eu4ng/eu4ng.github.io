@@ -7,7 +7,7 @@ tags: [backup, restic, cloudflare, kubernetes, argo-cd, gitops, synology, iot]
 permalink: /posts/50/
 ---
 
-허브와 엣지 클러스터의 Longhorn 볼륨과 TimescaleDB 를 **restic** 스냅샷으로 원격 NAS 에 올립니다. 볼륨과 지역 DB 는 매일, 모든 지역이 모이는 허브 DB 는 매시간 올립니다. Zigbee 네트워크 키, Matter 패브릭, Thread 데이터셋, Home Assistant 설정은 코드로 다시 만들 수 없어서 클러스터 밖에 사본이 있어야 합니다. restic 은 SFTP 로 NAS 에 저장하고, SFTP 는 Cloudflare Tunnel(`cloudflared access ssh`)과 Access 서비스 토큰을 거치므로 NAS 의 공인 IP 나 포트를 열지 않습니다. 두 클러스터가 저장소 하나를 함께 쓰고, 스냅샷의 호스트 이름으로 클러스터를 구분합니다.
+허브와 엣지 클러스터의 Longhorn 볼륨과 TimescaleDB 를 **restic** [스냅샷](/posts/71/)으로 원격 NAS 에 올립니다. 볼륨과 지역 DB 는 매일, 모든 지역이 모이는 허브 DB 는 매시간 올립니다. Zigbee 네트워크 키, Matter 패브릭, Thread 데이터셋, Home Assistant 설정은 코드로 다시 만들 수 없어서 클러스터 밖에 사본이 있어야 합니다. restic 은 SFTP 로 NAS 에 저장하고, SFTP 는 Cloudflare Tunnel(`cloudflared access ssh`)과 Access 서비스 토큰을 거치므로 NAS 의 공인 IP 나 포트를 열지 않습니다. 두 클러스터가 저장소 하나를 함께 쓰고, 스냅샷의 호스트 이름으로 클러스터를 구분합니다.
 
 1. NAS 준비
 2. 백업 이미지 만들기

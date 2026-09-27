@@ -8,7 +8,7 @@ mermaid: true
 permalink: /posts/56/
 ---
 
-지역 엣지 클러스터에 **지역 TimescaleDB**와 **지역 Grafana**, 내부망 전용 **지역 인그레스**를 두어, 인터넷이나 허브가 끊겨도 그 지역의 기록과 조회가 지역 안에서 이어지게 합니다. 엣지 Telegraf 는 같은 행을 지역 DB 에 먼저, 허브 DB 에 두 번째로 쓰므로 허브는 지금처럼 모든 지역을 모아 보고, 지역 DB 에는 그 지역 데이터만 쌓입니다. 두 DB 는 테이블 정의와 계정이 같고 대시보드 파일도 하나를 함께 써서, 어느 Grafana 에서 보든 같은 화면이 나옵니다.
+지역 엣지 클러스터에 **지역 TimescaleDB**와 **지역 Grafana**, 내부망 전용 **지역 인그레스**를 두어, [인터넷이나 허브가 끊겨도](/posts/62/) 그 지역의 기록과 조회가 지역 안에서 이어지게 합니다. 엣지 Telegraf 는 같은 행을 지역 DB 에 먼저, 허브 DB 에 두 번째로 쓰므로 허브는 지금처럼 모든 지역을 모아 보고, 지역 DB 에는 그 지역 데이터만 쌓입니다. 두 DB 는 테이블 정의와 계정이 같고 대시보드 파일도 하나를 함께 써서, 어느 Grafana 에서 보든 같은 화면이 나옵니다.
 
 ```mermaid
 flowchart LR
@@ -88,7 +88,7 @@ bash create-iot-secrets.sh k8s-[SITE].yaml
 - **멤버 두 개:** worker 마다 하나씩 StatefulSet 파드로 둡니다(`podAntiAffinity`). 리더 선출은 Patroni 가 쿠버네티스 API(DCS)로 하므로, 멤버가 둘뿐이어도 판정은 엣지 etcd 의 과반이 맡습니다.
 - **동기 복제, 엄격하지 않게:** 쓰기는 다른 멤버가 받아야 완료되지만(`synchronous_mode`), 그 멤버가 죽으면 멈추지 않고 비동기로 이어 씁니다(`synchronous_mode_strict: false`).
 - **접속 주소:** selector 가 없는 Service `timescaledb` 의 Endpoints 에 Patroni 가 지금 주 DB 의 파드 주소를 적습니다. Telegraf 와 Grafana 는 `timescaledb.timescaledb.svc.cluster.local:5432` 로 붙습니다.
-- **스토리지 `longhorn-local`:** DB 는 스스로 복제하므로 Longhorn 볼륨은 한 벌만 두고, 파드가 있는 노드에 복제본을 둡니다(`dataLocality: best-effort`). 기본 StorageClass(2벌)에 두면 같은 데이터를 네 번 쓰게 됩니다.
+- **스토리지 `longhorn-local`:** [DB 는 스스로 복제하므로](/posts/72/) Longhorn 볼륨은 한 벌만 두고, 파드가 있는 노드에 복제본을 둡니다(`dataLocality: best-effort`). 기본 StorageClass(2벌)에 두면 같은 데이터를 네 번 쓰게 됩니다.
 - **계정:** 처음 만들 때 bootstrap 스크립트가 허브와 같은 역할(`iot` 소유자, `grafana` 읽기 전용)과 권한을 만듭니다. 테이블은 Telegraf 가 첫 행을 쓸 때 허브와 같은 정의로 만듭니다.
 
 ```yaml
@@ -612,7 +612,7 @@ git push
 - 내부망 DNS 가 `lan_dns_names` 의 이름을 지역 서비스 VIP 로 답합니다(엣지 글 1~2단계).
 - 서비스 VIP 는 kube-vip 리더인 control plane 한 대가 가집니다. Traefik 을 control plane 두 대에 DaemonSet 으로 두고 `hostPort` 443 으로 받으므로, VIP 를 가진 노드의 Traefik 이 요청을 받습니다.
 - Traefik 은 내부망 대역이 아닌 접속을 403 으로 막고, 이름별로 각 네임스페이스의 Service 로 넘깁니다. 인증은 앱 자체 로그인만 씁니다.
-- 와일드카드 인증서는 지역 cert-manager 가 DNS-01 로 직접 발급·갱신합니다. 인터넷은 갱신할 때만 필요하고, 90일짜리 인증서를 60일째에 갱신하므로 인터넷이 끊겨도 약 30일은 그대로 씁니다.
+- 와일드카드 인증서는 지역 cert-manager 가 [DNS-01](/posts/57/) 로 직접 발급·갱신합니다. 인터넷은 갱신할 때만 필요하고, 90일짜리 인증서를 60일째에 갱신하므로 인터넷이 끊겨도 약 30일은 그대로 씁니다.
 
 cert-manager 가 Cloudflare 에 DNS 레코드를 쓰려면 엣지에도 API 토큰 Secret 이 있어야 합니다. 허브의 Secret 을 엣지로 복사합니다.
 

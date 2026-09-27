@@ -188,7 +188,7 @@ bash create-template.sh
 
 `ONBOOT`을 `1`로 두면 이 템플릿을 복제한 모든 VM이 Proxmox 호스트가 부팅할 때 함께 켜집니다. 특정 VM만 끄려면 `qm set [VM_ID] --onboot 0`을 실행합니다.
 
-메모리 balloon 장치는 Proxmox 기본값대로 켜 둡니다. 최소 메모리를 따로 정하지 않으므로 VM 메모리가 줄어들지는 않고, 게스트가 비운 메모리만 호스트로 돌려줍니다(free page reporting). `--balloon 0`으로 장치를 끄면 게스트가 한 번 쓴 메모리가 VM을 끌 때까지 호스트에 잡혀 있어, 게스트 안은 한가해도 호스트 메모리가 가득 찹니다.
+메모리 [balloon](/posts/66/) 장치는 Proxmox 기본값대로 켜 둡니다. 최소 메모리를 따로 정하지 않으므로 VM 메모리가 줄어들지는 않고, 게스트가 비운 메모리만 호스트로 돌려줍니다(free page reporting). `--balloon 0`으로 장치를 끄면 게스트가 한 번 쓴 메모리가 VM을 끌 때까지 호스트에 잡혀 있어, 게스트 안은 한가해도 호스트 메모리가 가득 찹니다.
 
 > 이 템플릿을 복제한 VM은 Proxmox의 `authorized_keys`에 있는 모든 키와 Proxmox 호스트의 root 키로 접속할 수 있습니다. 키는 템플릿을 만든 시점의 값으로 고정되므로, `authorized_keys`를 바꿨다면 템플릿을 지우고 다시 만듭니다.
 {: .prompt-warning }

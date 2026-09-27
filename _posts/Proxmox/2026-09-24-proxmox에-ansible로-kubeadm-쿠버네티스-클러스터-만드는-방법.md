@@ -7,7 +7,7 @@ tags: [proxmox, ansible, kubernetes, kubeadm, kube-vip, longhorn, cloud-init, ho
 permalink: /posts/46/
 ---
 
-[템플릿 스크립트](/posts/33/)와 [클러스터 스크립트](/posts/32/)로 하던 일을 Ansible 플레이북으로 옮겨, CT·VM 을 만드는 모든 절차를 `proxmox-ansible` 저장소 하나에 모읍니다. 템플릿 플레이북이 Proxmox 노드마다 Ubuntu 24.04 클라우드 이미지로 VM 템플릿을 만들고, 클러스터 플레이북이 그 템플릿을 복제해 노드 VM 을 만든 뒤 kubeadm 클러스터를 구성합니다. control plane 과 worker 를 두 대씩 두 Proxmox 노드에 나눠 두고, API 주소는 **kube-vip** 이 ARP 로 띄우는 VIP 로 받아 control plane 한 대가 꺼져도 같은 주소로 붙습니다. 클러스터 정의는 변수 파일에 목록으로 두고 `-e k8s_cluster=<이름>` 으로 골라, 중앙 허브와 지역 엣지를 같은 플레이북으로 만듭니다. 여러 번 실행해도 결과가 같고, 노드 교체와 삭제도 같은 플레이북으로 합니다.
+[템플릿 스크립트](/posts/33/)와 [클러스터 스크립트](/posts/32/)로 하던 일을 Ansible 플레이북으로 옮겨, CT·VM 을 만드는 모든 절차를 `proxmox-ansible` 저장소 하나에 모읍니다. 템플릿 플레이북이 Proxmox 노드마다 Ubuntu 24.04 클라우드 이미지로 VM 템플릿을 만들고, 클러스터 플레이북이 그 템플릿을 복제해 노드 VM 을 만든 뒤 [kubeadm](/posts/60/) 클러스터를 구성합니다. control plane 과 worker 를 두 대씩 두 Proxmox 노드에 나눠 두고, API 주소는 **kube-vip** 이 ARP 로 띄우는 VIP 로 받아 control plane 한 대가 꺼져도 같은 주소로 붙습니다. 클러스터 정의는 변수 파일에 목록으로 두고 `-e k8s_cluster=<이름>` 으로 골라, 중앙 허브와 지역 엣지를 같은 플레이북으로 만듭니다. 여러 번 실행해도 결과가 같고, 노드 교체와 삭제도 같은 플레이북으로 합니다.
 
 1. 변수 채우기
 2. 템플릿 만들기
@@ -37,7 +37,7 @@ permalink: /posts/46/
 - Proxmox 두 대의 클러스터와 Tailscale 서브넷 라우터 ([Proxmox 두 대를 클러스터로 묶고 원격 NAS에 QDevice 붙이는 방법](/posts/53/)). VM 은 원격지(tailnet)로 가는 패킷을 자기 Proxmox 노드로 보냅니다.
 - `proxmox-ansible` 저장소 골격, API 토큰, 내부망 DNS 플레이북(`playbooks/lan-dns.yml`, `templates/dnsmasq-lan.conf.j2`) ([Proxmox에 Ansible로 내부망 DNS 컨테이너 만드는 방법](/posts/41/)). 클러스터 플레이북이 끝에서 내부망 DNS 플레이북을 다시 실행합니다.
 - 실행 PC 의 SSH 키(`~/.ssh/id_ed25519.pub`)가 `group_vars/all.yml` 의 `ct_ssh_pubkey` 에 들어 있어야 합니다. 이 키가 템플릿에 들어가 복제한 VM 에 Ansible 이 접속합니다.
-- 노드마다 비어 있는 VM ID 와 고정 IP, 클러스터마다 비어 있는 VIP 하나(LoadBalancer 서비스를 받을 엣지는 서비스 VIP 하나 더). VIP 는 공유기 DHCP 가 나눠 주지 않는 주소로 고릅니다.
+- 노드마다 비어 있는 VM ID 와 고정 IP, 클러스터마다 비어 있는 [VIP](/posts/69/) 하나(LoadBalancer 서비스를 받을 엣지는 서비스 VIP 하나 더). VIP 는 공유기 DHCP 가 나눠 주지 않는 주소로 고릅니다.
 
 ## 1. 변수 채우기
 
@@ -66,7 +66,7 @@ k8s_clusters:
     nodes:
       - { name: k8s-hub-cp-1, pve: pve01, role: control-plane, vmid: 121, ip: [HUB_CP_1_IP], cores: 2,  memory: 4096,  disk: 32G }
       - { name: k8s-hub-cp-2, pve: pve02, role: control-plane, vmid: 122, ip: [HUB_CP_2_IP], cores: 2,  memory: 2560,  disk: 32G }
-      - { name: k8s-hub-worker-1, pve: pve01, role: worker,    vmid: 123, ip: [HUB_WORKER_1_IP], cores: 24, memory: 40960, disk: 100G, longhorn_disk: 20 }
+      - { name: k8s-hub-worker-1, pve: pve01, role: worker,    vmid: 123, ip: [HUB_WORKER_1_IP], cores: 24, memory: 24576, disk: 100G, longhorn_disk: 20 }
       - { name: k8s-hub-worker-2, pve: pve02, role: worker,    vmid: 124, ip: [HUB_WORKER_2_IP], cores: 8,  memory: 5120,  disk: 60G,  longhorn_disk: 20 }
     dns_name: hub                             # 내부망 DNS 역할 이름 k8s-hub(VIP), kubectl-hub(kubectl 을 돌릴 control plane). templates/dnsmasq-lan.conf.j2
     vip: [HUB_VIP]                            # API 엔드포인트(kube-vip, ARP). control plane 중 한 대가 가짐
@@ -898,7 +898,7 @@ ansible-playbook playbooks/k8s-cluster.yml -e k8s_cluster=daejeon
 
 - **확인:** `결과` 태스크에 목록의 노드가 모두 `Ready` 로 보이고, `노드 수가 맞는지` 가 통과하며, `PLAY RECAP` 에 `failed=0` 입니다. 실행 PC 에 `~/.kube/k8s-hub.yaml`(엣지는 `k8s-daejeon.yaml`)이 생깁니다.
 
-> control plane 이 두 대면 etcd 멤버도 두 개라, 한 대가 꺼지면 과반을 잃어 API 가 멈춥니다. 세 번째 투표자는 [쿠버네티스 etcd 세 번째 투표자를 원격 NAS 컨테이너로 붙이는 방법](/posts/55/)으로 붙입니다.
+> control plane 이 두 대면 etcd 멤버도 두 개라, 한 대가 꺼지면 [과반](/posts/61/)을 잃어 API 가 멈춥니다. 세 번째 투표자는 [쿠버네티스 etcd 세 번째 투표자를 원격 NAS 컨테이너로 붙이는 방법](/posts/55/)으로 붙입니다.
 {: .prompt-warning }
 
 ## 4. 확인
