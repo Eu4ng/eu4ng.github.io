@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """공유기(UPnP IGD)에 외부 노출용 포트포워딩을 겁니다. 표준 라이브러리만 씁니다.
 
-    WAN 443 -> <이 호스트>:443 (Traefik websecure hostPort)
-    WAN 80  -> <이 호스트>:80  (Traefik web hostPort)
+    WAN 443 -> <대상>:443 (Traefik websecure hostPort)
+    WAN 80  -> <대상>:80  (Traefik web hostPort)
 
-MiniUPnPd 는 요청한 호스트만 내부 클라이언트로 허용하는 것이 보통이라, 트래픽을 받을 노드에서 실행합니다:
+대상은 --internal-ip 로 줍니다(control plane VIP. VIP 를 가진 control plane 에도 Traefik 이 떠 있습니다). 없으면 이 호스트입니다.
+공유기(MiniUPnPd)는 요청한 주소로만 매핑을 허용하므로, 대상 주소가 이 호스트에 붙어 있으면(VIP 를 가진 control plane)
+그 주소에서 요청을 보냅니다. 기존 매핑을 바꾸기 전에 임시 포트로 먼저 시험해, 거부되면 아무것도 바꾸지 않습니다.
+VIP 를 가진 control plane 에서 실행합니다(kubectl -n kube-system get lease plndr-cp-lock 의 holderIdentity):
 
-    ssh ubuntu@[CONTROL_PLANE_IP] python3 - < router-portmap.py            # 걸기 (이미 있으면 그대로 둠)
-    ssh ubuntu@[CONTROL_PLANE_IP] python3 - --delete < router-portmap.py   # 지우기
+    ssh ubuntu@<VIP 를 가진 control plane> python3 - --internal-ip [HUB_VIP] < router-portmap.py   # 걸기 (이미 있으면 그대로 둠)
+    ssh ubuntu@<VIP 를 가진 control plane> python3 - --delete < router-portmap.py                      # 지우기
 
 임대 0(영구)으로 걸지만 공유기 재부팅·펌웨어 업데이트 뒤에는 사라질 수 있습니다. 외부 접속이 안 되면 먼저 다시 실행합니다.
 공유기에서 UPnP 가 꺼져 있으면 관리 화면에서 위 두 개를 수동으로 겁니다.
 """
+import http.client
 import re
 import socket
 import sys
@@ -24,6 +28,8 @@ MAPPINGS = [  # (외부 포트, 내부 포트, 설명)
     (80, 80, "k8s traefik http"),
 ]
 PROTOCOL = "TCP"
+SOURCE_IP = None    # main() 이 정합니다
+PROBE_PORT = 47443  # 대상 주소를 공유기가 받아 주는지 시험할 때 잠깐 쓰는 포트
 LEASE = 0  # 0 = 영구
 SSDP_ADDR = ("239.255.255.250", 1900)
 DEVICE_NS = "{urn:schemas-upnp-org:device-1-0}"
@@ -81,17 +87,18 @@ class IGD:
             's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body>'
             f'<u:{action} xmlns:u="{self.stype}">{body}</u:{action}></s:Body></s:Envelope>'
         )
-        req = urllib.request.Request(
-            self.base + self.control, data=envelope.encode(),
-            headers={"Content-Type": 'text/xml; charset="utf-8"', "SOAPAction": f'"{self.stype}#{action}"'},
-        )
-        try:
-            text = urllib.request.urlopen(req, timeout=5).read().decode(errors="replace")
-        except urllib.error.HTTPError as e:
-            text = e.read().decode(errors="replace")
+        # 출발 주소를 정할 수 있게 http.client 로 보냅니다(SOURCE_IP: 매핑 대상이 이 호스트의 다른 주소일 때)
+        host_port = self.base.split("://", 1)[1]
+        conn = http.client.HTTPConnection(host_port, timeout=5, source_address=(SOURCE_IP, 0) if SOURCE_IP else None)
+        conn.request("POST", self.control, body=envelope.encode(),
+                     headers={"Content-Type": 'text/xml; charset="utf-8"', "SOAPAction": f'"{self.stype}#{action}"'})
+        resp = conn.getresponse()
+        text = resp.read().decode(errors="replace")
+        conn.close()
+        if resp.status != 200:
             code = re.search(r"<errorCode>(\d+)</errorCode>", text)
             desc = re.search(r"<errorDescription>(.*?)</errorDescription>", text)
-            raise UPnPError(int(code.group(1)) if code else e.code, desc.group(1) if desc else text[:120])
+            raise UPnPError(int(code.group(1)) if code else resp.status, desc.group(1) if desc else text[:120])
         return {m.group(1): m.group(2) for m in re.finditer(r"<(New\w+)>(.*?)</\1>", text)}
 
 
@@ -112,13 +119,33 @@ def list_mappings(igd):
     return rows
 
 
+def probe(igd, host):
+    """공유기가 host 를 내부 클라이언트로 받아 주는지 임시 포트로 시험합니다. 기존 매핑은 건드리지 않습니다."""
+    key = dict(NewRemoteHost="", NewExternalPort=PROBE_PORT, NewProtocol=PROTOCOL)
+    try:
+        igd.call("AddPortMapping", **key, NewInternalPort=PROBE_PORT, NewInternalClient=host,
+                 NewEnabled=1, NewPortMappingDescription="router-portmap probe", NewLeaseDuration=60)
+    except UPnPError as e:
+        die(f"공유기가 {host} 로의 포트포워딩을 거부합니다({e}). 기존 매핑은 그대로입니다. 관리 화면에서 {host} 로 수동으로 겁니다.")
+    igd.call("DeletePortMapping", **key)
+
+
 def main():
-    delete = "--delete" in sys.argv[1:]
+    args = sys.argv[1:]
+    delete = "--delete" in args
     location, router_ip = discover()
     igd = IGD(location)
-    host = local_ip_toward(router_ip)
+    host = args[args.index("--internal-ip") + 1] if "--internal-ip" in args else local_ip_toward(router_ip)
+    global SOURCE_IP
+    try:  # 대상 주소가 이 호스트에 있으면 그 주소에서 요청합니다
+        socket.socket(socket.AF_INET, socket.SOCK_DGRAM).bind((host, 0))
+        SOURCE_IP = host
+    except OSError:
+        SOURCE_IP = None
     print(f"공유기: {igd.name} ({router_ip}), 외부 IP: {igd.call('GetExternalIPAddress').get('NewExternalIPAddress')}")
-    print(f"내부 호스트: {host}\n")
+    print(f"내부 대상: {host}\n")
+    if not delete:
+        probe(igd, host)
 
     for ext, internal, desc in MAPPINGS:
         key = dict(NewRemoteHost="", NewExternalPort=ext, NewProtocol=PROTOCOL)

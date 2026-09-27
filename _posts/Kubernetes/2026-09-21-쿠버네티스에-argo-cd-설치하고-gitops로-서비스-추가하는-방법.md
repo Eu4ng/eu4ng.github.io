@@ -247,6 +247,9 @@ wget -O services/local-path-storage/local-path-storage.yaml \
 ```
 
 ```yaml
+# Rancher local-path-provisioner v0.0.37
+# 원본: https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.37/deploy/local-path-storage.yaml
+# PV 는 노드의 /opt/local-path-provisioner 아래에 디렉터리로 만들어집니다.
 resources:
   - local-path-storage.yaml
 

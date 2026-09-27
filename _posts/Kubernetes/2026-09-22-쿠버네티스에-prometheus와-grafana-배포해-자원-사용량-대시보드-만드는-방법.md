@@ -111,6 +111,9 @@ metrics-server:
 
 값은 의존 차트 이름 아래에 그 차트의 values를 그대로 적습니다. kubeadm 클러스터는 controller-manager, scheduler, etcd, kube-proxy의 지표 포트를 `127.0.0.1`에만 열어 두므로 수집 대상에서 빼지 않으면 Prometheus에 실패한 대상이 계속 남습니다. Prometheus 저장소는 기본값이 `emptyDir`라 PVC를 지정해야 파드가 다시 떠도 지표가 남고, `retention`이 보관 기간입니다. metrics-server는 kubeadm의 kubelet 인증서가 자체 서명이라 `--kubelet-insecure-tls` 없이는 노드 지표를 읽지 못합니다.
 
+> Grafana 볼륨은 기본 StorageClass(local-path)라 한 노드의 디스크에만 있습니다. worker 가 두 대 이상이고 Longhorn 이 있으면 Grafana 볼륨을 Longhorn 복제 PVC(`existingClaim: grafana-data-lh`)로 옮기고 배포 전략을 `RollingUpdate`(`maxSurge: 0`)로 바꿔, 노드가 죽어도 다른 노드에서 같은 데이터로 뜨게 할 수 있습니다([쿠버네티스에 Longhorn과 Patroni로 볼륨과 TimescaleDB 이중화하는 방법](/posts/54/)).
+{: .prompt-info }
+
 ```bash
 # 커밋하고 push
 git add services/monitoring
@@ -135,7 +138,7 @@ kubectl top nodes
 > Argo CD 웹 UI에서 `monitoring` Application이 **Synced**, **Healthy**로 표시된 뒤 10분 이상 **OutOfSync**로 되돌아가지 않는지 확인합니다. Helm 차트가 렌더링할 때마다 값이 바뀌는 자원이 있으면 self-heal이 반복되며, 이 글의 values는 그런 자원을 끄거나 미리 만든 Secret으로 대체했습니다.
 {: .prompt-warning }
 
-- **확인:** `kubectl top nodes`에 두 노드의 CPU·메모리 사용량과 백분율 표시. `kubectl get pvc -n monitoring`에 Prometheus 20Gi와 Grafana 2Gi PVC가 `Bound`. Headlamp의 클러스터 개요에 CPU·메모리 사용량 게이지 표시
+- **확인:** `kubectl top nodes`에 모든 노드의 CPU·메모리 사용량과 백분율 표시. `kubectl get pvc -n monitoring`에 Prometheus 20Gi와 Grafana 2Gi PVC가 `Bound`. Headlamp의 클러스터 개요에 CPU·메모리 사용량 게이지 표시
 
 ## 5. Grafana에서 사용량 보기
 
