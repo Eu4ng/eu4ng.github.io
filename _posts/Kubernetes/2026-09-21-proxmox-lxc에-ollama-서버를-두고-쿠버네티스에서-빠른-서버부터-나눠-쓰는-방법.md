@@ -417,22 +417,7 @@ spec:
 ```
 {: file="services/ollama/service.yaml" }
 
-서버는 모델을 하나만 올리므로, 라우터에 두 모델을 섞어 보내면 서버마다 모델을 바꿔 끼우느라 느려집니다. 다른 모델을 계속 쓰는 클라이언트는 라우터 대신 한 서버에 고정한 `ollama-cluster` 주소를 씁니다.
-
-```yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: ollama-cluster
-spec:
-  # 한 서버(pve01 CPU LXC)에 고정해 쓸 때의 주소입니다. 풀(ollama)과 달리 요청마다 서버가 바뀌지 않아 모델을 번갈아 올리지 않습니다
-  # (wiki-papers 의 판정 모델 등). 라우터를 거치지 않으므로 라우터는 이 요청을 모릅니다
-  type: ExternalName
-  externalName: ollama-cpu.[DOMAIN]
-  ports:
-    - { port: 11434 }
-```
-{: file="services/ollama/service-cluster.yaml" }
+클라이언트는 어느 서버(GPU·CPU)가 요청을 받는지 알 필요가 없습니다. 라우터 주소 하나만 쓰고, 서버를 늘리거나 바꿀 때도 라우터 설정만 고칩니다.
 
 `configMapGenerator` 는 `haproxy.cfg` 가 바뀌면 ConfigMap 이름 끝의 해시를 바꿔, 라우터 파드가 새 설정으로 다시 만들어지게 합니다.
 
@@ -441,7 +426,6 @@ spec:
 resources:
   - deployment.yaml
   - service.yaml
-  - service-cluster.yaml
 configMapGenerator:
   - name: ollama-router
     files:
@@ -507,7 +491,7 @@ done; wait
 kubectl -n ollama logs deploy/ollama-router --since=10m | grep api/generate
 ```
 
-클러스터 안의 클라이언트는 `http://ollama.ollama.svc.cluster.local:11434` 하나로 모든 서버를 쓰고, 한 서버에 고정할 때는 `http://ollama-cluster.ollama.svc.cluster.local:11434` 를 씁니다.
+클러스터 안의 클라이언트는 `http://ollama.ollama.svc.cluster.local:11434` 하나로 모든 서버를 씁니다.
 
 - **확인:** 통계의 모든 서버가 `UP`, `L7OK` 이고 `slim` 이 1 입니다. 모델 목록 요청은 로그에 `by-speed/` 뒤 첫 서버 이름으로 남고, 동시에 보낸 세 요청은 `by-speed/winpc-780m`, `by-speed/pve01-cpu`, `by-speed/pve01-610m` 으로 모두 다른 서버에 남습니다.
 
