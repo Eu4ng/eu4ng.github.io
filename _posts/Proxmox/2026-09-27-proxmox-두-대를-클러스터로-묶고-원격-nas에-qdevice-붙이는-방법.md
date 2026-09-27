@@ -7,7 +7,7 @@ tags: [proxmox, ansible, corosync, qdevice, tailscale, synology, homelab]
 permalink: /posts/53/
 ---
 
-Proxmox 서버를 한 대 더 들여 클러스터로 묶습니다. 노드가 두 대뿐이면 한 대가 꺼졌을 때 남은 노드가 과반(2표 중 2표)을 잃어 VM 을 시작하거나 설정을 바꿀 수 없고, 정전 뒤 한 대만 켜지면 자동 시작 게스트도 뜨지 않습니다. 그래서 집 밖의 NAS 에 corosync-qnetd 컨테이너를 두고 두 노드가 Tailscale 로 붙어 세 번째 표를 받게 합니다. 호스트 이름 정리, 클러스터 생성·합류, Tailscale, QDevice 연결까지 플레이북 하나로 진행하고, 여러 번 실행해도 결과가 같습니다. 공식 문서는 QDevice 서버를 일반 Debian 호스트에 패키지로 설치하지만, 이 글은 NAS 의 Docker(Portainer Swarm) 컨테이너에서 돌립니다.
+Proxmox 서버를 한 대 더 들여 클러스터로 묶습니다. 노드가 두 대뿐이면 한 대가 꺼졌을 때 남은 노드가 과반(2표 중 2표)을 잃어 VM 을 시작하거나 설정을 바꿀 수 없고, 정전 뒤 한 대만 켜지면 자동 시작 게스트도 뜨지 않습니다. 그래서 집 밖의 NAS 에 corosync-qnetd 컨테이너를 두고 두 노드가 Tailscale 로 붙어 세 번째 표를 받게 합니다. 두 노드는 집 LAN 을 tailnet 에 광고하는 서브넷 라우터도 맡아, 원격 NAS 와 LAN 의 VM 이 서로 닿게 합니다. 호스트 이름 정리, 클러스터 생성·합류, Tailscale 과 서브넷 라우팅, QDevice 연결까지 플레이북 하나로 진행하고, 여러 번 실행해도 결과가 같습니다. 공식 문서는 QDevice 서버를 일반 Debian 호스트에 패키지로 설치하지만, 이 글은 NAS 의 Docker(Portainer Swarm) 컨테이너에서 돌립니다.
 
 1. Tailscale 준비
 2. qnetd 이미지 만들기
@@ -29,7 +29,7 @@ Proxmox 서버를 한 대 더 들여 클러스터로 묶습니다. 노드가 두
 | Ansible | `13.1` (ansible-core `2.20`, ansible.posix 포함) |
 | corosync-qnetd | `3.0.3` (Debian trixie 패키지) |
 | NAS | Synology `DSM 7.2`, Container Manager + Portainer(Swarm), Tailscale 패키지 |
-| 작성 기준일 | `2026-09-27` |
+| 작성 기준일 | `2026-09-28` |
 
 다음 항목이 준비되어 있어야 합니다.
 
@@ -59,11 +59,19 @@ ssh-copy-id root@[PVE02_IP]
    /usr/syno/bin/synosystemctl restart pkgctl-Tailscale.service
    RC
    sudo chmod 0755 /usr/local/etc/rc.d/tailscale-tun.sh && sudo /usr/local/etc/rc.d/tailscale-tun.sh start
+
+   # Proxmox 노드가 광고하는 집 LAN 경로(5단계) 받기
+   sudo /var/packages/Tailscale/target/bin/tailscale set --accept-routes
    ```
-2. Tailscale 관리 화면의 **Access controls** 정책에 태그 소유자를 추가합니다.
+2. Tailscale 관리 화면의 **Access controls** 정책에 태그 소유자와 경로 자동 승인을 추가합니다. `autoApprovers` 가 있으면 `tag:homelab` 노드가 광고하는 집 LAN 경로를 관리 화면에서 따로 승인하지 않아도 됩니다.
    ```json
    "tagOwners": {
      "tag:homelab": ["autogroup:admin"]
+   },
+   "autoApprovers": {
+     "routes": {
+       "[LAN_CIDR]": ["tag:homelab"]
+     }
    },
    ```
 3. **Settings** > **Keys** 에서 인증 키를 만듭니다. **Reusable** 은 켜고 **Ephemeral** 은 끄고, **Tags** 에 `tag:homelab` 을 붙입니다.
@@ -222,7 +230,8 @@ proxmox_domain: [DOMAIN]                      # Proxmox 호스트의 FQDN 도메
 pve_cluster_name: homelab                     # pvecm create 로 만드는 클러스터 이름
 pve_qdevice_host: [NAS_TAILSCALE_IP]          # QDevice(corosync-qnetd) 주소: NAS 의 Tailscale IP
 pve_qdevice_ssh_port: 2222                    # qnetd 컨테이너의 sshd (NAS 의 22 는 DSM). pvecm qdevice setup 이 이 포트로 붙음
-tailscale_authkey_file: "{{ lookup('env', 'HOME') }}/.config/tailscale/authkey"   # 실행 PC 의 Tailscale 재사용 인증 키
+tailscale_lan_cidr: [LAN_CIDR]                # Proxmox 노드가 tailnet 에 광고하는 집 LAN(두 노드가 HA 서브넷 라우터). 원격 NAS 가 LAN 의 VM 에 닿는 경로
+tailscale_authkey_file: "{{ lookup('env', 'HOME') }}/.config/tailscale/authkey"   # 실행 PC 의 Tailscale 재사용 인증 키(태그 tag:homelab)
 ```
 {: file="group_vars/all.yml" }
 {% endraw %}
@@ -239,6 +248,8 @@ ansible-galaxy collection install ansible.posix
 ## 5. 플레이북 실행
 
 플레이북은 여섯 플레이입니다. 노드 준비(구독 없는 apt 저장소, 호스트 이름), 클러스터 만들기, 합류, Tailscale, QDevice, 확인 순서입니다. 합류와 QDevice 는 이미 되어 있으면 건너뜁니다.
+
+Tailscale 플레이는 로그인 뒤 두 노드를 서브넷 라우터로 만듭니다. IP 포워딩을 켜고 `tailscale set --advertise-routes` 로 집 LAN 을 광고합니다. 두 노드가 같은 대역을 광고하면 Tailscale 은 한 노드를 주 라우터로 쓰고 다른 노드를 대기로 둡니다. 원격 노드는 LAN 대역으로 가는 응답을 주 라우터로만 보내므로, VM 이 tailnet 으로 보내는 패킷은 자기 Proxmox 노드의 Tailscale IP 로 바꿔(마스커레이드) 내보냅니다. 이 규칙은 부팅 때 `tailscaled` 뒤에 적용되도록 systemd 유닛(`tailscale-lan-masquerade`)으로 둡니다.
 
 ```bash
 # 플레이북과 이름 바꾸기 스크립트 내려받기
@@ -404,6 +415,42 @@ ansible-playbook playbooks/pve-cluster.yml
         --hostname={{ inventory_hostname }} --accept-dns=false --accept-routes=false
       no_log: true
       when: (ts_status.stdout | default('{}') | from_json).BackendState | default('') != 'Running'
+    # 두 노드가 집 LAN 을 광고해(HA 서브넷 라우터) 원격 NAS 가 LAN 의 VM 에 닿게 합니다. 경로 승인은 Tailscale 관리 화면(또는 ACL autoApprovers)
+    - name: IP 포워딩
+      ansible.posix.sysctl:
+        name: net.ipv4.ip_forward
+        value: "1"
+        sysctl_file: /etc/sysctl.d/99-tailscale.conf
+    - name: 집 LAN 광고
+      ansible.builtin.command: tailscale set --advertise-routes={{ tailscale_lan_cidr }}
+      changed_when: false
+    # VM 이 tailnet 으로 보내는 패킷은 이 호스트의 Tailscale IP 로 바꿔 내보냅니다. 원격 노드는 LAN 대역을 주 라우터 한 대에서만
+    # 받아들이므로, 주 라우터가 아닌 호스트의 VM 이 LAN 주소 그대로 보내면 버려집니다
+    - name: LAN → tailnet 마스커레이드 (부팅 때 tailscaled 뒤에 적용)
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/tailscale-lan-masquerade.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Masquerade LAN traffic leaving through tailscale0 (proxmox-ansible pve-cluster.yml)
+          After=tailscaled.service
+          Wants=tailscaled.service
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/bin/sh -c 'iptables -t nat -C POSTROUTING -s {{ tailscale_lan_cidr }} -o tailscale0 -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s {{ tailscale_lan_cidr }} -o tailscale0 -j MASQUERADE'
+          ExecStop=/bin/sh -c 'iptables -t nat -D POSTROUTING -s {{ tailscale_lan_cidr }} -o tailscale0 -j MASQUERADE || true'
+
+          [Install]
+          WantedBy=multi-user.target
+      register: masq_unit
+    - name: 마스커레이드 켜기
+      ansible.builtin.systemd:
+        name: tailscale-lan-masquerade
+        enabled: true
+        state: "{{ 'restarted' if masq_unit is changed else 'started' }}"
+        daemon_reload: "{{ masq_unit is changed }}"
     - name: Tailscale IP
       ansible.builtin.command: tailscale ip -4
       register: ts_ip
@@ -582,9 +629,18 @@ ssh root@[PVE01_IP] 'pvecm status | sed -n "/Votequorum/,\$p"'
 
 # qnetd 쪽에서 본 연결 (두 노드가 붙어 있어야 함)
 ssh root@[PVE01_IP] 'ssh [NAS_TAILSCALE_IP] corosync-qnetd-tool -l'
+
+# 마스커레이드 규칙 (두 노드 모두)
+for h in [PVE01_IP] [PVE02_IP]; do ssh root@$h 'iptables -t nat -S POSTROUTING | grep tailscale0'; done
 ```
 
-- **확인:** `Expected votes: 3`, `Total votes: 3`, `Flags: Quorate Qdevice` 이고 멤버 목록에 `Qdevice` 가 한 줄 더 있습니다. qnetd 쪽에는 `Connected clients` 가 노드 수만큼 보입니다.
+```bash
+# NAS 에 ssh 로 붙어: 집 LAN 경로와 LAN 호스트 연결
+ip route show table 52 | grep [LAN_CIDR]
+timeout 3 bash -c '</dev/tcp/[PVE02_IP]/22' && echo open
+```
+
+- **확인:** `Expected votes: 3`, `Total votes: 3`, `Flags: Quorate Qdevice` 이고 멤버 목록에 `Qdevice` 가 한 줄 더 있습니다. qnetd 쪽에는 `Connected clients` 가 노드 수만큼 보입니다. 노드마다 `-A POSTROUTING -s [LAN_CIDR] -o tailscale0 -j MASQUERADE` 가 보이고, NAS 에는 `[LAN_CIDR] dev tailscale0` 경로가 있으며 LAN 호스트에 `open` 으로 연결됩니다.
 
 QDevice 가 멈췄을 때도 확인해 둡니다. Portainer 에서 qnetd 서비스의 복제본을 0 으로 줄이면 `pvecm status` 가 `Total votes: 2` 로 바뀌지만 `Quorate` 는 유지되고, VM 을 시작·정지할 수 있습니다. 다시 1로 늘리면 인증서가 볼륨에 남아 있어 따로 설정하지 않아도 `Total votes: 3` 으로 돌아옵니다.
 
@@ -608,11 +664,12 @@ QDevice 가 멈췄을 때도 확인해 둡니다. Portainer 에서 qnetd 서비�
 
 ## 마무리
 
-Proxmox 서버 두 대를 클러스터로 묶고 원격 NAS 의 qnetd 로 세 번째 표를 주어, 한 대가 꺼지거나 NAS 가 멈춰도 남은 쪽이 과반을 유지하게 했습니다. 새 서버를 더할 때는 인벤토리에 추가하고 같은 플레이북을 다시 실행합니다. 이 글은 Proxmox 관리 기능의 과반만 다룹니다. 노드마다 로컬 디스크를 쓰므로 게스트를 다른 노드로 자동으로 옮기는 Proxmox HA 는 설정하지 않았습니다.
+Proxmox 서버 두 대를 클러스터로 묶고 원격 NAS 의 qnetd 로 세 번째 표를 주어, 한 대가 꺼지거나 NAS 가 멈춰도 남은 쪽이 과반을 유지하게 했습니다. 두 노드는 집 LAN 을 tailnet 에 광고하는 서브넷 라우터가 되어, 원격 NAS 와 LAN 의 VM 이 Tailscale 로 서로 닿습니다. 새 서버를 더할 때는 인벤토리에 추가하고 같은 플레이북을 다시 실행합니다. 이 글은 Proxmox 관리 기능의 과반만 다룹니다. 노드마다 로컬 디스크를 쓰므로 게스트를 다른 노드로 자동으로 옮기는 Proxmox HA 는 설정하지 않았습니다.
 
 ## 참고 자료
 
 - [Proxmox VE - Cluster Manager (Corosync External Vote Support)](https://pve.proxmox.com/wiki/Cluster_Manager#_corosync_external_vote_support)
 - [corosync-qdevice (GitHub)](https://github.com/corosync/corosync-qdevice)
 - [Tailscale - Auth keys](https://tailscale.com/kb/1085/auth-keys)
+- [Tailscale - Subnet routers](https://tailscale.com/kb/1019/subnets)
 - [Tailscale - Synology](https://tailscale.com/kb/1131/synology)

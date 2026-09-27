@@ -10,7 +10,7 @@ tags: [proxmox, kubernetes, kubeadm, cloud-init, ssh]
 
 Proxmox 호스트에서 스크립트를 한 번 실행해 control plane 1대와 worker 1대로 이루어진 쿠버네티스 클러스터를 만듭니다. VM은 미리 만들어 둔 Ubuntu 템플릿을 복제해서 만들기 때문에, 설정을 바꿔 다시 배포할 때도 같은 스크립트만 다시 실행하면 됩니다.
 
-> 같은 일을 Ansible 플레이북으로 하는 방법은 [Proxmox에 Ansible로 kubeadm 쿠버네티스 클러스터 만드는 방법](/posts/46/)에 정리했습니다.
+> 같은 일을 Ansible 플레이북으로, control plane 두 대와 VIP 로 이중화해 하는 방법은 [Proxmox에 Ansible로 kubeadm 쿠버네티스 클러스터 만드는 방법](/posts/46/)에 정리했습니다.
 {: .prompt-info }
 
 1. 스크립트 내려받기
@@ -373,7 +373,7 @@ bash deploy-k8s.sh
 
 ## 마무리
 
-템플릿을 복제하는 스크립트 하나로 VM 생성부터 kubeadm 클러스터 구성까지 마치고, 내 PC에서 바로 접속했습니다. control plane이 한 대뿐인 구성이므로 고가용성이 필요한 운영 환경보다는 개인 서버와 학습 용도에 적합합니다. 웹 대시보드가 필요하다면 [쿠버네티스에 Headlamp 대시보드 설치하는 방법](/posts/34/)으로 이어서 진행합니다. 이 클러스터에서 GitHub 워크플로우를 실행하려면 [쿠버네티스에 GitHub Actions Self-hosted Runner 등록하는 방법](/posts/35/)을 참고합니다.
+템플릿을 복제하는 스크립트 하나로 VM 생성부터 kubeadm 클러스터 구성까지 마치고, 내 PC에서 바로 접속했습니다. control plane이 한 대뿐이고 VIP 엔드포인트 없이 만든 구성이므로 고가용성이 필요한 운영 환경보다는 개인 서버와 학습 용도에 적합합니다. 웹 대시보드가 필요하다면 [쿠버네티스에 Headlamp 대시보드 설치하는 방법](/posts/34/)으로 이어서 진행합니다. 이 클러스터에서 GitHub 워크플로우를 실행하려면 [쿠버네티스에 GitHub Actions Self-hosted Runner 등록하는 방법](/posts/35/)을 참고합니다.
 
 ## 참고 자료
 

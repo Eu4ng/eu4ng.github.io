@@ -1,0 +1,583 @@
+# kubeadm 쿠버네티스 클러스터(control plane N + worker N). group_vars 의 k8s_clusters 에서 -e k8s_cluster=<이름>(기본 hub)으로 고릅니다.
+# 노드마다 정한 Proxmox 노드의 템플릿(vm-template.yml)을 복제해 VM 을 만들고, containerd·kubeadm 을 설치해 VIP(kube-vip) 엔드포인트로
+# 클러스터를 구성한 뒤 kubeconfig 를 실행 PC 로 가져옵니다. 허브(hub)와 지역 엣지(daejeon 등)가 같은 절차로 만들어집니다.
+# etcd 세 번째 멤버(서울 NAS)는 k8s-gitops 의 scripts/etcd-witness-certs.sh 와 stacks/seoul/etcd-witness* 로 붙입니다.
+# VIP 없이 만든 기존 클러스터는 먼저 scripts/k8s-control-plane-endpoint.sh 로 옮깁니다. 그 다음은 Argo CD 설치·등록부터 GitOps 입니다.
+#   ansible-playbook playbooks/k8s-cluster.yml [-e k8s_cluster=daejeon]                    만들기 (여러 번 실행해도 됨)
+#   ansible-playbook playbooks/k8s-cluster.yml [-e k8s_cluster=...] -e k8s_state=absent    VM 삭제 (ID 와 이름이 모두 맞는 VM 만, yes 입력 후)
+# 노드 교체: 새 노드를 목록에 더해 합류시킨 뒤, 옛 노드 항목에 retire: true 를 붙여 다시 실행하면 drain → (control plane 은 kubeadm reset 으로
+# etcd 멤버 제거) → 노드 삭제 → VM 삭제 순으로 뺍니다. 다 빠지면 목록에서 지웁니다.
+---
+- name: VM 만들기
+  hosts: localhost
+  gather_facts: false
+  vars:
+    state: "{{ k8s_state | default('present') }}"
+    active: "{{ kc.nodes | rejectattr('retire', 'defined') | list }}"   # retire 가 붙은 옛 노드는 만들거나 고치지 않습니다
+  tasks:
+    # control plane 중 누가 클러스터를 만들고(init) 누가 합류할지는 다음 플레이가 admin.conf 유무로 정합니다
+    - name: 노드 목록을 인벤토리 그룹으로
+      ansible.builtin.add_host:
+        name: "{{ item.name }}"
+        groups: "{{ ['k8s_nodes', 'k8s_control_planes' if item.role == 'control-plane' else 'k8s_workers']
+                    + (['k8s_longhorn'] if item.longhorn_disk is defined else []) }}"
+        ansible_host: "{{ item.ip }}"
+        ansible_user: "{{ vm_template_user }}"
+        pve_host_ip: "{{ hostvars[item.pve | default(proxmox_node)].ansible_host }}"   # VM 이 있는 Proxmox 노드의 IP
+      loop: "{{ active }}"
+      loop_control: { label: "{{ item.name }}" }
+      changed_when: false
+      when: state == 'present'            # 삭제할 때는 뒤의 플레이가 노드에 접속하지 않게 그룹을 비워 둡니다
+    - name: 뺄 옛 노드
+      ansible.builtin.add_host:
+        name: "{{ item.name }}"
+        groups: [k8s_retire]
+        ansible_host: "{{ item.ip }}"
+        ansible_user: "{{ vm_template_user }}"
+        node_role: "{{ item.role }}"
+        node_vmid: "{{ item.vmid }}"
+        node_pve: "{{ item.pve | default(proxmox_node) }}"
+      loop: "{{ kc.nodes | selectattr('retire', 'defined') | list }}"
+      loop_control: { label: "{{ item.name }}" }
+      changed_when: false
+      when: state == 'present'
+
+    - name: 삭제
+      when: state == 'absent'
+      block:
+        - name: 확인 (-e k8s_confirm=yes 로 건너뜀)
+          ansible.builtin.pause:
+            prompt: "{{ kc.nodes | map(attribute='name') | join(', ') }} VM 과 디스크를 삭제합니다. 계속하려면 yes"
+          register: confirm
+          when: k8s_confirm | default('') != 'yes'
+        - name: 삭제 중단
+          ansible.builtin.meta: end_play
+          when: k8s_confirm | default('') != 'yes' and confirm.user_input | default('') != 'yes'
+        - name: 현재 VM 목록 (클러스터 전체)
+          community.proxmox.proxmox_vm_info:
+            type: qemu
+          register: vms
+        - name: VM 중지·삭제 (ID 와 이름이 모두 맞는 경우만)
+          community.proxmox.proxmox_kvm:
+            node: "{{ item.pve | default(proxmox_node) }}"
+            vmid: "{{ item.vmid }}"
+            name: "{{ item.name }}"
+            state: absent
+            force: true
+            timeout: 120
+          loop: "{{ kc.nodes }}"
+          loop_control: { label: "{{ item.name }}" }
+          when: vms.proxmox_vms | selectattr('vmid', 'equalto', item.vmid | int) | selectattr('name', 'equalto', item.name) | list | length > 0
+        - name: 끝
+          ansible.builtin.meta: end_play
+
+    - name: 템플릿 복제 (VM 이 없을 때만. VM 을 둘 노드의 템플릿에서)
+      community.proxmox.proxmox_kvm:
+        node: "{{ item.pve | default(proxmox_node) }}"
+        clone: "{{ vm_template_name }}"
+        vmid: "{{ hostvars[item.pve | default(proxmox_node)].vm_template_vmid | default(vm_template_vmid) }}"
+        newid: "{{ item.vmid }}"
+        name: "{{ item.name }}"
+        full: true
+        storage: "{{ vm_disk_storage }}"
+        format: raw
+        timeout: 300
+        state: present
+      loop: "{{ active }}"
+      loop_control: { label: "{{ item.name }}" }
+      register: clones
+    - name: 디스크 늘리기 (복제 직후 한 번)
+      community.proxmox.proxmox_disk:
+        vmid: "{{ item.item.vmid }}"
+        disk: scsi0
+        size: "{{ item.item.disk }}"
+        state: resized
+      loop: "{{ clones.results }}"
+      loop_control: { label: "{{ item.item.name }}" }
+      when: item.changed
+    - name: Longhorn 디스크 (scsi1, 없을 때만. 켜진 VM 에 핫플러그)
+      community.proxmox.proxmox_disk:
+        vmid: "{{ item.vmid }}"
+        disk: scsi1
+        storage: "{{ vm_disk_storage }}"
+        size: "{{ item.longhorn_disk }}"
+        format: raw
+        discard: "on"
+        ssd: true
+        state: present
+      loop: "{{ active | selectattr('longhorn_disk', 'defined') }}"
+      loop_control: { label: "{{ item.name }}" }
+    - name: VM 설정 맞추기 (코어·메모리·IP·DNS·자동 시작. 모듈 특성상 매번 changed 로 보고됨)
+      community.proxmox.proxmox_kvm:
+        node: "{{ item.pve | default(proxmox_node) }}"
+        vmid: "{{ item.vmid }}"
+        name: "{{ item.name }}"
+        cores: "{{ item.cores }}"
+        memory: "{{ item.memory }}"
+        onboot: true
+        ipconfig: { ipconfig0: "ip={{ item.ip }}/24,gw={{ ct_gateway }}" }
+        nameservers: "{{ k8s_nameservers }}"
+        update: true
+      loop: "{{ active }}"
+      loop_control: { label: "{{ item.name }}" }
+    - name: VM 시작
+      community.proxmox.proxmox_kvm:
+        node: "{{ item.pve | default(proxmox_node) }}"
+        vmid: "{{ item.vmid }}"
+        name: "{{ item.name }}"
+        state: started
+      loop: "{{ active }}"
+      loop_control: { label: "{{ item.name }}" }
+    - name: SSH 열릴 때까지 대기
+      ansible.builtin.wait_for:
+        host: "{{ item.ip }}"
+        port: 22
+        timeout: 300
+      loop: "{{ active }}"
+      loop_control: { label: "{{ item.name }}" }
+
+- name: 노드 공통 (containerd, kubeadm)
+  hosts: k8s_nodes
+  become: true
+  gather_facts: false
+  tasks:
+    - name: cloud-init 완료 대기 (첫 부팅의 패키지 갱신)
+      ansible.builtin.command: cloud-init status --wait
+      changed_when: false
+      failed_when: false
+    - name: 시간대
+      community.general.timezone:
+        name: "{{ timezone }}"
+    - name: swap 끄기 (fstab)
+      ansible.builtin.replace:
+        path: /etc/fstab
+        regexp: '^([^#].*\sswap\s.*)$'
+        replace: '# \1'
+    - name: swap 끄기 (지금)
+      ansible.builtin.command: swapoff -a
+      changed_when: false
+    - name: 커널 모듈 (자동 로드)
+      ansible.builtin.copy:
+        dest: /etc/modules-load.d/k8s.conf
+        mode: "0644"
+        content: "overlay\nbr_netfilter\n"
+    - name: 커널 모듈 (지금)
+      community.general.modprobe:
+        name: "{{ item }}"
+      loop: [overlay, br_netfilter]
+    - name: 커널 설정
+      ansible.posix.sysctl:
+        name: "{{ item }}"
+        value: "1"
+        sysctl_file: /etc/sysctl.d/k8s.conf
+      loop: [net.bridge.bridge-nf-call-iptables, net.bridge.bridge-nf-call-ip6tables, net.ipv4.ip_forward]
+    # 원격지(서울 NAS)의 etcd 투표자·DB 복제본은 tailnet 에 있습니다. VM 이 있는 Proxmox 노드가 Tailscale 서브넷 라우터이므로
+    # tailnet 대역을 그 노드로 보냅니다. VM 은 자기 노드와 함께 죽고 살므로 이 경로에는 이중화가 필요 없습니다
+    - name: tailnet 경로 (netplan)
+      ansible.builtin.copy:
+        dest: /etc/netplan/60-tailnet.yaml
+        mode: "0600"
+        content: |
+          network:
+            version: 2
+            ethernets:
+              eth0:
+                routes:
+                  - to: {{ tailscale_cidr }}
+                    via: {{ pve_host_ip }}
+      register: tailnet_netplan
+    - name: tailnet 경로 (지금. netplan apply 대신 경로만 바꿔 네트워크를 흔들지 않음)
+      ansible.builtin.shell: |
+        netplan generate
+        ip route replace {{ tailscale_cidr }} via {{ pve_host_ip }} dev eth0
+      when: tailnet_netplan.changed
+    # 지역 엣지: OpenThread Border Router 파드(hostNetwork)가 노드에 wpan0 을 만들고 eth0 로 RA 를 보냅니다
+    - name: OTBR 커널 설정 (IPv6 포워딩, RA 와 경로 광고 수용)
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/60-otbr.conf
+        mode: "0644"
+        content: |
+          # proxmox-ansible 의 playbooks/k8s-cluster.yml 이 만듭니다. OpenThread Border Router 파드(hostNetwork)용.
+          net.ipv6.conf.all.forwarding = 1
+          net.ipv6.conf.eth0.accept_ra = 2
+          net.ipv6.conf.eth0.accept_ra_rt_info_max_plen = 64
+      register: otbr_sysctl
+      when: kc.otbr_host | default(false)
+    - name: OTBR 커널 설정 적용
+      ansible.builtin.command: sysctl --system
+      when: otbr_sysctl is changed
+    - name: tun 모듈 (OTBR 의 wpan0)
+      ansible.builtin.copy:
+        dest: /etc/modules-load.d/tun.conf
+        mode: "0644"
+        content: "tun\n"
+      when: kc.otbr_host | default(false)
+    - name: tun 모듈 지금 로드
+      community.general.modprobe:
+        name: tun
+      when: kc.otbr_host | default(false)
+    - name: 패키지 저장소 키
+      ansible.builtin.get_url:
+        url: https://pkgs.k8s.io/core:/stable:/{{ k8s_version }}/deb/Release.key
+        dest: /etc/apt/keyrings/kubernetes-apt-keyring.asc
+        mode: "0644"
+    - name: 패키지 저장소
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/kubernetes.list
+        mode: "0644"
+        content: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.asc] https://pkgs.k8s.io/core:/stable:/{{ k8s_version }}/deb/ /\n"
+    - name: containerd·kubeadm 설치 (kubelet·kubeadm·kubectl 은 k8s_package_version 으로 고정)
+      ansible.builtin.apt:
+        name:
+          - containerd
+          - kubelet={{ k8s_package_version }}
+          - kubeadm={{ k8s_package_version }}
+          - kubectl={{ k8s_package_version }}
+        update_cache: true
+        allow_change_held_packages: true
+    - name: 버전 고정 (apt upgrade 로 올라가지 않게)
+      ansible.builtin.dpkg_selections:
+        name: "{{ item }}"
+        selection: hold
+      loop: [kubelet, kubeadm, kubectl]
+    - name: containerd 기본 설정 (없을 때만)
+      ansible.builtin.shell: mkdir -p /etc/containerd && containerd config default > /etc/containerd/config.toml
+      args:
+        creates: /etc/containerd/config.toml
+    - name: containerd 가 systemd cgroup 을 쓰게
+      ansible.builtin.replace:
+        path: /etc/containerd/config.toml
+        regexp: 'SystemdCgroup = false'
+        replace: 'SystemdCgroup = true'
+      register: cgroup
+    - name: containerd 재시작
+      ansible.builtin.service:
+        name: containerd
+        state: restarted
+      when: cgroup.changed
+
+# 이미 클러스터에 들어 있는(admin.conf 가 있는) control plane 을 기준 노드로 삼고, 나머지는 합류시킵니다.
+# 첫 control plane 을 새 VM 으로 바꿀 때도 새 클러스터를 만들지 않게 하기 위해서입니다
+- name: control plane 기준 노드 고르기
+  hosts: k8s_control_planes
+  become: true
+  gather_facts: false
+  tasks:
+    - name: admin.conf 가 있는지
+      ansible.builtin.stat:
+        path: /etc/kubernetes/admin.conf
+      register: admin_conf
+    - name: 기준 노드
+      ansible.builtin.set_fact:
+        k8s_leader: "{{ ((ansible_play_hosts | map('extract', hostvars) | selectattr('admin_conf.stat.exists') | map(attribute='inventory_hostname') | list) + ansible_play_hosts) | first }}"
+        k8s_cluster_exists: "{{ ansible_play_hosts | map('extract', hostvars) | selectattr('admin_conf.stat.exists') | list | length > 0 }}"
+      run_once: true
+    - name: VIP 가 이미 응답하는데 클러스터에 든 control plane 이 목록에 없으면 멈춤 (새 클러스터를 만들어 버리지 않게)
+      ansible.builtin.uri:
+        url: https://{{ kc.vip }}:6443/livez
+        validate_certs: false
+        timeout: 3
+      register: vip_probe
+      failed_when: vip_probe.status == 200 and not k8s_cluster_exists
+      delegate_to: localhost
+      become: false
+      run_once: true
+    - name: 기준 노드와 합류 노드 그룹
+      ansible.builtin.add_host:
+        name: "{{ item }}"
+        groups: ["{{ 'k8s_cp' if item == k8s_leader else 'k8s_cp_join' }}"]
+      loop: "{{ ansible_play_hosts }}"
+      changed_when: false
+      run_once: true
+
+- name: control plane
+  hosts: k8s_cp
+  become: true
+  gather_facts: false
+  tasks:
+    - name: 클러스터가 있는지
+      ansible.builtin.stat:
+        path: /etc/kubernetes/admin.conf
+      register: admin_conf
+    # 새 클러스터는 VIP 엔드포인트로 만듭니다. kube-vip 은 init 중에는 super-admin.conf 로 로컬 apiserver 에 붙어 VIP 를 잡습니다
+    - name: kube-vip (init 용)
+      ansible.builtin.include_tasks: tasks/kube-vip.yml
+      vars: { kube_vip_kubeconfig: /etc/kubernetes/super-admin.conf }
+      when: not admin_conf.stat.exists
+    - name: kubeadm init (처음 한 번)
+      ansible.builtin.command: >-
+        kubeadm init --control-plane-endpoint={{ kc.vip }}:6443 --upload-certs
+        --kubernetes-version=v{{ k8s_package_version.split('-')[0] }}
+        --pod-network-cidr={{ k8s_pod_cidr }} --apiserver-advertise-address={{ ansible_host }}
+      args:
+        creates: /etc/kubernetes/admin.conf
+    - name: kube-vip
+      ansible.builtin.include_tasks: tasks/kube-vip.yml
+    - name: ubuntu 계정 kubeconfig
+      ansible.builtin.shell: |
+        install -d -o {{ ansible_user }} -g {{ ansible_user }} /home/{{ ansible_user }}/.kube
+        install -o {{ ansible_user }} -g {{ ansible_user }} -m 0600 /etc/kubernetes/admin.conf /home/{{ ansible_user }}/.kube/config
+      changed_when: false
+    - name: Flannel (CNI)
+      ansible.builtin.command: >-
+        kubectl --kubeconfig /etc/kubernetes/admin.conf apply
+        -f https://github.com/flannel-io/flannel/releases/download/{{ k8s_flannel_version }}/kube-flannel.yml
+      register: flannel
+      changed_when: "'created' in flannel.stdout or 'configured' in flannel.stdout"
+    - name: control plane 에도 워크로드 허용 (노드가 적은 지역 엣지)
+      ansible.builtin.shell: |
+        kubectl --kubeconfig /etc/kubernetes/admin.conf taint nodes --all node-role.kubernetes.io/control-plane:NoSchedule- 2>&1 | grep -v "not found" || true
+      register: untaint
+      changed_when: "'untainted' in untaint.stdout"
+      when: kc.control_plane_workloads | default(false)
+    # 원격 etcd 멤버는 우리 쪽 연결을 NAT 뒤 주소(Proxmox 노드의 Tailscale IP)로 봅니다. 그 주소를 peer 인증서 SAN 에 넣어
+    # SAN 검사를 켠 채로 연결되게 합니다. 합류하는 control plane 은 kubeadm-config 의 이 값으로 인증서를 만듭니다
+    - name: etcd peer 인증서 SAN (kubeadm-config)
+      ansible.builtin.shell: |
+        set -e
+        export KUBECONFIG=/etc/kubernetes/admin.conf
+        kubectl -n kube-system get cm kubeadm-config -o jsonpath='{.data.ClusterConfiguration}' > /tmp/cluster-config.yaml
+        python3 - {{ k8s_etcd_peer_sans | join(' ') }} <<'PY'
+        import sys, yaml
+        c = yaml.safe_load(open("/tmp/cluster-config.yaml"))
+        local = c["etcd"]["local"]
+        sans = local.get("peerCertSANs") or []
+        add = [x for x in sys.argv[1:] if x not in sans]
+        if add:
+            local["peerCertSANs"] = sans + add
+            yaml.safe_dump(c, open("/tmp/cluster-config.yaml", "w"), sort_keys=False)
+            print("CHANGED")
+        PY
+        if grep -q . /tmp/cluster-config.yaml && [ -n "$(kubectl -n kube-system get cm kubeadm-config -o jsonpath='{.data.ClusterConfiguration}' | diff - /tmp/cluster-config.yaml)" ]; then
+          kubectl -n kube-system create cm kubeadm-config --from-file=ClusterConfiguration=/tmp/cluster-config.yaml \
+            --dry-run=client -o yaml | kubectl apply --server-side --force-conflicts -f - >/dev/null
+        fi
+      register: peer_sans
+      changed_when: "'CHANGED' in peer_sans.stdout"
+    # etcd 는 TLS 연결마다 인증서 파일을 다시 읽으므로 재시작하지 않아도 새 인증서를 씁니다
+    - name: etcd peer 인증서 (이 노드)
+      ansible.builtin.shell: |
+        set -e
+        crt=/etc/kubernetes/pki/etcd/peer.crt
+        missing=""
+        for ip in {{ k8s_etcd_peer_sans | join(' ') }}; do
+          openssl x509 -in $crt -noout -ext subjectAltName | grep -q "IP Address:$ip\b" || missing=1
+        done
+        [ -z "$missing" ] && exit 0
+        { printf 'apiVersion: kubeadm.k8s.io/v1beta4\nkind: InitConfiguration\nlocalAPIEndpoint:\n  advertiseAddress: %s\nnodeRegistration:\n  name: %s\n---\n' \
+            {{ ansible_host }} {{ inventory_hostname }}; cat /tmp/cluster-config.yaml; } > /tmp/kubeadm-local.yaml
+        mkdir -p /root/pki-backup && cp -a $crt /etc/kubernetes/pki/etcd/peer.key /root/pki-backup/
+        rm $crt /etc/kubernetes/pki/etcd/peer.key
+        kubeadm init phase certs etcd-peer --config /tmp/kubeadm-local.yaml
+        echo CHANGED
+      register: peer_cert
+      changed_when: "'CHANGED' in peer_cert.stdout"
+    # control plane 합류에 쓰는 인증서 키(2시간 유효)와 join 명령
+    - name: 인증서 업로드 (control plane 합류용)
+      ansible.builtin.shell: kubeadm init phase upload-certs --upload-certs | tail -1
+      register: cert_key
+      changed_when: false
+      when: groups['k8s_cp_join'] | default([]) | length > 0
+    - name: join 명령 만들기
+      ansible.builtin.command: kubeadm token create --print-join-command
+      register: join
+      changed_when: false
+    - name: kubeconfig 를 실행 PC 로
+      ansible.builtin.fetch:
+        src: /etc/kubernetes/admin.conf
+        dest: "{{ kc.kubeconfig }}"
+        flat: true
+
+- name: control plane 합류
+  hosts: k8s_cp_join
+  become: true
+  gather_facts: false
+  serial: 1                               # etcd 멤버는 한 대씩 늘립니다
+  tasks:
+    - name: kubeadm join --control-plane (처음 한 번)
+      ansible.builtin.command: >-
+        {{ hostvars[groups['k8s_cp'][0]].join.stdout }} --control-plane
+        --certificate-key {{ hostvars[groups['k8s_cp'][0]].cert_key.stdout }}
+        --apiserver-advertise-address {{ ansible_host }}
+      args:
+        creates: /etc/kubernetes/kubelet.conf
+    - name: kube-vip
+      ansible.builtin.include_tasks: tasks/kube-vip.yml
+    - name: ubuntu 계정 kubeconfig
+      ansible.builtin.shell: |
+        install -d -o {{ ansible_user }} -g {{ ansible_user }} /home/{{ ansible_user }}/.kube
+        install -o {{ ansible_user }} -g {{ ansible_user }} -m 0600 /etc/kubernetes/admin.conf /home/{{ ansible_user }}/.kube/config
+      changed_when: false
+    - name: control plane 에도 워크로드 허용 (합류하면 taint 가 다시 붙음)
+      ansible.builtin.shell: |
+        kubectl --kubeconfig /etc/kubernetes/admin.conf taint nodes {{ inventory_hostname }} node-role.kubernetes.io/control-plane:NoSchedule- 2>&1 | grep -v "not found" || true
+      register: untaint
+      changed_when: "'untainted' in untaint.stdout"
+      when: kc.control_plane_workloads | default(false)
+
+- name: worker 합류
+  hosts: k8s_workers
+  become: true
+  gather_facts: false
+  tasks:
+    - name: kubeadm join (처음 한 번)
+      ansible.builtin.command: "{{ hostvars[groups['k8s_cp'][0]].join.stdout }}"
+      args:
+        creates: /etc/kubernetes/kubelet.conf
+    # VIP 없이 만든 클러스터에서 합류한 worker 는 첫 control plane 주소를 들고 있습니다
+    - name: kubelet 이 VIP 로 붙게
+      ansible.builtin.replace:
+        path: /etc/kubernetes/kubelet.conf
+        regexp: 'server: https://.*:6443'
+        replace: 'server: https://{{ kc.vip }}:6443'
+      register: kubelet_conf
+    - name: kubelet 재시작
+      ansible.builtin.service:
+        name: kubelet
+        state: restarted
+      when: kubelet_conf.changed
+
+# Longhorn 은 볼륨을 iSCSI 로 붙입니다. multipathd 가 Longhorn 장치를 가로채지 않게 sd 장치를 제외합니다
+- name: Longhorn 준비 (longhorn_disk 가 있는 노드)
+  hosts: k8s_longhorn
+  become: true
+  gather_facts: false
+  vars:
+    longhorn_dev: /dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_drive-scsi1
+  tasks:
+    - name: 패키지
+      ansible.builtin.apt:
+        name: [open-iscsi, nfs-common]
+    - name: iscsid
+      ansible.builtin.systemd:
+        name: iscsid
+        enabled: true
+        state: started
+    - name: iscsi_tcp 모듈 (자동 로드)
+      ansible.builtin.copy:
+        dest: /etc/modules-load.d/longhorn.conf
+        mode: "0644"
+        content: "iscsi_tcp\n"
+    - name: iscsi_tcp 모듈 (지금)
+      community.general.modprobe:
+        name: iscsi_tcp
+    - name: multipath 에서 sd 장치 제외
+      ansible.builtin.blockinfile:
+        path: /etc/multipath.conf
+        marker: "# {mark} k8s-hub.yml: Longhorn"   # 플레이북 이름이 k8s-hub.yml 이던 때의 표식. 바꾸면 노드의 multipath.conf 에 같은 블록이 한 번 더 들어가므로 그대로 둡니다
+        block: |
+          blacklist {
+              devnode "^sd[a-z0-9]+"
+          }
+      register: multipath
+    - name: multipathd 재시작
+      ansible.builtin.systemd:
+        name: multipathd
+        state: restarted
+      when: multipath.changed
+    - name: Longhorn 디스크가 있는지
+      ansible.builtin.stat:
+        path: "{{ longhorn_dev }}"
+      register: longhorn_disk
+      failed_when: not longhorn_disk.stat.exists
+    - name: 파일시스템 (비어 있을 때만)
+      community.general.filesystem:
+        dev: "{{ longhorn_dev }}"
+        fstype: ext4
+    - name: /var/lib/longhorn 에 마운트
+      ansible.posix.mount:
+        path: /var/lib/longhorn
+        src: "{{ longhorn_dev }}"
+        fstype: ext4
+        opts: defaults,discard,nofail
+        state: mounted
+
+# 옛 노드 빼기 (목록에서 retire: true). 한 대씩, 기준 control plane 의 kubectl 로 비우고 지웁니다
+- name: 옛 노드 빼기
+  hosts: k8s_retire
+  become: true
+  gather_facts: false
+  serial: 1
+  vars:
+    leader: "{{ groups['k8s_cp'][0] }}"
+    kubectl: kubectl --kubeconfig /etc/kubernetes/admin.conf
+  tasks:
+    - name: 노드가 클러스터에 있는지
+      ansible.builtin.command: "{{ kubectl }} get node {{ inventory_hostname }} -o name"
+      delegate_to: "{{ leader }}"
+      register: node_exists
+      changed_when: false
+      failed_when: false
+    - name: 비우기 (drain)
+      ansible.builtin.command: "{{ kubectl }} drain {{ inventory_hostname }} --ignore-daemonsets --delete-emptydir-data --timeout=600s"
+      delegate_to: "{{ leader }}"
+      when: node_exists.rc == 0
+    - name: kubeadm reset (control plane 은 etcd 멤버도 제거)
+      ansible.builtin.command: kubeadm reset -f
+      when: node_exists.rc == 0
+      failed_when: false                 # VM 이 이미 꺼져 있으면 건너뜁니다
+    - name: 노드 삭제 (VIP 를 가졌던 control plane 을 뺐으면 VIP 가 넘어가는 동안 다시 시도)
+      ansible.builtin.command: "{{ kubectl }} delete node {{ inventory_hostname }}"
+      delegate_to: "{{ leader }}"
+      register: node_delete
+      until: node_delete.rc == 0
+      retries: 12
+      delay: 5
+      when: node_exists.rc == 0
+    # Longhorn 은 사라진 노드의 복제본·노드 기록을 스스로 지우지 않습니다. 복제본을 지우면 남은 노드에 바로 다시 만듭니다
+    - name: Longhorn 에서 이 노드의 복제본·노드 기록 지우기
+      ansible.builtin.shell: |
+        {{ kubectl }} -n longhorn-system get nodes.longhorn.io {{ inventory_hostname }} >/dev/null 2>&1 || exit 0
+        for r in $({{ kubectl }} -n longhorn-system get replicas.longhorn.io -o jsonpath='{range .items[?(@.spec.nodeID=="{{ inventory_hostname }}")]}{.metadata.name} {end}'); do
+          {{ kubectl }} -n longhorn-system delete replicas.longhorn.io $r
+        done
+        {{ kubectl }} -n longhorn-system patch nodes.longhorn.io {{ inventory_hostname }} --type merge -p '{"spec":{"allowScheduling":false}}'
+        {{ kubectl }} -n longhorn-system delete nodes.longhorn.io {{ inventory_hostname }} --ignore-not-found
+        echo CHANGED
+      delegate_to: "{{ leader }}"
+      register: longhorn_cleanup
+      changed_when: "'CHANGED' in longhorn_cleanup.stdout"
+    # local-path 볼륨은 노드에 묶여 있어 파드가 다른 노드로 못 갑니다. 무엇을 할지(PVC 를 지우고 새로 받을지)는 앱마다 달라 알려만 줍니다
+    - name: 이 노드에 묶인 local-path PVC
+      ansible.builtin.shell: |
+        {{ kubectl }} get pv -o jsonpath='{range .items[*]}{.spec.storageClassName} {.spec.nodeAffinity.required.nodeSelectorTerms[0].matchExpressions[0].values[0]} {.spec.claimRef.namespace}/{.spec.claimRef.name}{"\n"}{end}' \
+          | awk '$1=="local-path" && $2=="{{ inventory_hostname }}" {print $3}'
+      delegate_to: "{{ leader }}"
+      register: pinned
+      changed_when: false
+    - name: 남은 local-path PVC (지우고 새로 받을지 정해야 함)
+      ansible.builtin.debug:
+        msg: "{{ pinned.stdout_lines }}"
+      when: pinned.stdout_lines | length > 0
+    - name: VM 삭제 (ID 와 이름이 모두 맞을 때만)
+      community.proxmox.proxmox_kvm:
+        node: "{{ node_pve }}"
+        vmid: "{{ node_vmid }}"
+        name: "{{ inventory_hostname }}"
+        state: absent
+        force: true
+        timeout: 120
+      delegate_to: localhost
+      become: false
+
+- name: 확인
+  hosts: k8s_cp
+  become: true
+  gather_facts: false
+  tasks:
+    - name: 모든 노드 Ready 대기
+      ansible.builtin.command: kubectl --kubeconfig /etc/kubernetes/admin.conf wait --for=condition=Ready nodes --all --timeout=300s
+      changed_when: false
+    - name: 노드 목록
+      ansible.builtin.command: kubectl --kubeconfig /etc/kubernetes/admin.conf get nodes -o wide
+      register: nodes
+      changed_when: false
+    - name: 결과
+      ansible.builtin.debug:
+        msg: "{{ nodes.stdout_lines }}"
+    - name: 노드 수가 맞는지
+      ansible.builtin.assert:
+        that: (nodes.stdout_lines | length - 1) == (kc.nodes | rejectattr('retire', 'defined') | list | length)
+
+# 노드 이름·주소가 바뀌었을 수 있으므로 내부망 DNS 의 호스트·역할 이름(kubectl-<클러스터> 등)을 다시 만듭니다
+- import_playbook: lan-dns.yml

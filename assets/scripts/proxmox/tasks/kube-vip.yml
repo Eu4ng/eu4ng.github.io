@@ -1,0 +1,41 @@
+# control plane 노드의 kube-vip static pod. k8s-cluster.yml 이 include 합니다. kube_vip_services 가 켜진 클러스터는 LoadBalancer Service 에도 VIP 를 줍니다.
+# 서비스 VIP 는 control plane VIP 와 같은 리더 한 대가 모두 가집니다(--servicesElection 을 쓰지 않음). 서비스마다 리더를 뽑으면 여러 서비스가
+# 한 IP 를 나눠 쓸 때 그 IP 가 두 노드에 동시에 붙어 ARP 가 엇갈리고 연결이 끊깁니다.
+# kube-vip 은 매니페스트의 hostAliases(kubernetes → 127.0.0.1)로 자기 노드의 apiserver 에 붙어 리더를 뽑고, 리더가 VIP 를 ARP 로 알립니다.
+# kube_vip_kubeconfig: 기본은 admin.conf 사본(kube-vip.conf). 클러스터를 처음 만들 때만 super-admin.conf
+- name: kube-vip 용 kubeconfig (admin.conf 사본, API 주소는 이 노드의 apiserver)
+  ansible.builtin.shell: |
+    set -e
+    umask 077
+    sed "s#server: https://.*:6443#server: https://{{ ansible_host }}:6443#" /etc/kubernetes/admin.conf > /etc/kubernetes/kube-vip.conf.new
+    if cmp -s /etc/kubernetes/kube-vip.conf.new /etc/kubernetes/kube-vip.conf; then rm /etc/kubernetes/kube-vip.conf.new
+    else mv /etc/kubernetes/kube-vip.conf.new /etc/kubernetes/kube-vip.conf; echo CHANGED; fi
+  register: kube_vip_conf
+  changed_when: "'CHANGED' in kube_vip_conf.stdout"
+  when: kube_vip_kubeconfig is not defined
+- name: kube-vip 매니페스트 만들기
+  ansible.builtin.shell: |
+    set -e
+    IMG=ghcr.io/kube-vip/kube-vip:{{ k8s_kube_vip_version }}
+    ctr -n k8s.io image pull "$IMG" >/dev/null
+    ctr -n k8s.io run --rm --net-host "$IMG" kube-vip-manifest-$$ /kube-vip manifest pod \
+      --interface {{ k8s_vip_interface }} --address {{ kc.vip }} --controlplane --arp --leaderElection \
+      {{ '--services' if kc.kube_vip_services | default(false) else '' }} \
+      --k8sConfigPath {{ kube_vip_kubeconfig | default('/etc/kubernetes/kube-vip.conf') }} </dev/null
+  register: kube_vip_manifest
+  changed_when: false
+- name: kube-vip static pod
+  ansible.builtin.copy:
+    dest: /etc/kubernetes/manifests/kube-vip.yaml
+    content: "{{ kube_vip_manifest.stdout }}\n"
+    mode: "0600"
+- name: VIP 응답 대기
+  ansible.builtin.uri:
+    url: https://{{ kc.vip }}:6443/livez
+    validate_certs: false
+    return_content: true
+  register: vip_live
+  until: vip_live.status == 200
+  retries: 60
+  delay: 3
+  when: kube_vip_kubeconfig is not defined

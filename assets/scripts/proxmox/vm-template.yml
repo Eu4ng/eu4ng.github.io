@@ -8,7 +8,7 @@
   vars:
     image_path: /var/lib/vz/template/iso/{{ vm_template_image_url | basename }}
     snippet_name: ubuntu-cloud-vendor.yaml
-    host_key: /root/.ssh/id_rsa             # 호스트에서 VM 으로 접속할 때 쓰는 키 (k3s-edge 등은 실행 PC 키를 씀)
+    host_key: /root/.ssh/id_rsa             # 호스트에서 VM 으로 접속할 때 쓰는 키 (k8s-cluster.yml 등은 실행 PC 키를 씀)
   tasks:
     - name: 템플릿이 이미 있는지
       ansible.builtin.command: qm config {{ vm_template_vmid }}

@@ -147,6 +147,42 @@
         --hostname={{ inventory_hostname }} --accept-dns=false --accept-routes=false
       no_log: true
       when: (ts_status.stdout | default('{}') | from_json).BackendState | default('') != 'Running'
+    # 두 노드가 집 LAN 을 광고해(HA 서브넷 라우터) 원격 NAS 가 LAN 의 VM 에 닿게 합니다. 경로 승인은 Tailscale 관리 화면(또는 ACL autoApprovers)
+    - name: IP 포워딩
+      ansible.posix.sysctl:
+        name: net.ipv4.ip_forward
+        value: "1"
+        sysctl_file: /etc/sysctl.d/99-tailscale.conf
+    - name: 집 LAN 광고
+      ansible.builtin.command: tailscale set --advertise-routes={{ tailscale_lan_cidr }}
+      changed_when: false
+    # VM 이 tailnet 으로 보내는 패킷은 이 호스트의 Tailscale IP 로 바꿔 내보냅니다. 원격 노드는 LAN 대역을 주 라우터 한 대에서만
+    # 받아들이므로, 주 라우터가 아닌 호스트의 VM 이 LAN 주소 그대로 보내면 버려집니다
+    - name: LAN → tailnet 마스커레이드 (부팅 때 tailscaled 뒤에 적용)
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/tailscale-lan-masquerade.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Masquerade LAN traffic leaving through tailscale0 (proxmox-ansible pve-cluster.yml)
+          After=tailscaled.service
+          Wants=tailscaled.service
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/bin/sh -c 'iptables -t nat -C POSTROUTING -s {{ tailscale_lan_cidr }} -o tailscale0 -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s {{ tailscale_lan_cidr }} -o tailscale0 -j MASQUERADE'
+          ExecStop=/bin/sh -c 'iptables -t nat -D POSTROUTING -s {{ tailscale_lan_cidr }} -o tailscale0 -j MASQUERADE || true'
+
+          [Install]
+          WantedBy=multi-user.target
+      register: masq_unit
+    - name: 마스커레이드 켜기
+      ansible.builtin.systemd:
+        name: tailscale-lan-masquerade
+        enabled: true
+        state: "{{ 'restarted' if masq_unit is changed else 'started' }}"
+        daemon_reload: "{{ masq_unit is changed }}"
     - name: Tailscale IP
       ansible.builtin.command: tailscale ip -4
       register: ts_ip
