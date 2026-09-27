@@ -7,7 +7,7 @@ tags: [kubernetes, argo-cd, gitops, helm, github]
 permalink: /posts/36/
 ---
 
-GitHub에 매니페스트 저장소를 만들고, control plane에서 스크립트를 실행해 **Argo CD**를 설치하고 저장소를 연결한 뒤, 저장소에 폴더를 추가해 첫 서비스를 배포합니다. 공식 문서처럼 서비스마다 Application을 만들지 않고, 저장소의 `services/` 아래 폴더마다 Application을 자동으로 만들어 주는 **ApplicationSet**을 등록하므로 이후에는 폴더를 추가하고 push하는 것이 서비스 추가의 전부입니다.
+GitHub에 매니페스트 저장소를 만들고, control plane에서 스크립트를 실행해 **[Argo CD](/posts/58/)**를 설치하고 저장소를 연결한 뒤, 저장소에 폴더를 추가해 첫 서비스를 배포합니다. 공식 문서처럼 서비스마다 Application을 만들지 않고, 저장소의 `services/` 아래 폴더마다 Application을 자동으로 만들어 주는 **ApplicationSet**을 등록하므로 이후에는 폴더를 추가하고 push하는 것이 서비스 추가의 전부입니다.
 
 1. GitOps 저장소 만들기
 2. 스크립트 내려받기
@@ -247,6 +247,9 @@ wget -O services/local-path-storage/local-path-storage.yaml \
 ```
 
 ```yaml
+# Rancher local-path-provisioner v0.0.37
+# 원본: https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.37/deploy/local-path-storage.yaml
+# PV 는 노드의 /opt/local-path-provisioner 아래에 디렉터리로 만들어집니다.
 resources:
   - local-path-storage.yaml
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# 엣지(k3s) 클러스터를 허브의 Argo CD 에 원격 클러스터로 등록합니다.
-# proxmox-ansible 의 playbooks/k3s-edge.yml 이 실행 PC 에 가져온 kubeconfig 를 control plane 에 복사한 뒤,
+# 엣지 클러스터를 허브의 Argo CD 에 원격 클러스터로 등록합니다.
+# proxmox-ansible 의 playbooks/k8s-cluster.yml 이 실행 PC 에 가져온 엣지 kubeconfig 를 허브 control plane 에 복사한 뒤,
 # control plane 에서 실행합니다: bash register-edge-cluster.sh [SITE] [EDGE_KUBECONFIG]
 # Argo CD API 서버에 로그인하지 않고 CLI 의 core 모드로 쿠버네티스 API 에 직접 쓰므로 비밀번호가 필요 없습니다.
 
@@ -9,7 +9,6 @@ set -euo pipefail
 
 # ---------- 환경에 맞게 수정 ----------
 ARGOCD_NAMESPACE=argocd
-EDGE_CONTEXT=default          # 엣지 kubeconfig 의 컨텍스트 이름 (k3s 기본값)
 ARGOCD_BIN=$HOME/.local/bin/argocd
 # --------------------------------------
 
@@ -25,6 +24,23 @@ SITE=${1:-}
 EDGE_KUBECONFIG=${2:-}
 [[ "$SITE" =~ ^[a-z0-9-]+$ ]] || die "사용법: bash register-edge-cluster.sh [SITE] [EDGE_KUBECONFIG]  (SITE 는 소문자·숫자·하이픈)"
 [ -r "$EDGE_KUBECONFIG" ] || die "엣지 kubeconfig 파일이 없습니다: $EDGE_KUBECONFIG"
+# kubeadm 클러스터끼리는 kubeconfig 의 클러스터·사용자·컨텍스트 이름이 같아(kubernetes, kubernetes-admin) 병합하면 한쪽이 가려집니다.
+# 엣지 kubeconfig 를 지역 이름으로 바꾼 사본을 만들어 씁니다. 원래 파일은 건드리지 않습니다.
+python3 - "$EDGE_KUBECONFIG" "$SITE" "$TMP_DIR/edge.yaml" <<'PY'
+import sys, yaml
+src, site, dst = sys.argv[1:]
+c = yaml.safe_load(open(src))
+ctx = next(x for x in c["contexts"] if x["name"] == c["current-context"])
+cl = next(x for x in c["clusters"] if x["name"] == ctx["context"]["cluster"])
+us = next(x for x in c["users"] if x["name"] == ctx["context"]["user"])
+cl["name"], us["name"] = f"{site}-cluster", f"{site}-admin"
+out = {"apiVersion": "v1", "kind": "Config", "clusters": [cl], "users": [us],
+       "contexts": [{"name": site, "context": {"cluster": cl["name"], "user": us["name"]}}], "current-context": site}
+yaml.safe_dump(out, open(dst, "w"))
+PY
+chmod 600 "$TMP_DIR/edge.yaml"
+EDGE_KUBECONFIG=$TMP_DIR/edge.yaml
+EDGE_CONTEXT=$SITE
 kubectl get nodes >/dev/null || die "kubectl 로 허브 클러스터에 접근할 수 없습니다."
 kubectl get namespace "$ARGOCD_NAMESPACE" >/dev/null || die "네임스페이스 $ARGOCD_NAMESPACE 가 없습니다. Argo CD 를 먼저 설치하세요."
 HUB_CONTEXT=$(kubectl config current-context)

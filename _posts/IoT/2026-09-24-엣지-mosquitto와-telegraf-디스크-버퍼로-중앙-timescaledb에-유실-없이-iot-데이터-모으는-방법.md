@@ -1,16 +1,16 @@
 ---
 layout: post
 title: 엣지 Mosquitto와 Telegraf 디스크 버퍼로 중앙 TimescaleDB에 유실 없이 IoT 데이터 모으는 방법
-description: 지역(엣지) 클러스터의 MQTT 브로커와 Telegraf 가 기기 데이터를 받아 허브의 TimescaleDB 로 보내고, 허브가 끊긴 동안은 디스크 버퍼에 쌓았다가 원래 시각 그대로 밀어 넣는 허브-스포크 수집 파이프라인을 GitOps 로 만드는 방법을 정리했습니다.
+description: 지역(엣지) 클러스터의 MQTT 브로커와 Telegraf 가 기기 데이터를 받아 지역 TimescaleDB 와 허브 TimescaleDB 에 함께 쓰고, DB 가 끊긴 동안은 디스크 버퍼에 쌓았다가 원래 시각 그대로 밀어 넣는 허브-스포크 수집 파이프라인을 GitOps 로 만드는 방법을 정리했습니다.
 author: Eu4ng
 tags: [iot, mqtt, mosquitto, telegraf, timescaledb, postgresql, grafana, kubernetes, argo-cd, gitops, edge]
 permalink: /posts/43/
 ---
 
-허브 클러스터에 **TimescaleDB**를 두고, 엣지 클러스터에 **Mosquitto**(MQTT 브로커)와 **Telegraf**(수집기)를 두어 기기 메시지가 `엣지 브로커 → 엣지 Telegraf → 허브 TimescaleDB`로 흐르게 합니다. Telegraf 는 디스크 버퍼를 켜서 허브가 안 닿는 동안 파드가 재시작되더라도 데이터를 잃지 않고, 페이로드의 시각을 써서 뒤늦게 도착해도 원래 시각으로 적재됩니다. 모든 기기 값은 수집기와 관계없이 `readings` 테이블 하나에 "행 하나 = 기기 하나의 속성 하나" 로 넣고, 지역·프로토콜·수집기·기기를 컬럼으로 두어 여러 지역과 여러 종류의 기기가 한 테이블에 섞여도 구분되도록 했습니다. 기기로 간 제어 명령은 `events` 테이블에 따로 남깁니다. 매니페스트는 [이전 글](/posts/42/)에서 만든 `iot/` 폴더 규칙(`iot/hub/`, `iot/edge/`, `iot/clusters/[SITE]/`)을 따릅니다.
+허브 클러스터와 엣지 클러스터에 각각 **TimescaleDB**를 두고, 엣지 클러스터에 **Mosquitto**(MQTT 브로커)와 **Telegraf**(수집기)를 두어 기기 메시지가 `엣지 브로커 → 엣지 Telegraf → 지역 TimescaleDB, 허브 TimescaleDB`로 흐르게 합니다. Telegraf 는 같은 행을 지역 DB(첫 번째 출력)와 허브 DB(두 번째 출력)에 쓰므로 [허브나 인터넷이 끊겨도](/posts/62/) 지역에서는 기록이 이어집니다. 출력마다 디스크 버퍼를 따로 두어 한쪽 DB 가 안 닿는 동안 파드가 재시작되더라도 데이터를 잃지 않고, 페이로드의 시각을 써서 뒤늦게 도착해도 원래 시각으로 적재됩니다. 모든 기기 값은 수집기와 관계없이 `readings` 테이블 하나에 "행 하나 = 기기 하나의 속성 하나" 로 넣고, 지역·프로토콜·수집기·기기를 컬럼으로 두어 여러 지역과 여러 종류의 기기가 한 테이블에 섞여도 구분되도록 했습니다. 기기로 간 제어 명령은 `events` 테이블에 따로 남깁니다. 매니페스트는 [이전 글](/posts/42/)에서 만든 `iot/` 폴더 규칙(`iot/hub/`, `iot/edge/`, `iot/clusters/[SITE]/`)을 따릅니다.
 
 1. 비밀 값 만들기
-2. 허브: TimescaleDB 와 Grafana 데이터소스
+2. 허브: Grafana 데이터소스
 3. 엣지: Mosquitto 와 Telegraf 베이스
 4. 지역 오버레이 추가와 배포
 5. 테스트 메시지로 확인
@@ -27,24 +27,26 @@ permalink: /posts/43/
 | 항목 | 버전 |
 | :--- | :--- |
 | 허브 Kubernetes | `v1.37` (kubeadm) |
-| 엣지 Kubernetes | `v1.36` (k3s) |
+| 엣지 Kubernetes | `v1.37` (kubeadm, 기본 StorageClass Longhorn) |
 | Argo CD | `v3.5.3` |
 | eclipse-mosquitto | `2.0.22` |
 | telegraf | `1.40.1` |
-| timescale/timescaledb | `2.30.1-pg17` |
+| timescale/timescaledb-ha | `pg17.11-ts2.30.1` (Patroni) |
 | Grafana | `13.2` (kube-prometheus-stack `91.4.1`) |
 | 작성 기준일 | `2026-09-24` |
 
 다음 항목이 준비되어 있어야 합니다.
 
-- Argo CD 에 원격 클러스터로 등록된 엣지 클러스터와 `iot/` 폴더 규칙, ApplicationSet `iot-hub`·`iot-edge` ([Proxmox에 Ansible로 k3s 엣지 클러스터 만들고 Argo CD 원격 클러스터로 등록하는 방법](/posts/42/))
+- Argo CD 에 원격 클러스터로 등록된 엣지 클러스터와 `iot/` 폴더 규칙, ApplicationSet `iot-hub`·`iot-edge` ([Proxmox에 Ansible로 kubeadm 엣지 클러스터 만들고 Argo CD 원격 클러스터로 등록하는 방법](/posts/42/))
+- 허브 DB(`iot/hub/timescaledb`, TimescaleDB Patroni 클러스터) ([쿠버네티스에 Longhorn과 Patroni로 볼륨과 TimescaleDB 이중화하는 방법](/posts/54/)). 두 DB 가 쓰는 `iot`·`grafana` 계정 비밀번호 Secret 은 이 글 1단계 스크립트가 만듭니다(이미 있으면 건너뜀).
+- 지역 DB(`iot/clusters/[SITE]/timescaledb`) ([지역 엣지에 TimescaleDB와 Grafana를 두어 인터넷 없이도 기록하고 보는 방법](/posts/56/)). 지역 DB 보다 Telegraf 를 먼저 배포하면 지역 DB 몫은 디스크 버퍼에 쌓였다가 DB 가 뜨면 들어갑니다.
 - 허브의 kube-prometheus-stack(Grafana) ([쿠버네티스에 Prometheus와 Grafana 배포해 자원 사용량 대시보드 만드는 방법](/posts/39/))
-- control plane 에 엣지 kubeconfig 파일(`k3s-[SITE].yaml`)
-- 허브 노드에 TimescaleDB 20Gi, 엣지 노드에 버퍼 2Gi 를 둘 디스크
+- 허브 control plane 에 엣지 kubeconfig 파일(`k8s-[SITE].yaml`)
+- 엣지의 서비스 VIP(`[EDGE_SERVICE_VIP]`, kube-vip 가 LoadBalancer Service 에 붙이는 LAN 주소)와 허브 control plane VIP(`[HUB_VIP]`)
 
 ## 1. 비밀 값 만들기
 
-DB 비밀번호와 브로커 계정은 GitOps 저장소에 넣지 않고 두 클러스터에 Secret 으로 미리 만듭니다. 스크립트가 허브에는 TimescaleDB 비밀번호와 Grafana 읽기 계정 비밀번호를, 엣지에는 브로커 계정 파일(`mosquitto_passwd` 해시)과 클라이언트 자격 증명을 만듭니다. 브로커 계정은 `zigbee2mqtt`, `telegraf`, `homeassistant`, `devices`(ESPHome 같은 LAN 기기용) 네 개이고, 해시 파일은 control plane 에 docker 가 없으므로 엣지에서 일회용 파드로 만듭니다.
+DB 비밀번호와 브로커 계정은 GitOps 저장소에 넣지 않고 두 클러스터에 Secret 으로 미리 만듭니다. 스크립트가 허브에는 TimescaleDB 비밀번호와 Grafana 읽기 계정 비밀번호를, 엣지에는 브로커 계정 파일(`mosquitto_passwd` 해시)과 클라이언트 자격 증명, 지역 DB·지역 Grafana 의 Secret 을 만듭니다. DB 계정 비밀번호는 허브 DB 와 지역 DB 가 같습니다. 브로커 계정은 `zigbee2mqtt`, `telegraf`, `homeassistant`, `devices`(ESPHome·서버의 Telegraf 같은 LAN 기기용) 네 개이고, 해시 파일은 control plane 에 docker 가 없으므로 엣지에서 일회용 파드로 만듭니다.
 
 ```bash
 # control plane 에서 스크립트 내려받기
@@ -58,14 +60,16 @@ wget https://eu4ng.github.io/assets/scripts/iot/create-iot-secrets.sh
 #!/usr/bin/env bash
 #
 # IoT 스택이 쓰는 비밀 값(Secret)을 허브와 엣지 클러스터에 만듭니다. GitOps 저장소에는 비밀 값을 넣지 않으므로 폴더를 push 하기 전에 실행합니다.
+# 엣지에는 지역 DB(TimescaleDB)와 지역 Grafana 도 있습니다. DB 계정(iot, grafana)의 비밀번호는 허브 DB 와 지역 DB 가 같습니다.
 # 허브에 kubectl 로 접근할 수 있고 엣지 kubeconfig 가 있는 곳(control plane)에서 실행합니다: bash create-iot-secrets.sh [EDGE_KUBECONFIG]
 # 비밀번호는 실행 중에 입력받습니다. 이미 있는 Secret 은 건너뜁니다(비밀번호를 바꾸려면 Secret 을 지우고 다시 실행).
+# 엣지 Grafana 관리자 계정은 허브의 monitoring/grafana-admin 을 복사합니다(Prometheus·Grafana 글에서 만듦).
 
 set -euo pipefail
 
 # ---------- 환경에 맞게 수정 ----------
 MOSQUITTO_IMAGE=eclipse-mosquitto:2.0.22   # 계정 파일(해시)을 만들 때 쓰는 이미지. 배포하는 버전과 맞춥니다
-MQTT_USERS=(zigbee2mqtt telegraf homeassistant devices)   # 브로커 계정. devices 는 ESPHome 같은 LAN 기기용
+MQTT_USERS=(zigbee2mqtt telegraf homeassistant devices)   # 브로커 계정. devices 는 ESPHome·서버의 Telegraf 같은 LAN 기기용
 # --------------------------------------
 
 log() { echo -e "\n\033[1;32m==>\033[0m $*"; }
@@ -131,7 +135,34 @@ if secret_exists "${EDGE[@]}" zigbee2mqtt zigbee2mqtt-credentials; then echo "  
 fi
 if secret_exists "${EDGE[@]}" telegraf telegraf-credentials; then echo "  telegraf/telegraf-credentials 있음, 건너뜀"; else
   kubectl "${EDGE[@]}" -n telegraf create secret generic telegraf-credentials \
-    --from-literal=MQTT_USER=telegraf --from-literal=MQTT_PASSWORD="${MQTT_PASSWORD[telegraf]}" --from-literal=HUB_PG_PASSWORD="$PG_PASSWORD"
+    --from-literal=MQTT_USER=telegraf --from-literal=MQTT_PASSWORD="${MQTT_PASSWORD[telegraf]}" \
+    --from-literal=HUB_PG_PASSWORD="$PG_PASSWORD" --from-literal=LOCAL_PG_PASSWORD="$PG_PASSWORD"
+fi
+# 지역 DB 가 생기기 전에 만든 Secret 에는 LOCAL_PG_PASSWORD 가 없으므로 그 키만 더합니다
+if [ -z "$(kubectl "${EDGE[@]}" -n telegraf get secret telegraf-credentials -o jsonpath='{.data.LOCAL_PG_PASSWORD}')" ]; then
+  printf '{"stringData":{"LOCAL_PG_PASSWORD":"%s"}}' "$PG_PASSWORD" \
+    | kubectl "${EDGE[@]}" -n telegraf patch secret telegraf-credentials --type merge --patch-file=/dev/stdin >/dev/null
+  echo "  telegraf/telegraf-credentials 에 LOCAL_PG_PASSWORD 추가"
+fi
+
+# ---------- 6. 엣지: 지역 DB·Grafana ----------
+log "엣지: timescaledb-credentials, grafana-timescale, grafana-admin"
+for ns in timescaledb grafana; do ensure_ns "${EDGE[@]}" "$ns"; done
+if secret_exists "${EDGE[@]}" timescaledb timescaledb-credentials; then echo "  timescaledb/timescaledb-credentials 있음, 건너뜀"; else
+  kubectl "${EDGE[@]}" -n timescaledb create secret generic timescaledb-credentials \
+    --from-literal=POSTGRES_PASSWORD="$PG_PASSWORD" --from-literal=GRAFANA_PASSWORD="$GRAFANA_PASSWORD"
+fi
+if secret_exists "${EDGE[@]}" grafana grafana-timescale; then echo "  grafana/grafana-timescale 있음, 건너뜀"; else
+  kubectl "${EDGE[@]}" -n grafana create secret generic grafana-timescale --from-literal=TIMESCALE_PASSWORD="$GRAFANA_PASSWORD"
+fi
+if secret_exists "${EDGE[@]}" grafana grafana-admin; then echo "  grafana/grafana-admin 있음, 건너뜀"; else
+  kubectl "${HUB[@]}" -n monitoring get secret grafana-admin -o json | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+print(json.dumps({"apiVersion": "v1", "kind": "Secret", "type": d["type"],
+                  "metadata": {"name": "grafana-admin", "namespace": "grafana"}, "data": d["data"]}))' \
+    | kubectl "${EDGE[@]}" apply -f - >/dev/null
+  echo "  grafana/grafana-admin: 허브 monitoring/grafana-admin 복사"
 fi
 
 unset PG_PASSWORD GRAFANA_PASSWORD MQTT_PASSWORD Z2M_TOKEN passwd_file
@@ -143,121 +174,17 @@ log "완료. homeassistant 계정 비밀번호는 Home Assistant 의 MQTT 통합
 
 ```bash
 # 비밀번호 7개를 입력받아 Secret 생성 (이미 있는 Secret 은 건너뜀)
-bash create-iot-secrets.sh k3s-[SITE].yaml
+bash create-iot-secrets.sh k8s-[SITE].yaml
 ```
 
 > 비밀번호는 다른 곳에 안전하게 적어 둡니다. `homeassistant` 계정은 뒤에 Home Assistant 의 MQTT 통합 화면에서, `devices` 계정은 LAN 기기 설정에서 직접 입력하고, TimescaleDB 비밀번호는 Secret 을 지우고 다시 만들어도 이미 초기화된 DB 에는 반영되지 않습니다.
 {: .prompt-warning }
 
-- **확인:** 허브 `kubectl -n timescaledb get secret timescaledb-credentials`, `kubectl -n monitoring get secret grafana-timescale`, 엣지 `kubectl --kubeconfig k3s-[SITE].yaml get secret -A | grep -E 'mosquitto-passwd|credentials'` 에 Secret 5개가 보입니다.
+- **확인:** 허브 `kubectl -n timescaledb get secret timescaledb-credentials`, `kubectl -n monitoring get secret grafana-timescale` 에 Secret 2개, 엣지 `kubectl --kubeconfig k8s-[SITE].yaml get secret -A | grep -E 'mosquitto-passwd|-credentials|grafana-' | grep -v backup` 에 `mosquitto-passwd`, `zigbee2mqtt-credentials`, `telegraf-credentials`, `timescaledb-credentials`, `grafana-timescale`, `grafana-admin` 6개가 보입니다.
 
-## 2. 허브: TimescaleDB 와 Grafana 데이터소스
+## 2. 허브: Grafana 데이터소스
 
-`iot/hub/timescaledb/` 폴더에 Deployment, Service, PVC 와 첫 기동에만 실행되는 초기화 스크립트를 둡니다. 초기화 스크립트는 Grafana 용 읽기 전용 role 을 만들고, Telegraf 가 나중에 만들 테이블도 읽을 수 있게 기본 권한을 겁니다. Service 는 엣지 Telegraf 가 노드 IP 로 붙도록 NodePort 로 엽니다.
-
-```yaml
-# 중앙 시계열 저장소. 모든 지역의 엣지 Telegraf 가 여기로 씁니다. initdb 스크립트는 PGDATA 가 비어 있는 첫 기동에만 실행됩니다.
-resources:
-  - deployment.yaml
-  - service.yaml
-  - pvc.yaml
-configMapGenerator:
-  - name: timescaledb-initdb
-    files:
-      - initdb/10-iot.sh
-```
-{: file="iot/hub/timescaledb/kustomization.yaml" }
-
-```bash
-#!/bin/sh
-# 첫 기동에 한 번 실행됩니다(PGDATA 가 비어 있을 때). 이후 바꿔도 반영되지 않으니 psql 로 직접 고칩니다.
-# Telegraf 는 DB 소유자 iot 로 쓰고(테이블·컬럼을 만들어야 함), Grafana 는 읽기 전용 role grafana 로 봅니다.
-set -e
-psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" <<EOSQL
-  CREATE EXTENSION IF NOT EXISTS timescaledb;
-  CREATE ROLE grafana LOGIN PASSWORD '$GRAFANA_PASSWORD';
-  GRANT CONNECT ON DATABASE $POSTGRES_DB TO grafana;
-  GRANT USAGE ON SCHEMA public TO grafana;
-  ALTER DEFAULT PRIVILEGES FOR ROLE $POSTGRES_USER IN SCHEMA public GRANT SELECT ON TABLES TO grafana;
-EOSQL
-```
-{: file="iot/hub/timescaledb/initdb/10-iot.sh" }
-
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: timescaledb
-spec:
-  replicas: 1
-  strategy:
-    type: Recreate           # PVC 가 ReadWriteOnce 라 새 파드와 겹쳐 뜨면 안 됩니다
-  selector:
-    matchLabels: { app: timescaledb }
-  template:
-    metadata:
-      labels: { app: timescaledb }
-    spec:
-      containers:
-        - name: timescaledb
-          image: timescale/timescaledb:2.30.1-pg17
-          ports: [{ containerPort: 5432 }]
-          envFrom:
-            - secretRef: { name: timescaledb-credentials }   # POSTGRES_PASSWORD, GRAFANA_PASSWORD. GitOps 밖에서 만듭니다 (create-iot-secrets.sh)
-          env:
-            - { name: POSTGRES_DB, value: iot }
-            - { name: POSTGRES_USER, value: iot }
-            - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }   # 마운트 지점 바로 아래는 lost+found 가 있어 initdb 가 거부합니다
-            - { name: TS_TUNE_MEMORY, value: 1GB }      # timescaledb-tune 이 노드 전체 메모리(40GiB)를 보고 shared_buffers 를 잡는 것을 막습니다
-            - { name: TS_TUNE_NUM_CPUS, value: "2" }
-            - { name: TIMESCALEDB_TELEMETRY, value: "off" }
-          volumeMounts:
-            - { name: data, mountPath: /var/lib/postgresql/data }
-            - { name: initdb, mountPath: /docker-entrypoint-initdb.d }
-          readinessProbe:
-            exec: { command: ["pg_isready", "-h", "127.0.0.1", "-U", "iot", "-d", "iot"] }   # initdb 중의 임시 서버는 소켓만 열어 TCP 검사에 안 잡힙니다
-            periodSeconds: 10
-          resources:
-            requests: { cpu: 250m, memory: 512Mi }
-            limits:   { cpu: "2", memory: 2Gi }        # TS_TUNE_MEMORY=1GB 기준 shared_buffers 256MB + 연결 몇 개
-      volumes:
-        - name: data
-          persistentVolumeClaim: { claimName: timescaledb-data }
-        - name: initdb
-          configMap: { name: timescaledb-initdb, defaultMode: 0755 }
-```
-{: file="iot/hub/timescaledb/deployment.yaml" }
-
-```yaml
-# 엣지 클러스터의 Telegraf 가 노드 IP:30432 로 씁니다. 지금은 같은 LAN, 다른 지역이 생기면 VPN 너머에서 같은 포트로 옵니다.
-apiVersion: v1
-kind: Service
-metadata:
-  name: timescaledb
-spec:
-  type: NodePort
-  selector: { app: timescaledb }
-  ports:
-    - { port: 5432, targetPort: 5432, nodePort: 30432 }
-```
-{: file="iot/hub/timescaledb/service.yaml" }
-
-```yaml
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: timescaledb-data
-  annotations:
-    argocd.argoproj.io/sync-options: Prune=false   # 매니페스트를 지워도 모은 데이터는 남깁니다
-spec:
-  accessModes: [ReadWriteOnce]
-  resources:
-    requests:
-      storage: 20Gi          # 압축 전 기준 수년치 센서 데이터. local-path 라 크기는 참고값이고, 이 필드는 만든 뒤 바꿀 수 없습니다.
-```
-{: file="iot/hub/timescaledb/pvc.yaml" }
-
-`TS_TUNE_MEMORY` 는 꼭 넣습니다. 이미지의 `timescaledb-tune` 이 컨테이너 한도가 아니라 노드 전체 메모리를 보고 `shared_buffers` 를 잡기 때문에, 없으면 2Gi 한도를 바로 넘겨 파드가 죽습니다.
+허브 DB 는 selector 가 없는 Service `timescaledb` 로 접속합니다. Patroni 가 이 Service 의 Endpoints 에 지금 주 DB 의 주소를 적으므로, 주 DB 가 바뀌어도 클러스터 안에서는 `timescaledb.timescaledb.svc.cluster.local:5432`, 엣지에서는 NodePort `[HUB_VIP]:30432` 로 그대로 붙습니다. Grafana 용 읽기 전용 role `grafana` 와 Telegraf 가 나중에 만들 테이블까지 읽을 수 있는 기본 권한은 DB 를 처음 만들 때 Patroni 의 bootstrap 스크립트가 걸어 둡니다.
 
 Grafana 는 기존 `services/monitoring/values.yaml` 에 데이터소스를 추가합니다. 비밀번호는 Secret 을 컨테이너 env 로 넣고 프로비저닝 파일에서 `$TIMESCALE_PASSWORD` 로 참조합니다. Grafana 가 파일을 읽을 때 env 로 채워 주므로 값이 저장소에 남지 않습니다.
 
@@ -282,7 +209,7 @@ Grafana 는 기존 `services/monitoring/values.yaml` 에 데이터소스를 추�
 
 엣지 서비스는 `iot/edge/[이름]/` 에 공통 베이스를 두고 지역 오버레이가 참조합니다. 설정 파일은 kustomize 의 `configMapGenerator` 로 넣어, 파일을 고치면 ConfigMap 이름의 해시가 바뀌어 파드가 자동으로 다시 뜹니다.
 
-Mosquitto 는 계정 없는 접속을 막고 persistence 를 켭니다. Service 는 `LoadBalancer` 로 두면 k3s 의 servicelb 가 엣지 노드 IP 의 1883 을 그대로 열어 주어 LAN 기기가 표준 포트로 붙습니다.
+Mosquitto 는 계정 없는 접속을 막고 persistence 를 켭니다. Service 는 `LoadBalancer` 로 두고 지역 오버레이가 서비스 VIP 를 지정하면, 엣지의 kube-vip 가 그 VIP 의 1883 을 열어 주어 LAN 기기가 표준 포트로 붙습니다.
 
 ```yaml
 # 엣지의 MQTT 브로커. 지역 오버레이(iot/clusters/<지역>/mosquitto/)가 이 폴더를 참조합니다.
@@ -355,7 +282,7 @@ spec:
 {: file="iot/edge/mosquitto/deployment.yaml" }
 
 ```yaml
-# k3s 의 servicelb 가 노드 IP 의 1883 을 그대로 열어 줍니다. LAN 의 기기(ESPHome 등)와 디버깅용 mosquitto_sub 이 표준 포트로 붙습니다.
+# LAN 의 기기(ESPHome, 서버의 Telegraf 등)와 디버깅용 mosquitto_sub 이 [엣지 VIP]:1883 표준 포트로 붙습니다. VIP 는 지역 오버레이가 kube-vip.io/loadbalancerIPs 로 줍니다.
 apiVersion: v1
 kind: Service
 metadata:
@@ -381,15 +308,18 @@ spec:
 ```
 {: file="iot/edge/mosquitto/pvc.yaml" }
 
-Telegraf 설정 하나를 모든 지역이 공유합니다. 지역 이름과 허브 DB 주소는 env 로 받고, 계정은 Secret 에서 env 로 받아 설정 안의 `${VAR}` 에 채웁니다. 핵심은 세 가지입니다. `buffer_strategy = "disk"` 로 허브에 못 보낸 데이터를 PVC 에 쌓고, `json_time_key` 로 페이로드의 `last_seen` 을 행의 시각으로 쓰며, `startup_error_behavior = "retry"` 로 허브가 안 닿는 상태에서 파드가 떠도 종료하지 않게 합니다. 마지막 설정이 없으면 기본 동작이 "연결 실패 시 종료" 라서, 허브 단절 중 파드가 재시작되면 버퍼링조차 못 하고 크래시 루프에 빠집니다.
+Telegraf 설정 하나를 모든 지역이 공유합니다. 지역 이름과 허브 DB 주소는 env 로 받고, 계정은 Secret 에서 env 로 받아 설정 안의 `${VAR}` 에 채웁니다. 지역 DB 주소는 같은 클러스터의 Service 이름이라 베이스에 적어 둡니다. 출력은 테이블마다 두 개씩, 지역 DB 가 먼저이고 허브 DB 가 두 번째이며 테이블 정의(`create_templates`)는 같습니다. 핵심은 세 가지입니다. `buffer_strategy = "disk"` 로 DB 에 못 보낸 데이터를 출력마다 PVC 에 쌓고, `json_time_key` 로 페이로드의 `last_seen` 을 행의 시각으로 쓰며, `startup_error_behavior = "retry"` 로 DB 가 안 닿는 상태에서 파드가 떠도 종료하지 않게 합니다. 마지막 설정이 없으면 기본 동작이 "연결 실패 시 종료" 라서, 허브 단절 중 파드가 재시작되면 버퍼링조차 못 하고 크래시 루프에 빠집니다.
 
 입력은 `name_override = "readings"` 로 모두 같은 테이블에 보내고, starlark 프로세서가 메시지의 필드 하나를 행 하나로 쪼갭니다. Zigbee2MQTT 메시지 `{"temperature": 21.5, "humidity": 40}` 은 `property` 가 `temperature`, `humidity` 인 두 행이 됩니다. 수집기마다 다른 메시지 모양은 입력 블록과 이 프로세서에서만 흡수하므로, 나중에 Zigbee2MQTT 를 다른 수집기로 바꿔도 입력 블록만 새로 쓰면 되고 테이블과 대시보드는 그대로입니다.
 
-수집은 **모두 수집**이 기본입니다. 감도·보정값 같은 기기 설정과 펌웨어 업데이트 정보도 측정값과 똑같이 행으로 남깁니다. 설정이 바뀌면 같은 상황에서도 값이 달라지기 때문입니다. 메시지마다 같은 값이 반복되는 기기 정보(`device{…}`)만 버리고, 대신 기기 정의(`bridge/devices`)에서 값이 바뀔 때만 `device_software_build_id` 같은 행으로 남깁니다. 기기로 간 명령(`zigbee2mqtt/[기기]/set`)은 `name_override = "events"` 로 두 번째 출력이 `events` 테이블에 넣습니다.
+수집은 **모두 수집**이 기본입니다. 감도·보정값 같은 기기 설정과 펌웨어 업데이트 정보도 측정값과 똑같이 행으로 남깁니다. 설정이 바뀌면 같은 상황에서도 값이 달라지기 때문입니다. 메시지마다 같은 값이 반복되는 기기 정보(`device{…}`)만 버리고, 대신 기기 정의(`bridge/devices`)에서 값이 바뀔 때만 `device_software_build_id` 같은 행으로 남깁니다. 기기로 간 명령(`zigbee2mqtt/[기기]/set`)은 `name_override = "events"` 로 `events` 테이블용 출력이 받습니다. Home Assistant 가 재발행한 Matter 기기 상태를 받는 입력 두 개(`hass/…`)는 [Home Assistant 글](/posts/48/)에서, 서버·PC 자체의 부하를 받는 입력 두 개(`hosts/…`)는 [호스트 부하 글](/posts/74/)에서 추가하므로 아래 파일에서는 빠져 있습니다. starlark 의 호스트 처리(`host_sensors`)는 그 입력이 없으면 쓰이지 않습니다.
 
 {% raw %}
 ```toml
-# 엣지 Telegraf. env 는 Secret telegraf-credentials(MQTT_USER, MQTT_PASSWORD, HUB_PG_PASSWORD)와 오버레이(SITE, HUB_PG_HOST, HUB_PG_PORT)가 넣습니다.
+# 엣지 Telegraf. env 는 Secret telegraf-credentials(MQTT_USER, MQTT_PASSWORD, LOCAL_PG_PASSWORD, HUB_PG_PASSWORD)와
+# 베이스·오버레이(SITE, LOCAL_PG_HOST, HUB_PG_HOST, HUB_PG_PORT)가 넣습니다.
+# 같은 행을 지역 DB(첫 번째, 지역 Grafana 가 봄)와 허브 DB(두 번째, 모든 지역을 모아 봄)에 씁니다. 출력마다 디스크 버퍼가 따로 있어
+# 한쪽이 끊겨도 다른 쪽은 계속 받고, 끊긴 쪽은 다시 닿으면 쌓인 것부터 채웁니다.
 [global_tags]
   site = "${SITE}"                    # 모든 행에 지역 이름. 허브에서 지역이 섞여도 구분됩니다
   processing = "raw"                  # 기기가 보낸 값 그대로입니다. 보정(corrected)·계산(derived) 값은 허브의 가공 스크립트가 새 행으로 넣습니다
@@ -398,7 +328,7 @@ Telegraf 설정 하나를 모든 지역이 공유합니다. 지역 이름과 허
   interval = "10s"                    # 입력이 push 라 수집 주기는 의미 없고 flush 주기만 유효합니다
   flush_interval = "10s"
   metric_batch_size = 1000
-  metric_buffer_limit = 500000        # 출력별 상한(건). 허브가 안 닿는 동안 이만큼 디스크에 쌓고, 넘치면 오래된 것부터 버립니다
+  metric_buffer_limit = 500000        # 출력별 상한(건). DB 가 안 닿는 동안 이만큼 디스크에 쌓고, 넘치면 오래된 것부터 버립니다
   buffer_strategy = "disk"            # 파드가 재시작해도 버퍼가 남습니다
   buffer_directory = "/var/lib/telegraf/buffer"
   omit_hostname = true                # 파드 이름이 태그로 붙지 않게 합니다
@@ -508,11 +438,11 @@ Telegraf 설정 하나를 모든 지역이 공유합니다. 지역 이름과 허
 
 # 필드 하나를 행 하나로 쪼개고 값을 value(숫자)와 value_text(문자열)로 나눕니다. 실물 기기 태그 이름도 여기서 통일합니다.
 # 메시지에 property 태그가 있으면(HA) 그 값이 속성 이름이고, 없으면(Zigbee2MQTT) 필드 이름이 속성 이름입니다.
-# 단위는 HA 메시지에는 unit 태그로 실려 오고, Zigbee2MQTT 는 기기 정의(z2m_devices)에서 기억해 둔 값을 붙입니다.
+# 단위는 HA 메시지에는 unit 태그로 실려 오고, Zigbee2MQTT 는 기기 정의(z2m_devices)에서, 호스트는 발견 설정(host_sensors)에서 기억해 둔 값을 붙입니다.
 # Zigbee2MQTT 연결 상태 메시지처럼 실물 정보가 없는 메시지에도 기기 정의에서 기억해 둔 hw_id·model·vendor 를 붙입니다.
 # 기기 정의에서는 기기 정보가 바뀐 것만 device_<키> 행으로 냅니다. 제어 기록(events)은 이름만 나누고 필드는 그대로 둡니다(z2m set 은 필드마다 행).
 [[processors.starlark]]
-  namepass = ["readings", "z2m_devices", "events"]
+  namepass = ["readings", "z2m_devices", "events", "host_sensors"]
   order = 1
   source = '''
 load("json.star", "json")
@@ -621,6 +551,23 @@ def remember_devices(metric):
     state["hw"] = hw
     return out
 
+def remember_host_sensor(metric):
+    # homeassistant/sensor/<기기>/<필드>/config 중 호스트 Telegraf 가 낸 것만. 빈 메시지는 센서가 지워진 것입니다
+    raw = metric.fields.get("value", "")
+    if not raw:
+        return []
+    c = json.decode(raw)
+    if (c.get("origin") or {}).get("name") != "host-metrics":
+        return []
+    device = (c.get("device") or {}).get("name", "")
+    field = c.get("unique_id", "")[len(device) + 1:]
+    units = state.setdefault("host_units", {}).setdefault(device, {})
+    if c.get("unit_of_measurement"):
+        units[field] = c["unit_of_measurement"]
+    d = c.get("device") or {}
+    state.setdefault("host_hw", {})[device] = {"vendor": d.get("manufacturer") or "", "model": d.get("model") or ""}
+    return []
+
 def event(metric):
     tags = clean_tags(metric)
     if "device" in tags:
@@ -651,13 +598,19 @@ def event(metric):
 def apply(metric):
     if metric.name == "z2m_devices":
         return remember_devices(metric)
+    if metric.name == "host_sensors":
+        return remember_host_sensor(metric)
     if metric.name == "events":
         return event(metric)
     tags = clean_tags(metric)
     if not valid_name(tags.get("device", "")):
         return []                     # 이름이 없거나(옛 형식의 유지 메시지 등) 이름 규칙에 맞지 않는 기기는 버립니다
     name = tags["device"]
-    units = state.get("units", {}).get(name, {})
+    units = state.get("host_units" if tags.get("source") == "telegraf" else "units", {}).get(name, {})
+    if tags.get("source") == "telegraf":
+        for k, v in state.get("host_hw", {}).get(name, {}).items():
+            if v != "":
+                tags[k] = v
     if tags.get("source") == "z2m" and "hw_id" not in tags:
         for k, v in state.get("hw", {}).get(name, {}).items():
             if v != "":
@@ -678,9 +631,44 @@ def apply(metric):
     return out
 '''
 
-# 허브 TimescaleDB. 태그를 외래 키 테이블로 빼지 않고 컬럼으로 두어 지역 간 병합과 중복 제거가 쉽게 합니다.
+# 지역 TimescaleDB(iot/edge/timescaledb). 아래 허브 출력과 테이블 정의가 같습니다(두 곳을 함께 고칩니다).
+[[outputs.postgresql]]
+  namepass = ["readings"]
+  connection = "host=${LOCAL_PG_HOST} port=5432 user=iot password=${LOCAL_PG_PASSWORD} dbname=iot sslmode=disable connect_timeout=10"
+  startup_error_behavior = "retry"    # DB 가 안 닿는 상태로 파드가 떠도 종료하지 않고 버퍼에 쌓으며 연결을 재시도합니다 (기본값은 종료)
+  tags_as_foreign_keys = false
+  timestamp_column_type = "timestamp with time zone"
+  create_templates = [
+    '''CREATE TABLE {{ .table }} (time timestamptz NOT NULL, site text, room text, device text, anchor text, property text,
+        processing text NOT NULL CHECK (processing IN ('raw', 'corrected', 'derived')), value double precision, unit text, value_text text,
+        protocol text, source text, vendor text, model text, hw_id text, node text)''',
+    '''SELECT create_hypertable({{ .table|quoteLiteral }}, 'time', chunk_time_interval => INTERVAL '1d')''',
+    '''ALTER TABLE {{ .table }} SET (timescaledb.compress, timescaledb.compress_segmentby = 'site, room, device, anchor, property, processing', timescaledb.compress_orderby = 'time DESC')''',
+    '''SELECT add_compression_policy({{ .table|quoteLiteral }}, INTERVAL '1d')''',
+  ]
+
+[[outputs.postgresql]]
+  namepass = ["events"]
+  tagexclude = ["processing"]
+  connection = "host=${LOCAL_PG_HOST} port=5432 user=iot password=${LOCAL_PG_PASSWORD} dbname=iot sslmode=disable connect_timeout=10"
+  startup_error_behavior = "retry"
+  tags_as_foreign_keys = false
+  timestamp_column_type = "timestamp with time zone"
+  create_templates = [
+    '''CREATE TABLE {{ .table }} (time timestamptz NOT NULL, site text, room text, device text, anchor text, property text,
+        action text, data text, origin text, actor text, context_id text, parent_id text,
+        protocol text, source text, vendor text, model text, hw_id text, node text)''',
+    '''SELECT create_hypertable({{ .table|quoteLiteral }}, 'time', chunk_time_interval => INTERVAL '7d')''',
+    '''ALTER TABLE {{ .table }} SET (timescaledb.compress, timescaledb.compress_segmentby = 'site, room, device, anchor, property', timescaledb.compress_orderby = 'time DESC')''',
+    '''SELECT add_compression_policy({{ .table|quoteLiteral }}, INTERVAL '30d')''',
+  ]
+
+# 허브 TimescaleDB(두 번째 출력). 태그를 외래 키 테이블로 빼지 않고 컬럼으로 두어 지역 간 병합과 중복 제거가 쉽게 합니다.
 # 테이블은 컬럼 순서를 정해 두려고 직접 만들고, 이후 새 태그는 Telegraf 가 끝에 컬럼으로 붙입니다.
 # 압축은 시계열 하나(site, room, device, anchor, property, processing)끼리 묶어 값이 비슷한 것끼리 모이게 합니다.
+# 청크와 압축은 1일 단위입니다. 호스트 값(hosts/+)이 호스트마다 10초에 100여 행이라, 압축 전 데이터가 하루치 넘게 쌓이지 않게 합니다.
+# 압축된 청크에도 INSERT·UPDATE·DELETE 는 되므로(늦게 온 버퍼, 날씨 백필, 보정) 느려질 뿐 막히지 않습니다.
+# 이미 있는 테이블은 iot/hub/timescaledb/migrations/2026-09-28-readings-compress-1d.sql 로 바꿉니다(지역·허브 DB 모두).
 [[outputs.postgresql]]
   namepass = ["readings"]
   connection = "host=${HUB_PG_HOST} port=${HUB_PG_PORT} user=iot password=${HUB_PG_PASSWORD} dbname=iot sslmode=disable connect_timeout=10"
@@ -691,15 +679,14 @@ def apply(metric):
     '''CREATE TABLE {{ .table }} (time timestamptz NOT NULL, site text, room text, device text, anchor text, property text,
         processing text NOT NULL CHECK (processing IN ('raw', 'corrected', 'derived')), value double precision, unit text, value_text text,
         protocol text, source text, vendor text, model text, hw_id text, node text)''',
-    '''SELECT create_hypertable({{ .table|quoteLiteral }}, 'time', chunk_time_interval => INTERVAL '7d')''',
+    '''SELECT create_hypertable({{ .table|quoteLiteral }}, 'time', chunk_time_interval => INTERVAL '1d')''',
     '''ALTER TABLE {{ .table }} SET (timescaledb.compress, timescaledb.compress_segmentby = 'site, room, device, anchor, property, processing', timescaledb.compress_orderby = 'time DESC')''',
-    '''SELECT add_compression_policy({{ .table|quoteLiteral }}, INTERVAL '30d')''',
+    '''SELECT add_compression_policy({{ .table|quoteLiteral }}, INTERVAL '1d')''',
   ]
 
 # 허브 TimescaleDB 의 제어 기록 테이블 events. "행 하나 = 기기 하나에 간 명령 하나"(또는 자동화·스크립트 실행 하나)이고 값을 가공하지 않으므로 processing 이 없습니다.
 #   컬럼: time, site, room, device, anchor, property, action(switch.turn_off, ON …), data(서비스 데이터 JSON), origin(user|automation|system|mqtt),
 #         actor(사람 이름, automation.…), context_id, parent_id(HA context. 자동화 실행 행과 그 자동화가 보낸 명령이 context_id 로 이어집니다), protocol, source, vendor, model, hw_id, node
-# 출력마다 디스크 버퍼가 따로 있어 허브가 안 닿는 동안 readings 와 같이 쌓입니다.
 [[outputs.postgresql]]
   namepass = ["events"]
   tagexclude = ["processing"]
@@ -720,12 +707,13 @@ def apply(metric):
 [[outputs.health]]
   service_address = "http://:8888"
   namepass = ["__none__"]
-{: file="iot/edge/telegraf/telegraf.conf" }
+```
+{: file="iot/edge/telegraf/telegraf.conf (Home Assistant·호스트 입력 제외)" }
 {% endraw %}
 
 ```yaml
-# 엣지 수집기. 브로커의 기기 메시지를 받아 허브 TimescaleDB 로 보내고, 허브가 안 닿으면 디스크 버퍼(PVC)에 쌓았다가 밀어 넣습니다.
-# 지역 값(site 이름, 허브 DB 주소)은 오버레이가 env 로 넣습니다. 로컬 DB 티어 같은 추가 출력은 오버레이가 telegraf-site ConfigMap 을 교체해 *.conf 로 넣습니다.
+# 엣지 수집기. 브로커의 기기 메시지를 받아 지역 TimescaleDB 와 허브 TimescaleDB 에 쓰고, 안 닿는 쪽은 디스크 버퍼(PVC)에 쌓았다가 밀어 넣습니다.
+# 지역 값(site 이름, 허브 DB 주소)은 오버레이가 env 로 넣습니다. 그 밖의 추가 출력은 오버레이가 telegraf-site ConfigMap 을 교체해 *.conf 로 넣습니다.
 resources:
   - deployment.yaml
   - pvc.yaml
@@ -763,8 +751,9 @@ spec:
           image: telegraf:1.40.1-alpine
           command: ["telegraf", "--config", "/etc/telegraf/telegraf.conf", "--config-directory", "/etc/telegraf/site.d"]
           envFrom:
-            - secretRef: { name: telegraf-credentials }   # MQTT_USER, MQTT_PASSWORD, HUB_PG_PASSWORD. GitOps 밖에서 만듭니다 (create-iot-secrets.sh)
+            - secretRef: { name: telegraf-credentials }   # MQTT_USER, MQTT_PASSWORD, LOCAL_PG_PASSWORD, HUB_PG_PASSWORD. GitOps 밖에서 만듭니다 (create-iot-secrets.sh)
           env:
+            - { name: LOCAL_PG_HOST, value: timescaledb.timescaledb.svc.cluster.local }   # 지역 DB(iot/edge/timescaledb)
             # 지역 오버레이(iot/clusters/<지역>/telegraf/)가 아래 값을 patch 로 바꿉니다.
             - { name: SITE, value: unknown }
             - { name: HUB_PG_HOST, value: 127.0.0.1 }
@@ -805,7 +794,7 @@ spec:
 ```
 {: file="iot/edge/telegraf/pvc.yaml" }
 
-`tags_as_foreign_keys = false` 라 태그가 모두 본 테이블의 컬럼이 됩니다. 행 하나만 봐도 어느 지역의 어느 기기인지 알 수 있어 나중에 지역별 로컬 DB 와 병합하거나 중복을 걸러 내기 쉽습니다. 테이블은 첫 메시지가 올 때 Telegraf 가 `create_templates` 대로 만들고(하이퍼테이블, 7일 청크, 30일 뒤 압축), 새 태그가 보이면 끝에 컬럼을 추가합니다. 컬럼 순서를 정해 두려고 `CREATE TABLE` 에 컬럼을 직접 적었으며, 아래 표가 그 순서입니다.
+`tags_as_foreign_keys = false` 라 태그가 모두 본 테이블의 컬럼이 됩니다. 행 하나만 봐도 어느 지역의 어느 기기인지 알 수 있어 지역 DB 와 허브 DB 를 서로 채우거나 비교하고 중복을 걸러 내기 쉽습니다. 테이블은 첫 메시지가 올 때 Telegraf 가 DB 마다 `create_templates` 대로 만들고(하이퍼테이블. `readings` 는 1일 청크·1일 뒤 압축, `events` 는 7일 청크·30일 뒤 압축), 새 태그가 보이면 끝에 컬럼을 추가합니다. 컬럼 순서를 정해 두려고 `CREATE TABLE` 에 컬럼을 직접 적었으며, 아래 표가 그 순서입니다.
 
 | 컬럼 | 예 | 내용 |
 |---|---|---|
@@ -829,7 +818,7 @@ spec:
 
 `processing` 은 값이 원본인지 가공한 것인지 나눕니다. 원본 행은 고치지 않고, 센서 편차를 보정한 값이나 평균처럼 계산한 값은 같은 시각·속성에 `corrected`·`derived` 행으로 따로 넣습니다. 그래서 `where processing = 'raw'` 로 원본만, `<> 'raw'` 로 가공 값만 뽑을 수 있습니다. 기본값 없이 `NOT NULL` 과 `CHECK` 제약을 걸어, 가공 스크립트가 구분을 빠뜨리거나 다른 값을 넣으면 INSERT 가 실패합니다.
 
-압축은 `site, room, device, anchor, property, processing` 이 같은 행끼리 묶습니다. 묶음 하나가 시계열 하나(예: 한 기기의 온도)가 되어 값이 비슷한 것끼리 모이므로 압축이 잘 되고, 조회할 때도 필요한 묶음만 풉니다.
+압축은 `site, room, device, anchor, property, processing` 이 같은 행끼리 묶습니다. 묶음 하나가 시계열 하나(예: 한 기기의 온도)가 되어 값이 비슷한 것끼리 모이므로 압축이 잘 되고, 조회할 때도 필요한 묶음만 풉니다. 청크와 압축은 1일 단위라 압축 전 데이터가 하루치를 넘지 않습니다. 압축된 청크에도 INSERT·UPDATE·DELETE 는 되므로 늦게 도착한 버퍼나 보정은 느려질 뿐 그대로 들어갑니다.
 
 `events` 테이블은 "행 하나 = 기기 하나에 간 명령 하나" 입니다. 이 글에서는 Zigbee 명령만 들어오고, [Home Assistant 글](/posts/48/)에서 HA 로 제어한 명령과 자동화 실행이 누가 했는지와 함께 들어옵니다. 기기 컬럼은 `readings` 와 같아 명령 직후의 전력 변화처럼 두 테이블을 조인해 볼 수 있습니다. 값을 가공하지 않으므로 `processing` 은 없습니다.
 
@@ -846,17 +835,26 @@ spec:
 
 ## 4. 지역 오버레이 추가와 배포
 
-`iot/clusters/[SITE]/` 아래에 서비스별 폴더를 만들어 베이스를 참조하고 지역 값만 넣습니다. Mosquitto 는 베이스 그대로이고, Telegraf 는 `SITE` 와 `HUB_PG_HOST` 를 패치합니다. 폴더 하나가 `[SITE]-[이름]` Application 이 되어 엣지 클러스터의 같은 이름 네임스페이스에 배포됩니다.
+`iot/clusters/[SITE]/` 아래에 서비스별 폴더를 만들어 베이스를 참조하고 지역 값만 넣습니다. Mosquitto 는 Service 에 서비스 VIP 를 붙이고, Telegraf 는 `SITE` 와 `HUB_PG_HOST` 를 패치합니다. 폴더 하나가 `[SITE]-[이름]` Application 이 되어 엣지 클러스터의 같은 이름 네임스페이스에 배포됩니다.
 
 ```yaml
 # [SITE] 엣지의 MQTT 브로커. 베이스 그대로 씁니다.
 resources:
   - ../../../edge/mosquitto
+patches:
+  # [SITE] 엣지의 서비스 VIP(kube-vip). HA·Z2M·Matter·Mosquitto 가 포트만 달리해 같은 주소를 씁니다(LAN 기기·허브가 이 주소로 붙음)
+  - patch: |
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: mosquitto
+        annotations:
+          kube-vip.io/loadbalancerIPs: "[EDGE_SERVICE_VIP]"
 ```
 {: file="iot/clusters/[SITE]/mosquitto/kustomization.yaml" }
 
 ```yaml
-# [SITE] 엣지의 수집기. 저장 티어는 "버퍼만"(허브 DB 로만 보내고 로컬 DB 없음)이라 베이스에 지역 값만 넣습니다.
+# [SITE] 엣지의 수집기. 지역 DB([SITE]/timescaledb)와 허브 DB 에 씁니다. 베이스에 지역 값만 넣습니다.
 resources:
   - ../../../edge/telegraf
 patches:
@@ -872,23 +870,23 @@ patches:
               - name: telegraf
                 env:
                   - { name: SITE, value: [SITE] }
-                  - { name: HUB_PG_HOST, value: [HUB_NODE_IP] }   # 허브 control plane. NodePort 30432 는 어느 노드 IP 로도 들어갑니다
+                  - { name: HUB_PG_HOST, value: [HUB_VIP] }   # 허브 control plane VIP. NodePort 30432 가 Patroni 의 주 DB 로 넘깁니다
 ```
 {: file="iot/clusters/[SITE]/telegraf/kustomization.yaml" }
 
 ```bash
 # 커밋하고 push (허브 몫과 엣지 몫을 함께)
 git add iot services/monitoring/values.yaml
-git commit -m "feat(iot): 중앙 TimescaleDB 와 엣지 Mosquitto·Telegraf 수집 파이프라인 추가"
+git commit -m "feat(iot): 엣지 Mosquitto·Telegraf 수집 파이프라인 추가"
 git push
 ```
 
-Argo CD 가 저장소를 다시 읽으면(최대 3분) `timescaledb`, `[SITE]-mosquitto`, `[SITE]-telegraf` Application 이 생기고 `monitoring` 이 다시 sync 됩니다. 허브 DB 가 뜨기 전에 엣지 Telegraf 가 먼저 뜨면 연결 실패 로그가 잠깐 찍히지만, 재시도 설정 덕에 DB 가 준비되는 대로 붙습니다.
+Argo CD 가 저장소를 다시 읽으면(최대 3분) `[SITE]-mosquitto`, `[SITE]-telegraf` Application 이 생기고 `monitoring` 이 다시 sync 됩니다. DB 가 준비되기 전에 엣지 Telegraf 가 먼저 뜨면 연결 실패 로그가 잠깐 찍히지만, 재시도 설정 덕에 DB 가 준비되는 대로 붙습니다.
 
-- **확인:** control plane 에서 `kubectl -n argocd get applications` 에 세 Application 이 `Synced`, `Healthy`. 허브 `kubectl -n timescaledb exec deploy/timescaledb -- psql -U iot -d iot -c '\du' -c 'show shared_buffers'` 에 role `grafana` 와 `128MB` 안팎의 값. 엣지 `kubectl --kubeconfig k3s-[SITE].yaml -n mosquitto get svc` 의 `EXTERNAL-IP` 가 엣지 노드 IP. Grafana 데이터소스 상태는 아래 명령으로 봅니다.
+- **확인:** 허브 control plane 에서 `kubectl -n argocd get applications` 에 두 Application 이 `Synced`, `Healthy`. 엣지 `kubectl --kubeconfig k8s-[SITE].yaml -n mosquitto get svc` 의 `EXTERNAL-IP` 가 `[EDGE_SERVICE_VIP]`. Grafana 데이터소스 상태는 아래 명령으로 봅니다.
 
 ```bash
-# control plane: Grafana 데이터소스 연결 상태 (admin 비밀번호는 grafana-admin Secret)
+# 허브 control plane: Grafana 데이터소스 연결 상태 (admin 비밀번호는 grafana-admin Secret)
 GP=$(kubectl -n monitoring get secret grafana-admin -o jsonpath='{.data.admin-password}' | base64 -d)
 curl -s -u "admin:$GP" http://127.0.0.1:30082/api/datasources/uid/timescaledb/health
 ```
@@ -897,11 +895,11 @@ curl -s -u "admin:$GP" http://127.0.0.1:30082/api/datasources/uid/timescaledb/he
 
 ## 5. 테스트 메시지로 확인
 
-아직 Zigbee 기기가 없으니 브로커에 기기 메시지 모양의 JSON 을 직접 발행해 끝까지 흐르는지 봅니다. 익명 발행은 거부되어야 하고, `telegraf` 계정으로 발행한 메시지는 `last_seen` 시각으로 허브 테이블에 들어가야 합니다. 명령은 엣지에서 일회용 파드로 실행합니다.
+아직 Zigbee 기기가 없으니 브로커에 기기 메시지 모양의 JSON 을 직접 발행해 끝까지 흐르는지 봅니다. 익명 발행은 거부되어야 하고, `telegraf` 계정으로 발행한 메시지는 `last_seen` 시각으로 지역 DB 와 허브 DB 의 테이블에 함께 들어가야 합니다. 기기 이름은 규칙(`<방>-<종류>`)에 맞아야 기록되므로 `test-th` 로 보냅니다. 명령은 엣지에서 일회용 파드로 실행합니다.
 
 ```bash
-# control plane. E 는 엣지 kubeconfig, PW 는 telegraf 계정 비밀번호
-E="--kubeconfig k3s-[SITE].yaml"
+# 허브 control plane. E 는 엣지 kubeconfig, PW 는 telegraf 계정 비밀번호
+E="--kubeconfig k8s-[SITE].yaml"
 PW=$(kubectl $E -n telegraf get secret telegraf-credentials -o jsonpath='{.data.MQTT_PASSWORD}' | base64 -d)
 TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
@@ -909,85 +907,99 @@ TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 kubectl $E -n mosquitto run mq-anon --rm -i -q --restart=Never --image=eclipse-mosquitto:2.0.22 \
   --command -- mosquitto_pub -h mosquitto -t zigbee2mqtt/test -m '{}'
 
-# telegraf 계정으로 기기 메시지 모양 발행 (엣지 노드 IP 의 1883 으로)
+# telegraf 계정으로 기기 메시지 모양 발행 (서비스 VIP 의 1883 으로)
 kubectl $E -n mosquitto run mq-pub --rm -i -q --restart=Never --image=eclipse-mosquitto:2.0.22 --env="PW=$PW" \
-  --command -- mosquitto_pub -h [EDGE_IP] -u telegraf -P "$PW" -q 1 -t zigbee2mqtt/test_sensor \
+  --command -- mosquitto_pub -h [EDGE_SERVICE_VIP] -u telegraf -P "$PW" -q 1 -t zigbee2mqtt/test-th \
   -m "{\"temperature\":21.5,\"humidity\":40,\"contact\":true,\"state\":\"ON\",\"last_seen\":\"$TS\"}"
-
-# 20초쯤 뒤 허브에서 조회
-kubectl -n timescaledb exec deploy/timescaledb -- psql -U iot -d iot \
-  -c 'select hypertable_name from timescaledb_information.hypertables;' \
-  -c 'select time, site, protocol, device, property, value, value_text from readings order by time desc, property limit 4;'
 ```
 
-- **확인:** 익명 발행은 `Connection error: Connection Refused: not authorised` 로 끝납니다. 조회에 하이퍼테이블 `readings` 와 메시지 하나가 쪼개진 네 행(`contact`, `humidity`, `state`, `temperature`)이 보이고, `time` 이 발행한 `TS` 와 같고 `site` 가 `[SITE]`, `protocol` 이 `zigbee`, `device` 가 `test_sensor` 입니다. `true` 는 `value` 1 과 `value_text` `true`, `ON` 은 `value` 1 과 `value_text` `ON` 으로 들어갑니다.
+```bash
+# 20초쯤 뒤 지역 DB 와 허브 DB 에서 조회 (주 DB 파드는 Patroni 가 role=primary 라벨을 붙임)
+Q='select time, site, protocol, room, device, property, value, value_text from readings where room = '"'test'"' order by time desc, property limit 4;'
+kubectl $E -n timescaledb exec $(kubectl $E -n timescaledb get pod -l role=primary -o name) -- psql -U iot -d iot -c "$Q"
+kubectl -n timescaledb exec $(kubectl -n timescaledb get pod -l role=primary -o name) -- psql -U iot -d iot -c "$Q"
+```
+
+- **확인:** 익명 발행은 `Connection error: Connection Refused: not authorised` 로 끝납니다. 두 DB 의 조회에 메시지 하나가 쪼개진 같은 네 행(`contact`, `humidity`, `state`, `temperature`)이 보이고, `time` 이 발행한 `TS` 와 같고 `site` 가 `[SITE]`, `protocol` 이 `zigbee`, `room` 이 `test`, `device` 가 `th` 입니다. `true` 는 `value` 1 과 `value_text` `true`, `ON` 은 `value` 1 과 `value_text` `ON` 으로 들어갑니다.
 
 ## 6. Grafana 대시보드로 기록 보기
 
-SQL 을 쓰지 않고 웹에서 기록을 보도록 Grafana 대시보드를 함께 배포합니다. kube-prometheus-stack 의 Grafana 에는 `grafana_dashboard: "1"` 라벨이 붙은 ConfigMap 을 모든 네임스페이스에서 찾아 불러오는 sidecar 가 기본으로 켜져 있습니다. 그래서 대시보드 JSON 을 `iot/hub/timescaledb/` 폴더에 두고 `configMapGenerator` 로 라벨을 붙이기만 하면 됩니다.
+SQL 을 쓰지 않고 웹에서 기록을 보도록 Grafana 대시보드를 함께 배포합니다. kube-prometheus-stack 의 Grafana 에는 `grafana_dashboard: "1"` 라벨이 붙은 ConfigMap 을 모든 네임스페이스에서 찾아 불러오는 sidecar 가 기본으로 켜져 있습니다. 대시보드 JSON 은 허브 Grafana 와 지역 Grafana(`iot/edge/grafana`)가 함께 쓰므로 `iot/shared/dashboards/` 에 두고 `configMapGenerator` 로 라벨을 붙인 뒤, 허브 DB 폴더가 이 폴더를 가져다 씁니다.
 
 ```bash
 # 저장소 루트에서 대시보드 JSON 내려받기
-mkdir -p iot/hub/timescaledb/dashboards
-wget -O iot/hub/timescaledb/dashboards/iot.json https://eu4ng.github.io/assets/files/iot/grafana-dashboard-iot.json
+mkdir -p iot/shared/dashboards
+wget -O iot/shared/dashboards/iot.json https://eu4ng.github.io/assets/files/iot/grafana-dashboard-iot.json
 ```
 
 ```yaml
-# 중앙 시계열 저장소. 모든 지역의 엣지 Telegraf 가 여기로 씁니다. initdb 스크립트는 PGDATA 가 비어 있는 첫 기동에만 실행됩니다.
-resources:
-  - deployment.yaml
-  - service.yaml
-  - pvc.yaml
+# IoT 대시보드 원본. 허브 Grafana(iot/hub/timescaledb 가 포함, kube-prometheus-stack sidecar 가 라벨로 읽음)와
+# 지역 Grafana(iot/edge/grafana 가 포함, 파일로 마운트)가 같은 파일을 씁니다. 이 폴더는 Application 이 아니라 두 곳이 가져다 쓰는 재료입니다.
 configMapGenerator:
-  - name: timescaledb-initdb
-    files:
-      - initdb/10-iot.sh
-  # Grafana 대시보드. sidecar 가 모든 네임스페이스에서 이 라벨의 ConfigMap 을 찾아 불러옵니다(kube-prometheus-stack 기본값)
   - name: grafana-dashboard-iot
     files:
-      - dashboards/iot.json
+      - iot.json
     options:
       labels: { grafana_dashboard: "1" }
       disableNameSuffixHash: true   # 이름이 바뀌면 sidecar 가 옛 파일을 지우고 새로 불러오는 사이 대시보드가 잠시 사라집니다
 ```
+{: file="iot/shared/dashboards/kustomization.yaml" }
+
+허브 DB 폴더의 `kustomization.yaml` 에는 `resources` 에 `../../shared/dashboards` 한 줄을 더합니다. 대시보드 ConfigMap 이 `timescaledb` 네임스페이스에 만들어집니다.
+
+```yaml
+# 중앙 시계열 저장소. 모든 지역의 엣지 Telegraf 가 여기로 씁니다.
+# Patroni 클러스터: worker 두 대의 StatefulSet 멤버 + 서울 NAS 멤버(stacks/seoul/timescaledb). 주 DB 하나에 나머지가 스트리밍 복제로 따라갑니다.
+resources:
+  - service.yaml
+  - patroni-rbac.yaml
+  - patroni-statefulset.yaml
+  # Grafana 대시보드(원본 iot/shared/dashboards/iot.json). sidecar 가 모든 네임스페이스에서 라벨 grafana_dashboard 의 ConfigMap 을 불러옵니다
+  - ../../shared/dashboards
+configMapGenerator:
+  - name: timescaledb-patroni
+    files:
+      - patroni/patroni.yml
+      - patroni/post-bootstrap.sh
+```
 {: file="iot/hub/timescaledb/kustomization.yaml" }
 
-대시보드(uid `iot-records`)는 2단계에서 만든 `TimescaleDB` 데이터소스로 읽기 전용 조회만 합니다. 위쪽의 **지역**, **프로토콜**, **방**, **기기**, **속성** 변수로 범위를 좁히고, 오른쪽 위 시간 범위가 모든 패널에 적용됩니다.
+대시보드(uid `iot-records`)는 2단계의 `TimescaleDB` 데이터소스로 읽기 전용 조회만 합니다. DB 에 잘 저장되는지 확인하는 용도라 컬럼을 가공하지 않고 `SELECT *` 로 그대로 보여 주며, 컬럼이 늘거나 줄면 표에 바로 반영됩니다. 위쪽의 `site`, `processing`, `room`, `device`, `property` 변수로 범위를 좁히고, 오른쪽 위 시간 범위가 모든 패널에 적용됩니다. 서버·PC 자체의 값(`device` 가 `host`, [호스트 부하 글](/posts/74/))은 속성이 많고 행이 많아 `device` 변수에서 `host` 를 직접 고를 때만 나옵니다.
 
 | 패널 | 내용 |
 |---|---|
-| 기기별 최신 값 | 기기마다 속성별 마지막 값(온도, 습도, 재실, 닫힘, 조도, CO2, PM2.5, 배터리, LQI) |
-| 온도, 습도, 조도, 배터리, 링크 품질, CO2, 미세먼지 | 기기별 시계열. Zigbee 와 Matter 기기가 한 그래프에 함께 그려집니다 |
-| 재실, 닫힘 (문·창문) | 켜짐/꺼짐 구간 타임라인 |
-| 연결 상태 (Zigbee) | 기기별 `online`/`offline` 구간 타임라인 |
-| 선택한 속성 | **속성** 변수로 고른 속성의 시계열 |
-| 실물 기기 | 실물 ID(`hw_id`)별 프로토콜, 수집기, 모델, 제조사, 지금 이름과 거쳐 간 이름 |
-| 최근 기록 | `readings` 테이블의 원본 행 최근 200개 |
+| readings 컬럼 | `information_schema` 에서 읽은 `readings` 의 지금 컬럼(순서, 이름, 형식, NULL 허용) |
+| 청크 | `readings` 하이퍼테이블의 청크(1일)와 압축 여부 |
+| 기기·속성별 최신 행 | `site`·`room`·`device`·`anchor`·`property`·`processing` 마다 마지막 행의 모든 컬럼 |
+| 최근 행 | 가장 최근에 저장된 500행의 모든 컬럼 |
+| 미세먼지 | 이름이 `pm` 으로 시작하는 속성(`pm1`, `pm25`, `pm10` …)을 한 그래프에 |
+| 숫자 속성마다 하나씩 (`temperature`, `humidity` …) | 숫자 값이 있는 속성마다 자동으로 생기는 시계열. 패널 제목이 속성 이름입니다 |
+| 상태 속성마다 하나씩 (`presence`, `contact`, `availability` …) | 문자열·두 값 상태 속성마다 자동으로 생기는 상태 타임라인. 기기마다 한 줄이고 켜짐·참·온라인은 노랑, 꺼짐·거짓·오프라인은 회색입니다 |
 
 ```bash
 # 커밋하고 push
-git add iot/hub/timescaledb
+git add iot/shared/dashboards iot/hub/timescaledb/kustomization.yaml
 git commit -m "feat(iot): 허브 TimescaleDB 기록을 보는 Grafana 대시보드 추가"
 git push
 ```
 
-- **확인:** `kubectl -n timescaledb get cm -l grafana_dashboard=1` 에 `grafana-dashboard-iot` 가 보입니다. Grafana(`http://[HUB_NODE_IP]:30082`)의 **Dashboards** 에 **IoT 기록** 이 생기고, 5단계에서 발행한 `test_sensor` 가 **기기별 최신 값** 표와 **온도**, **습도** 패널에 나타납니다.
+- **확인:** `kubectl -n timescaledb get cm -l grafana_dashboard=1` 에 `grafana-dashboard-iot` 가 보입니다. Grafana(`http://[HUB_VIP]:30082`)의 **Dashboards** 에 **IoT 기록** 이 생기고, 5단계에서 발행한 `test-th` 가 **기기·속성별 최신 행** 표와 **temperature**, **humidity** 패널에 나타납니다.
 
 ## 7. 단절 드릴
 
-허브가 끊긴 상황을 만들어 버퍼가 실제로 동작하는지 봅니다. 엣지 노드에서 파드가 허브 DB 포트로 나가는 패킷을 막고, 그 동안 메시지를 여러 건 발행하고, 도중에 Telegraf 파드까지 지운 뒤, 차단을 풀고 허브에 무엇이 들어왔는지 확인합니다.
+허브가 끊긴 상황을 만들어 버퍼가 실제로 동작하는지 봅니다. 엣지 worker 에서 파드가 허브 DB 포트로 나가는 패킷을 막고, 그 동안 메시지를 여러 건 발행하고, 도중에 Telegraf 파드까지 지운 뒤, 차단을 풀고 두 DB 에 무엇이 들어왔는지 확인합니다. 지운 Telegraf 파드가 다른 worker 에 다시 뜰 수 있으므로 차단은 worker 두 대에 모두 겁니다.
 
 ```bash
-# 엣지 노드: 파드 → 허브 DB 차단 (파드 트래픽은 FORWARD 체인을 지납니다)
-sudo iptables -I FORWARD 1 -d [HUB_NODE_IP] -p tcp --dport 30432 -j REJECT --reject-with tcp-reset
+# 엣지 worker 두 대 모두: 파드 → 허브 DB 차단 (파드 트래픽은 FORWARD 체인을 지납니다)
+sudo iptables -I FORWARD 1 -d [HUB_VIP] -p tcp --dport 30432 -j REJECT --reject-with tcp-reset
 ```
 
 ```bash
-# control plane: 8초 간격으로 8건 발행하는 파드 시작
+# 허브 control plane: 8초 간격으로 8건 발행하는 파드 시작
 kubectl $E -n mosquitto run mq-drill --restart=Never --image=eclipse-mosquitto:2.0.22 --env="PW=$PW" --command -- sh -c '
   for i in 1 2 3 4 5 6 7 8; do
     ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    mosquitto_pub -h mosquitto -u telegraf -P "$PW" -q 1 -t zigbee2mqtt/drill_sensor -m "{\"temperature\":$i,\"last_seen\":\"$ts\"}" && echo "sent $i $ts"
+    mosquitto_pub -h mosquitto -u telegraf -P "$PW" -q 1 -t zigbee2mqtt/drill-th -m "{\"temperature\":$i,\"last_seen\":\"$ts\"}" && echo "sent $i $ts"
     sleep 8
   done'
 
@@ -1000,26 +1012,31 @@ kubectl $E -n mosquitto logs mq-drill
 ```
 
 ```bash
-# 엣지 노드: 차단 해제
-sudo iptables -D FORWARD -d [HUB_NODE_IP] -p tcp --dport 30432 -j REJECT --reject-with tcp-reset
+# 허브 control plane: 차단 중 지역 DB 조회
+Q="select count(*), min(time), max(time) from readings where room='drill' and property='temperature';"
+kubectl $E -n timescaledb exec $(kubectl $E -n timescaledb get pod -l role=primary -o name) -- psql -U iot -d iot -c "$Q"
 ```
 
 ```bash
-# control plane: 40초쯤 뒤 허브 조회
-kubectl -n timescaledb exec deploy/timescaledb -- psql -U iot -d iot \
-  -c "select count(*), min(time), max(time) from readings where device='drill_sensor';" \
-  -c "select time, value from readings where device='drill_sensor' and property='temperature' order by time;"
+# 엣지 worker 두 대 모두: 차단 해제
+sudo iptables -D FORWARD -d [HUB_VIP] -p tcp --dport 30432 -j REJECT --reject-with tcp-reset
+```
+
+```bash
+# 허브 control plane: 40초쯤 뒤 허브 DB 조회
+kubectl -n timescaledb exec $(kubectl -n timescaledb get pod -l role=primary -o name) -- psql -U iot -d iot -c "$Q" \
+  -c "select time, value from readings where room='drill' and property='temperature' order by time;"
 kubectl $E -n mosquitto delete pod mq-drill
 ```
 
-- **확인:** 차단 중 새로 뜬 Telegraf 파드가 `Running` 으로 유지되고 로그에 `Error writing to outputs.postgresql: not connected` 가 반복됩니다. 차단을 풀면 8건이 모두 발행 시각 그대로 들어옵니다. 이 글을 쓰며 실행했을 때는 파드를 지운 순간에 처리 중이던 4번 메시지가 두 번 들어와 9행이 됐습니다. 브로커의 QoS 1 은 "최소 한 번" 전달이라 파드 교체 시점에 한 건이 중복될 수 있으며, 조회할 때 `select distinct on (time, site, device, property) ...` 로 걸러 냅니다.
+- **확인:** 차단 중 새로 뜬 Telegraf 파드가 `Running` 으로 유지되고 로그에 `Error writing to outputs.postgresql: not connected` 가 반복됩니다. 지역 DB 에는 차단 중에도 발행한 만큼 들어오고, 허브 DB 에는 차단을 풀면 8건이 모두 발행 시각 그대로 들어옵니다. 이 글을 쓰며 실행했을 때는 파드를 지운 순간에 처리 중이던 4번 메시지가 두 번 들어와 9행이 됐습니다. 브로커의 QoS 1 은 "최소 한 번" 전달이라 파드 교체 시점에 한 건이 중복될 수 있으며, 조회할 때 `select distinct on (time, site, room, device, anchor, property) ...` 로 걸러 냅니다.
 
 > 로그에 `Using disk-write-through buffer strategy ... this is an experimental feature` 경고가 남습니다. 문서에는 정식 옵션으로 적혀 있지만 구현은 아직 실험 표시가 붙어 있습니다. 위 드릴처럼 파드 재시작과 재연결을 한 번 직접 확인해 두는 것이 좋습니다.
 {: .prompt-warning }
 
 ## 마무리
 
-엣지의 Mosquitto 와 Telegraf, 허브의 TimescaleDB 와 Grafana 데이터소스·대시보드를 GitOps 폴더로 배포해, 기기 메시지가 엣지에서 허브로 모이고 허브가 끊긴 동안은 엣지 디스크에 쌓였다가 원래 시각으로 들어가는 파이프라인을 완성했습니다. 지역을 추가할 때는 `iot/clusters/[SITE]/` 아래에 같은 오버레이 두 개를 만들고 시크릿 스크립트를 그 엣지에 실행하면 됩니다. 로컬에도 DB 를 두는 지역은 `telegraf-site` ConfigMap 을 오버레이에서 교체해 두 번째 출력을 넣는 자리를 남겨 두었습니다. 다음 글에서는 이 브로커에 Zigbee2MQTT 를 붙여 실제 Zigbee 기기 데이터를 흘립니다.
+엣지의 Mosquitto 와 Telegraf, 허브의 Grafana 데이터소스·대시보드를 GitOps 폴더로 배포해, 기기 메시지가 지역 DB 와 허브 DB 에 함께 쌓이고 한쪽 DB 가 끊긴 동안은 엣지 디스크에 쌓였다가 원래 시각으로 들어가는 파이프라인을 완성했습니다. 지역을 추가할 때는 `iot/clusters/[SITE]/` 아래에 지역 DB 와 같은 오버레이 두 개를 만들고 시크릿 스크립트를 그 엣지에 실행하면 됩니다. 다음 글에서는 이 브로커에 Zigbee2MQTT 를 붙여 실제 Zigbee 기기 데이터를 흘립니다.
 
 ## 참고 자료
 
@@ -1033,5 +1050,5 @@ kubectl $E -n mosquitto delete pod mq-drill
 - [Grafana - Provision data sources](https://grafana.com/docs/grafana/latest/administration/provisioning/#data-sources)
 - [Grafana Helm chart - Sidecar for dashboards](https://github.com/grafana/helm-charts/tree/main/charts/grafana#sidecar-for-dashboards)
 - [Grafana - PostgreSQL data source (매크로와 템플릿 변수)](https://grafana.com/docs/grafana/latest/datasources/postgres/)
-- [k3s - Networking (ServiceLB)](https://docs.k3s.io/networking/networking-services)
+- [kube-vip - Kubernetes Services (LoadBalancer)](https://kube-vip.io/docs/usage/kubernetes-services/)
 - [Kustomize - configMapGenerator](https://kubectl.docs.kubernetes.io/references/kustomize/kustomization/configmapgenerator/)

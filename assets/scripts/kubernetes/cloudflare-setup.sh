@@ -5,10 +5,13 @@
 #   2. SSL 모드 Full (strict), 최소 TLS 1.2
 #   3. 클러스터용 토큰(DNS 편집만 가능) 발급 → cert-manager·cloudflare-ddns 네임스페이스에 Secret 생성
 #
-# 사용법: bash cloudflare-setup.sh [DOMAIN]
+#   4. 지역 엣지 클러스터가 있으면 그 cert-manager 에도 같은 Secret 복사(EDGE_KUBECONFIG 를 준 지역마다)
+#
+# 사용법: bash cloudflare-setup.sh [DOMAIN] [EDGE_KUBECONFIG ...]   (EDGE_KUBECONFIG 는 control plane 기준 경로, 없으면 생략)
 # 준비:   설정용 API 토큰(사용자 소유·계정 소유 어느 쪽이든)을 실행 중 입력합니다.
 #         권한: Account/Account API Tokens/Edit, Zone/Zone/Edit, Zone/Zone Settings/Edit, Zone/Zone/Read,
-#         Zone Resources 는 "All zones from an account". 이 토큰은 저장소·클러스터 어디에도 넣지 않습니다.
+#         Zone Resources 는 "All zones from an account". Account API Tokens 는 존이 아니라 계정을 대상으로 하는 정책에
+#         넣습니다(존 대상 정책에 넣으면 토큰 목록 조회가 9109 로 거부됩니다). 이 토큰은 저장소·클러스터 어디에도 넣지 않습니다.
 # 필요:   curl, python3, ssh(컨트롤플레인 kubectl)
 
 set -euo pipefail
@@ -92,6 +95,18 @@ log "SSL 모드 Full (strict), 최소 TLS 1.2"
 cf PATCH "/zones/$zone_id/settings/ssl" '{"value":"strict"}' >/dev/null
 cf PATCH "/zones/$zone_id/settings/min_tls_version" '{"value":"1.2"}' >/dev/null
 echo "적용했습니다. (HTTP→HTTPS 리다이렉트는 Traefik 이 하므로 Always Use HTTPS 는 켜지 않습니다)"
+
+# ---------- 4-1. 지역 엣지 cert-manager ----------
+# 허브에 이미 있는 클러스터용 토큰을 복사합니다(새로 발급하지 않음). 허브에 아직 없으면 아래 5·6 단계 뒤에 다시 실행합니다.
+for k in "${@:2}"; do
+  log "지역 cert-manager/cloudflare-api-token ($k)"
+  ssh "$CONTROL_PLANE" "kubectl -n cert-manager get secret cloudflare-api-token >/dev/null 2>&1 || exit 0; kubectl -n cert-manager get secret cloudflare-api-token -o json | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+print(json.dumps({\"apiVersion\": \"v1\", \"kind\": \"Secret\", \"type\": d[\"type\"],
+                  \"metadata\": {\"name\": \"cloudflare-api-token\", \"namespace\": \"cert-manager\"}, \"data\": d[\"data\"]}))' \
+    | { kubectl --kubeconfig $k get ns cert-manager >/dev/null 2>&1 || kubectl --kubeconfig $k create ns cert-manager >/dev/null; kubectl --kubeconfig $k apply -f -; }"
+done
 
 # ---------- 5. 클러스터용 토큰 ----------
 # DNS 편집과 존 읽기만 되는 계정 소유 토큰(cfat_…)을 이 존에 한해 만듭니다. 사용자 소유 토큰을 만드는 데 필요한

@@ -239,11 +239,13 @@ log "완료"
 
 </details>
 
+`HOMELAB_ROUTES` 의 대상은 IP 대신 내부망 DNS 이름으로 적어도 됩니다([Proxmox에 Ansible로 내부망 DNS 컨테이너 만드는 방법](/posts/41/)). 커넥터 파드가 클러스터 DNS 를 거쳐 LAN DNS 로 이름을 풀므로, 노드를 바꿔 주소가 달라져도 경로를 다시 만들 필요가 없습니다. 이 글의 환경은 `ssh-proxmox` 를 `pve01.[DOMAIN]`, `ssh-cp` 를 허브의 `kubectl-hub.[DOMAIN]`, `ssh-edge` 를 엣지의 `kubectl-dj.[DOMAIN]` 으로 둡니다.
+
 - **확인:** 출력에 `토큰 권한 점검` 의 `통과`, 이름별 경로(`ssh-cp.[DOMAIN] → ssh://[CONTROL_PLANE_IP]:22` 등), `터널 토큰을 … 에 저장했습니다` 가 보입니다. 두 번째 실행부터는 서비스 토큰이 `있음, 건너뜀` 이고 허브 Secret 이 `unchanged` 입니다.
 
 ## 3. 허브 커넥터 배포
 
-허브 클러스터에서 `homelab` 터널의 커넥터를 돌립니다. 파드를 둘 두면 한쪽 노드가 내려가도 터널이 유지됩니다. 토큰은 환경 변수로 넣지 않고 Secret 을 파일로 마운트해 `TUNNEL_TOKEN_FILE` 로 읽게 합니다. 그래야 파드 정의나 `kubectl describe` 에 토큰이 드러나지 않습니다.
+허브 클러스터에서 `homelab` 터널의 커넥터를 돌립니다. 파드를 둘 두고 `podAntiAffinity` 로 서로 다른 노드에 띄우면 한쪽 노드가 내려가도 터널이 유지되고, PodDisruptionBudget 으로 노드를 비울 때도 하나씩만 내립니다. 토큰은 환경 변수로 넣지 않고 Secret 을 파일로 마운트해 `TUNNEL_TOKEN_FILE` 로 읽게 합니다. 그래야 파드 정의나 `kubectl describe` 에 토큰이 드러나지 않습니다.
 
 ```yaml
 # Cloudflare Tunnel "homelab". 공인 IP·포트포워딩 없이 LAN 호스트의 SSH 를 ssh-*.[DOMAIN] 으로 엽니다(앞단은 Cloudflare Access).
@@ -261,6 +263,13 @@ spec:
     metadata:
       labels: { app: cloudflared }
     spec:
+      affinity:
+        podAntiAffinity:                           # 노드(서버)마다 하나씩. 한 대만 남으면 같은 노드에도 뜹니다
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector: { matchLabels: { app: cloudflared } }
+                topologyKey: kubernetes.io/hostname
       containers:
         - name: cloudflared
           image: cloudflare/cloudflared:2026.9.1
@@ -287,6 +296,16 @@ spec:
             secretName: cloudflared-token
             items: [{ key: TUNNEL_TOKEN, path: token }]
             defaultMode: 0444     # 이미지가 root 가 아닌 계정으로 돕니다
+---
+# 노드 작업(drain) 때 한 번에 하나만 내립니다
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: cloudflared
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: cloudflared }
 ```
 {: file="services/cloudflared/deployment.yaml" }
 

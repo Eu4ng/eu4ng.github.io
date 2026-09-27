@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 #
 # IoT 스택이 쓰는 비밀 값(Secret)을 허브와 엣지 클러스터에 만듭니다. GitOps 저장소에는 비밀 값을 넣지 않으므로 폴더를 push 하기 전에 실행합니다.
+# 엣지에는 지역 DB(TimescaleDB)와 지역 Grafana 도 있습니다. DB 계정(iot, grafana)의 비밀번호는 허브 DB 와 지역 DB 가 같습니다.
 # 허브에 kubectl 로 접근할 수 있고 엣지 kubeconfig 가 있는 곳(control plane)에서 실행합니다: bash create-iot-secrets.sh [EDGE_KUBECONFIG]
 # 비밀번호는 실행 중에 입력받습니다. 이미 있는 Secret 은 건너뜁니다(비밀번호를 바꾸려면 Secret 을 지우고 다시 실행).
+# 엣지 Grafana 관리자 계정은 허브의 monitoring/grafana-admin 을 복사합니다(Prometheus·Grafana 글에서 만듦).
 
 set -euo pipefail
 
 # ---------- 환경에 맞게 수정 ----------
 MOSQUITTO_IMAGE=eclipse-mosquitto:2.0.22   # 계정 파일(해시)을 만들 때 쓰는 이미지. 배포하는 버전과 맞춥니다
-MQTT_USERS=(zigbee2mqtt telegraf homeassistant devices)   # 브로커 계정. devices 는 ESPHome 같은 LAN 기기용
+MQTT_USERS=(zigbee2mqtt telegraf homeassistant devices)   # 브로커 계정. devices 는 ESPHome·서버의 Telegraf 같은 LAN 기기용
 # --------------------------------------
 
 log() { echo -e "\n\033[1;32m==>\033[0m $*"; }
@@ -74,7 +76,34 @@ if secret_exists "${EDGE[@]}" zigbee2mqtt zigbee2mqtt-credentials; then echo "  
 fi
 if secret_exists "${EDGE[@]}" telegraf telegraf-credentials; then echo "  telegraf/telegraf-credentials 있음, 건너뜀"; else
   kubectl "${EDGE[@]}" -n telegraf create secret generic telegraf-credentials \
-    --from-literal=MQTT_USER=telegraf --from-literal=MQTT_PASSWORD="${MQTT_PASSWORD[telegraf]}" --from-literal=HUB_PG_PASSWORD="$PG_PASSWORD"
+    --from-literal=MQTT_USER=telegraf --from-literal=MQTT_PASSWORD="${MQTT_PASSWORD[telegraf]}" \
+    --from-literal=HUB_PG_PASSWORD="$PG_PASSWORD" --from-literal=LOCAL_PG_PASSWORD="$PG_PASSWORD"
+fi
+# 지역 DB 가 생기기 전에 만든 Secret 에는 LOCAL_PG_PASSWORD 가 없으므로 그 키만 더합니다
+if [ -z "$(kubectl "${EDGE[@]}" -n telegraf get secret telegraf-credentials -o jsonpath='{.data.LOCAL_PG_PASSWORD}')" ]; then
+  printf '{"stringData":{"LOCAL_PG_PASSWORD":"%s"}}' "$PG_PASSWORD" \
+    | kubectl "${EDGE[@]}" -n telegraf patch secret telegraf-credentials --type merge --patch-file=/dev/stdin >/dev/null
+  echo "  telegraf/telegraf-credentials 에 LOCAL_PG_PASSWORD 추가"
+fi
+
+# ---------- 6. 엣지: 지역 DB·Grafana ----------
+log "엣지: timescaledb-credentials, grafana-timescale, grafana-admin"
+for ns in timescaledb grafana; do ensure_ns "${EDGE[@]}" "$ns"; done
+if secret_exists "${EDGE[@]}" timescaledb timescaledb-credentials; then echo "  timescaledb/timescaledb-credentials 있음, 건너뜀"; else
+  kubectl "${EDGE[@]}" -n timescaledb create secret generic timescaledb-credentials \
+    --from-literal=POSTGRES_PASSWORD="$PG_PASSWORD" --from-literal=GRAFANA_PASSWORD="$GRAFANA_PASSWORD"
+fi
+if secret_exists "${EDGE[@]}" grafana grafana-timescale; then echo "  grafana/grafana-timescale 있음, 건너뜀"; else
+  kubectl "${EDGE[@]}" -n grafana create secret generic grafana-timescale --from-literal=TIMESCALE_PASSWORD="$GRAFANA_PASSWORD"
+fi
+if secret_exists "${EDGE[@]}" grafana grafana-admin; then echo "  grafana/grafana-admin 있음, 건너뜀"; else
+  kubectl "${HUB[@]}" -n monitoring get secret grafana-admin -o json | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+print(json.dumps({"apiVersion": "v1", "kind": "Secret", "type": d["type"],
+                  "metadata": {"name": "grafana-admin", "namespace": "grafana"}, "data": d["data"]}))' \
+    | kubectl "${EDGE[@]}" apply -f - >/dev/null
+  echo "  grafana/grafana-admin: 허브 monitoring/grafana-admin 복사"
 fi
 
 unset PG_PASSWORD GRAFANA_PASSWORD MQTT_PASSWORD Z2M_TOKEN passwd_file

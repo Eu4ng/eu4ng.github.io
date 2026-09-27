@@ -2,7 +2,7 @@
 #
 # 원격 NAS 백업(restic + SFTP, Cloudflare Tunnel 경유)에 필요한 비밀 값을 허브와 엣지 클러스터의 backup 네임스페이스에 만듭니다.
 # 허브에 kubectl 로 접근할 수 있는 곳에서 실행합니다: bash create-backup-secrets.sh [NAS_USER] [REPO_PATH] [EDGE_KUBECONFIG] [SSH_KEY]
-#   예: bash create-backup-secrets.sh [NAS_USER] /backup/k8s k3s-[SITE].yaml ~/.ssh/id_ed25519
+#   예: bash create-backup-secrets.sh [NAS_USER] /backup/k8s ~/k8s-[SITE].yaml ~/.ssh/id_ed25519
 # SSH_KEY 는 NAS 에 이미 등록된 개인 키입니다(터미널 접속에 쓰는 서버용 키를 그대로 씁니다). 키를 바꿀 때는 새 키로 다시 실행하면 두 클러스터의 키가 교체됩니다.
 # 앞서 cloudflare-tunnel-setup.sh 가 허브에 backup/cloudflare-access(서비스 토큰)를 만들어 두어야 합니다. backup-credentials 는 이미 있으면 건너뜁니다(비밀번호 유지).
 
@@ -12,6 +12,7 @@ set -euo pipefail
 NAS_HOST=nas-ssh.[DOMAIN]                   # Cloudflare Tunnel 로 연 NAS 의 SSH 이름
 CLOUDFLARED=$HOME/.local/bin/cloudflared
 CLOUDFLARED_VERSION=2026.9.1
+EDGE_VOLUME_NAMESPACES=(home-assistant zigbee2mqtt matter otbr mosquitto grafana)   # 엣지에서 볼륨을 백업하는 네임스페이스
 # --------------------------------------
 
 log() { echo -e "\n\033[1;32m==>\033[0m $*"; }
@@ -73,6 +74,37 @@ log "엣지 Secret"; make_secrets edge "${EDGE[@]}"
 PGPASS=$("${HUB[@]}" -n timescaledb get secret timescaledb-credentials -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d)
 printf '{"stringData":{"PGPASSWORD":"%s"}}' "$PGPASS" \
   | "${HUB[@]}" -n backup patch secret backup-credentials --type merge --patch-file=/dev/stdin >/dev/null
+
+# 엣지는 지역 DB 를 pg_dump 로 받으므로 지역 DB 비밀번호를 같은 Secret 에 넣습니다(지역 DB 가 있을 때).
+PGPASS_EDGE=$("${EDGE[@]}" -n timescaledb get secret timescaledb-credentials -o jsonpath='{.data.POSTGRES_PASSWORD}' 2>/dev/null | base64 -d || true)
+if [ -n "$PGPASS_EDGE" ]; then
+  printf '{"stringData":{"PGPASSWORD":"%s"}}' "$PGPASS_EDGE" \
+    | "${EDGE[@]}" -n backup patch secret backup-credentials --type merge --patch-file=/dev/stdin >/dev/null
+fi
+# 이미지 pull Secret ghcr-pull 은 허브 mineru 의 것을 두 클러스터의 backup 네임스페이스로 복사합니다.
+copy_secret() {  # copy_secret <원본 kubectl 옵션 배열 이름> <대상 kubectl 옵션 배열 이름> <원본 ns/이름> <대상 ns>
+  local -n from=$1 to=$2
+  "${to[@]}" get ns "$4" >/dev/null 2>&1 || "${to[@]}" create ns "$4" >/dev/null
+  "${from[@]}" -n "${3%/*}" get secret "${3#*/}" -o json | python3 -c '
+import sys, json
+d = json.load(sys.stdin); d["data"].pop("PGPASSWORD", None)
+print(json.dumps({"apiVersion": "v1", "kind": "Secret", "type": d["type"],
+                  "metadata": {"name": d["metadata"]["name"], "namespace": sys.argv[1]}, "data": d["data"]}))' "$4" \
+    | "${to[@]}" apply -f - >/dev/null
+}
+copy_secret HUB HUB mineru/ghcr-pull backup
+copy_secret HUB EDGE mineru/ghcr-pull backup
+
+# Longhorn 볼륨은 PVC 가 있는 네임스페이스의 CronJob 이 마운트해 올립니다. 그 CronJob 들이 쓸 Secret 을 복사합니다(DB 비밀번호는 빼고).
+# 허브: Grafana, 중앙 HA. 엣지: 지역 상태 볼륨(k8s-gitops iot/edge/backup/cronjob-files.yaml 의 네임스페이스)
+for ns in monitoring home-assistant; do
+  for src in backup/backup-credentials backup/backup-ssh backup/ghcr-pull; do copy_secret HUB HUB "$src" "$ns"; done
+  echo "  hub: $ns 에 backup-credentials·backup-ssh·ghcr-pull 복사"
+done
+for ns in "${EDGE_VOLUME_NAMESPACES[@]}"; do
+  for src in backup/backup-credentials backup/backup-ssh backup/ghcr-pull; do copy_secret EDGE EDGE "$src" "$ns"; done
+  echo "  edge: $ns 에 backup-credentials·backup-ssh·ghcr-pull 복사"
+done
 
 # ---------- 5. 안내 ----------
 log "완료"

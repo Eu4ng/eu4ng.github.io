@@ -28,7 +28,7 @@ permalink: /posts/49/
 | 항목 | 버전 |
 | :--- | :--- |
 | 허브 Kubernetes | `v1.37` (kubeadm) |
-| 엣지 Kubernetes | `v1.36` (k3s) |
+| 엣지 Kubernetes | `v1.37` (kubeadm) |
 | Home Assistant | `2026.9.3` |
 | Remote Home Assistant | `4.6` |
 | 작성 기준일 | `2026-09-25` |
@@ -36,12 +36,13 @@ permalink: /posts/49/
 다음 항목이 준비되어 있어야 합니다.
 
 - 지역 엣지 클러스터의 HA 와 그 클러스터 Secret `home-assistant/ha-api-token` ([엣지 클러스터에 Home Assistant와 Matter 서버 배포하고 API로 통합 설정하는 방법](/posts/48/))
-- control plane 의 엣지 kubeconfig `~/k3s-[SITE].yaml` ([Proxmox에 Ansible로 k3s 엣지 클러스터 만들고 Argo CD 원격 클러스터로 등록하는 방법](/posts/42/))
+- 허브 control plane 의 엣지 kubeconfig `~/k8s-[SITE].yaml` ([Proxmox에 Ansible로 kubeadm 엣지 클러스터 만들고 Argo CD 원격 클러스터로 등록하는 방법](/posts/42/))
+- 허브 클러스터의 Longhorn(StorageClass `longhorn`). 중앙 HA 설정 볼륨을 worker 두 대에 복제해, worker 한 대가 죽어도 다른 worker 에서 같은 설정으로 다시 뜨게 합니다.
 - 허브 Traefik 으로 서비스를 밖에 여는 구성과 내부망 DNS ([외부 접속 글](/posts/40/), [내부망 DNS 글](/posts/41/))
 
 ## 1. 지역 HA 에 Remote Home Assistant 설치
 
-Remote Home Assistant 는 중앙(main)과 지역(remote) HA 양쪽에 모두 설치해야 하고, 지역 쪽 `configuration.yaml` 에는 빈 `remote_homeassistant:` 블록이 있어야 합니다. 지역 HA 매니페스트에 설치 스크립트와 설정 조각을 더하고, initContainer 가 둘 다 처리하게 합니다. 설치 스크립트는 인터넷이 끊겨 내려받지 못해도 경고만 남기고 HA 기동을 막지 않습니다.
+Remote Home Assistant 는 중앙(main)과 지역(remote) HA 양쪽에 모두 설치해야 하고, 지역 쪽 `configuration.yaml` 에는 빈 `remote_homeassistant:` 블록이 있어야 합니다. 지역 HA 매니페스트에 설치 스크립트와 설정 조각을 더하고, initContainer 가 둘 다 처리하게 합니다. 설치 스크립트는 인터넷이 끊겨 내려받지 못해도 경고만 남기고 HA 기동을 막지 않습니다. [지역 HA 글](/posts/48/)의 매니페스트에는 이미 들어 있으므로, 그 글대로 배포했다면 아래 확인만 합니다.
 
 ```python
 # Remote Home Assistant(HACS 커뮤니티 통합)를 /config/custom_components 에 설치합니다. 버전이 같으면 건너뜁니다.
@@ -87,9 +88,10 @@ remote_homeassistant:
 
 ```yaml
 # 엣지의 Home Assistant. Matter 커미셔닝 UI 와 제어·자동화 대시보드로만 쓰고, 수집 경로에는 두지 않습니다.
-# Matter 통합의 엔티티 상태만 자동화(matter-statestream.yaml)로 브로커에 재발행해 Telegraf 가 받게 합니다 (initContainer 가 /config 로 복사하고 configuration.yaml 에 include 를 한 번 덧붙임).
+# Matter 통합의 엔티티 상태·속성과 기기 제어 기록을 자동화(matter-statestream.yaml)로 브로커에 발행해 Telegraf 가 받게 합니다 (initContainer 가 /config 로 복사하고 configuration.yaml 에 include 를 한 번 덧붙임).
 resources:
   - deployment.yaml
+  - service.yaml
   - pvc.yaml
 configMapGenerator:
   - name: home-assistant-seed
@@ -100,7 +102,7 @@ configMapGenerator:
 ```
 {: file="iot/edge/home-assistant/kustomization.yaml" }
 
-`deployment.yaml` 의 initContainer 는 아래처럼 설치 스크립트를 먼저 실행하고, 설정 블록이 없을 때만 덧붙입니다.
+`deployment.yaml` 의 initContainer 는 아래처럼 설치 스크립트를 먼저 실행하고, 설정 블록이 없을 때만 덧붙입니다. `sed` 줄은 예전에 덧붙였던 `mqtt_statestream` 블록을 지웁니다.
 
 ```yaml
 initContainers:
@@ -114,6 +116,7 @@ initContainers:
         f=/config/configuration.yaml
         [ -f $f ] || exit 0
         cp /seed/matter-statestream.yaml /config/matter-statestream.yaml
+        sed -i '/^# --- iot\/edge\/home-assistant 가 덧붙인 설정. Matter 기기 상태/,/^      - "\*\.matter_\*"$/d' $f
         grep -q '^automation matter:' $f || printf '\n# --- iot/edge/home-assistant 가 덧붙인 설정. Matter 통합 엔티티 상태를 MQTT 로 재발행합니다 (자동화는 initContainer 가 복사) ---\nautomation matter: !include matter-statestream.yaml\n' >> $f
         grep -q '^remote_homeassistant:' $f || cat /seed/remote.yaml >> $f
     env:
@@ -127,7 +130,8 @@ initContainers:
 - **확인:** push 뒤 지역 HA 파드가 다시 뜨고, initContainer 로그에 `remote_homeassistant 4.6: 설치함` 이 보입니다.
 
 ```bash
-kubectl --kubeconfig ~/k3s-[SITE].yaml -n home-assistant logs deploy/home-assistant -c seed-config
+# 허브 control plane
+kubectl --kubeconfig ~/k8s-[SITE].yaml -n home-assistant logs deploy/home-assistant -c seed-config
 ```
 
 ## 2. 중앙 HA 배포
@@ -194,7 +198,7 @@ spec:
             limits:   { cpu: "2", memory: 1Gi }   # 기기 없이 원격 엔티티만 들고 있어 지역 HA 보다 가볍습니다
       volumes:
         - name: config
-          persistentVolumeClaim: { claimName: home-assistant-config }
+          persistentVolumeClaim: { claimName: home-assistant-config-lh }   # Longhorn 복제 볼륨 (pvc.yaml)
         - name: seed
           configMap: { name: home-assistant-seed }
 ```
@@ -213,14 +217,16 @@ spec:
 {: file="iot/hub/home-assistant/service.yaml" }
 
 ```yaml
+# 복제 볼륨(Longhorn, 서버 두 대에 2벌). 서버 한 대가 죽어도 다른 worker 에서 같은 설정으로 다시 뜹니다
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: home-assistant-config
+  name: home-assistant-config-lh
   annotations:
-    argocd.argoproj.io/sync-options: Prune=false   # 사용자·원격 연결 설정·대시보드. 지우면 다시 설정해야 합니다
+    argocd.argoproj.io/sync-options: Prune=false
 spec:
   accessModes: [ReadWriteOnce]
+  storageClassName: longhorn
   resources:
     requests:
       storage: 2Gi
@@ -270,7 +276,7 @@ unset T
 
 ## 4. 지역 연결과 프록시 설정
 
-[지역 HA 글](/posts/48/)의 `setup-home-assistant.sh` 를 중앙 HA 에도 씁니다. 변수 블록에서 MQTT·Matter·OTBR 주소를 비우면 그 통합은 건너뛰고, `REMOTES` 에 적은 지역마다 Remote Home Assistant 연결을 추가합니다. 지역 HA 토큰은 그 지역 클러스터의 Secret 에서 읽습니다. 엔티티 접두사(`[SITE_CODE]_`)는 지역마다 달라야 하며, 여러 지역에 같은 이름의 엔티티가 있어도 충돌하지 않게 합니다. 서비스 이름에도 같은 접두사가 붙습니다.
+[지역 HA 글](/posts/48/)의 `setup-home-assistant.sh` 를 중앙 HA 에도 씁니다. 변수 블록에서 MQTT·Matter·OTBR 주소를 비우면 그 통합은 건너뛰고, `REMOTES` 에 적은 지역마다 Remote Home Assistant 연결을 추가합니다. 지역 HA 토큰은 그 지역 클러스터의 Secret 에서 읽습니다. 지역 HA 주소는 그 지역의 서비스 VIP 와 HA 포트(`[EDGE_SERVICE_VIP]:8123`)입니다. HA 가 어느 worker 에 떠도 이 주소는 그대로입니다. 엔티티 접두사(`[SITE_CODE]_`)는 지역마다 달라야 하며, 여러 지역에 같은 이름의 엔티티가 있어도 충돌하지 않게 합니다. 서비스 이름에도 같은 접두사가 붙습니다.
 
 중앙 HA 앞의 프록시는 같은 클러스터의 Traefik 파드이므로 `TRUSTED_PROXIES` 에는 허브의 파드 대역을 넣습니다. kubeadm 에 Flannel 기본값을 썼다면 `10.244.0.0/16` 입니다. 밖에서 오는 요청은 그 앞에 Cloudflare 를 거치므로 스크립트의 Cloudflare 대역(`$CLOUDFLARE_IPV4`)도 함께 넣습니다. 빼면 HA 가 Cloudflare 주소를 접속자로 보고 로그인 실패 차단도 그 주소에 겁니다.
 
@@ -286,7 +292,7 @@ MATTER_URL=
 OTBR_URL=
 TRUSTED_PROXIES="[POD_CIDR] $CLOUDFLARE_IPV4"
 KUBECTL="kubectl"
-REMOTES="[SITE_CODE]_|[EDGE_IP]:8123|$HOME/k3s-[SITE].yaml|[SITE_NAME] "
+REMOTES="[SITE_CODE]_|[EDGE_SERVICE_VIP]:8123|$HOME/k8s-[SITE].yaml|[SITE_NAME] "
 ```
 {: file="setup-home-assistant.sh" }
 
@@ -305,7 +311,7 @@ bash setup-home-assistant.sh http://$(kubectl -n home-assistant get svc home-ass
 # "기기 및 서비스 > 통합구성요소 추가" 와 같은 설정 흐름(config flow)을 순서대로 밟습니다. 이미 있는 통합은 건너뜁니다.
 # 역방향 프록시(허브 Traefik) 뒤에서 접속받도록 HA 의 HTTP 설정(프록시 신뢰, 로그인 실패 차단)도 API 로 바꿉니다.
 # 중앙 HA 에서는 MQTT·Matter·OTBR 을 비우고 REMOTES 에 지역 HA 를 적으면 Remote Home Assistant 로 지역 엔티티를 모읍니다.
-# HA 에 접속할 수 있는 곳에서 실행합니다: bash setup-home-assistant.sh [HA_URL]   (예: http://[EDGE_IP]:8123)
+# HA 에 접속할 수 있는 곳에서 실행합니다: bash setup-home-assistant.sh [HA_URL]   (예: http://[EDGE_SERVICE_VIP]:8123)
 # 준비: HA 프로필 > 보안 > 장기 액세스 토큰 에서 토큰을 만들어 엣지 클러스터 Secret 에 넣어 둡니다(아래 HA_TOKEN_SECRET).
 #       kubectl 로 그 Secret 을 읽을 수 없으면 실행 중 토큰을 입력받습니다. MQTT 비밀번호는 실행 중 입력받습니다.
 
@@ -320,13 +326,15 @@ OTBR_URL=http://127.0.0.1:8081                      # 같은 노드의 hostNetwo
 # Cloudflare 프록시 대역(https://www.cloudflare.com/ips-v4). 밖에서 Cloudflare 를 거쳐 오면 이 대역까지 신뢰해야 HA 가 실제 접속자 IP 를 보고,
 # 로그인 실패 차단도 Cloudflare 주소가 아니라 그 접속자에게 겁니다.
 CLOUDFLARE_IPV4="173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22"
-TRUSTED_PROXIES="[HUB_NODE_IP_1] [HUB_NODE_IP_2] $CLOUDFLARE_IPV4"   # HA 앞 역방향 프록시 주소(허브 파드 요청은 허브 노드 주소로 들어옴)와 Cloudflare. 비우면 HTTP 설정 생략
+# HA 가 보는 요청 출처(프록시) 주소와 Cloudflare. 비우면 HTTP 설정 생략. 엣지 HA 를 서비스 VIP(kube-vip LoadBalancer)로 받으면 요청이
+# VIP 를 가진 엣지 control plane 주소로 SNAT 되어 오므로 그 주소들을, hostNetwork 노드 주소로 직접 받으면 허브 노드 주소들을 적습니다.
+TRUSTED_PROXIES="[PROXY_IP_1] [PROXY_IP_2] $CLOUDFLARE_IPV4"
 LOGIN_ATTEMPTS=5                                    # 로그인 실패가 이 횟수면 그 IP 를 차단
 HA_TOKEN_SECRET=home-assistant/ha-api-token         # 토큰을 담은 Secret (네임스페이스/이름, 키 token)
-KUBECTL="kubectl --kubeconfig $HOME/k3s-[SITE].yaml"   # 이 HA 가 있는 클러스터에 접근하는 kubectl
+KUBECTL="kubectl --kubeconfig $HOME/k8s-[SITE].yaml"   # 이 HA 가 있는 클러스터에 접근하는 kubectl
 # 중앙 HA 전용: 모아 볼 지역 HA. "엔티티접두사|주소:포트|지역클러스터 kubeconfig|표시이름접두사" 를 공백으로 구분.
 # 지역 HA 의 토큰은 그 클러스터의 HA_TOKEN_SECRET 에서 읽습니다. 지역 HA 에도 Remote Home Assistant 가 설치돼 있어야 합니다.
-REMOTES=""                                          # 예: "dj_|[EDGE_IP]:8123|$HOME/k3s-[SITE].yaml|대전 "
+REMOTES=""                                          # 예: "dj_|[EDGE_SERVICE_VIP]:8123|$HOME/k8s-[SITE].yaml|대전 "
 # --------------------------------------
 
 log() { echo -e "\n\033[1;32m==>\033[0m $*"; }
@@ -968,11 +976,11 @@ kubectl -n home-assistant exec -i deploy/home-assistant -c home-assistant -- \
 unset T
 ```
 
-지역 HA 에서는 Zigbee2MQTT 가 꺼 둔 채 등록한 진단 엔티티(LQI 등)를 켜고, 페어링 직후 IEEE 주소(`0x…`)로 잡힌 엔티티 ID 를 기기 이름으로 바꿉니다. Matter 기기는 한국어 HA 가 엔티티 이름(`온도`)을 로마자로 옮기고 방 이름까지 붙여 `sensor.cimsil2_bedroom2_air_quality_ondo` 같은 ID 를 만드므로, `--rename-matter` 로 `sensor.bedroom2_air_quality_temperature` 처럼 기기 이름과 측정 항목의 영문으로 바꿉니다. 표시 이름은 한국어 그대로이고, 허브 DB 의 `hass.device` 에는 바꾼 ID 가 들어갑니다. `--assign-areas` 는 Zigbee·Matter 기기를 이름의 방 부분(`bedroom2-th` 의 `bedroom2`)에 맞는 영역으로 옮깁니다. 방 코드는 스크립트의 `ROOMS` 로 한국어 영역 이름(`침실2`)이 되고, 그 영역이 없으면 방 코드를 별칭으로 붙여 새로 만듭니다. 그래서 기기를 추가하거나 다른 방으로 옮길 때는 이름만 바꾸고 이 명령을 실행하면 됩니다. SmartThings 같은 다른 컨트롤러에서 공유받은 Matter 기기는 그쪽 이름이 HA 기본 이름으로 들어오므로, 여러 대를 한 번에 규칙대로 바꿀 때는 `--set-name [SERIAL]=[DEVICE_NAME]` 을 기기마다 같은 명령에 붙입니다. 시리얼은 HA 의 기기 화면에서 확인합니다. 이름을 바꾸면 중앙에는 새 ID 가 올라오고 옛 ID 는 잔재가 되므로, 새 엔티티가 보인 뒤 위의 중앙 명령을 한 번 더 실행합니다.
+지역 HA 에서는 Zigbee2MQTT 가 꺼 둔 채 등록한 진단 엔티티(LQI 등)를 켜고, 페어링 직후 IEEE 주소(`0x…`)로 잡힌 엔티티 ID 를 기기 이름으로 바꿉니다. Matter 기기는 한국어 HA 가 엔티티 이름(`온도`)을 로마자로 옮기고 방 이름까지 붙여 `sensor.cimsil2_bedroom2_air_quality_ondo` 같은 ID 를 만드므로, `--rename-matter` 로 `sensor.bedroom2_air_quality_temperature` 처럼 기기 이름과 측정 항목의 영문으로 바꿉니다. 표시 이름은 한국어 그대로이고, DB 의 `property` 에는 바꾼 ID 에서 기기 이름을 뗀 영문 측정 항목(`temperature`)이 들어갑니다. `--assign-areas` 는 Zigbee·Matter 기기를 이름의 방 부분(`bedroom2-th` 의 `bedroom2`)에 맞는 영역으로 옮깁니다. 방 코드는 스크립트의 `ROOMS` 로 한국어 영역 이름(`침실2`)이 되고, 그 영역이 없으면 방 코드를 별칭으로 붙여 새로 만듭니다. 그래서 기기를 추가하거나 다른 방으로 옮길 때는 이름만 바꾸고 이 명령을 실행하면 됩니다. SmartThings 같은 다른 컨트롤러에서 공유받은 Matter 기기는 그쪽 이름이 HA 기본 이름으로 들어오므로, 여러 대를 한 번에 규칙대로 바꿀 때는 `--set-name [SERIAL]=[DEVICE_NAME]` 을 기기마다 같은 명령에 붙입니다. 시리얼은 HA 의 기기 화면에서 확인합니다. 이름을 바꾸면 중앙에는 새 ID 가 올라오고 옛 ID 는 잔재가 되므로, 새 엔티티가 보인 뒤 위의 중앙 명령을 한 번 더 실행합니다.
 
 ```bash
 # control plane. 지역 HA
-K="kubectl --kubeconfig $HOME/k3s-[SITE].yaml -n home-assistant"
+K="kubectl --kubeconfig $HOME/k8s-[SITE].yaml -n home-assistant"
 T=$($K get secret ha-api-token -o jsonpath='{.data.token}' | base64 -d)
 $K exec -i deploy/home-assistant -c home-assistant -- \
   env HA_TOKEN="$T" python3 - --enable-platform mqtt --rename-ieee --rename-matter --assign-areas --dry-run < ha-registry.py
@@ -995,7 +1003,7 @@ unset T
 ```
 
 - **확인:** `binary_sensor.[SITE_CODE]_zigbee2mqtt_bridge_connection_state` 처럼 접두사가 붙은 지역 엔티티가 나옵니다. 중앙 화면에서 지역 스위치를 켜면 지역 HA 에서도 같은 엔티티가 켜집니다.
-- **확인:** 지역 HA 를 재시작하면(`kubectl --kubeconfig ~/k3s-[SITE].yaml -n home-assistant rollout restart deploy/home-assistant`) 중앙에서 그 지역 엔티티가 사라졌다가, 지역 HA 가 다시 뜨면 곧 돌아옵니다. 지역 HA 는 중앙 HA 와 상관없이 기기와 자동화를 계속 처리합니다.
+- **확인:** 지역 HA 를 재시작하면(`kubectl --kubeconfig ~/k8s-[SITE].yaml -n home-assistant rollout restart deploy/home-assistant`) 중앙에서 그 지역 엔티티가 사라졌다가, 지역 HA 가 다시 뜨면 곧 돌아옵니다. 지역 HA 는 중앙 HA 와 상관없이 기기와 자동화를 계속 처리합니다.
 
 ## 트러블슈팅
 

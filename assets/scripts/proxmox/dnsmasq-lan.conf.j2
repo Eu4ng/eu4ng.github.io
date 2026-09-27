@@ -1,5 +1,5 @@
 # proxmox-ansible 의 playbooks/lan-dns.yml 이 만듭니다. 직접 고치지 마세요.
-listen-address={{ lan_dns_ip }}
+listen-address={{ ansible_host }}
 bind-interfaces
 no-resolv
 no-hosts
@@ -13,4 +13,34 @@ local=/{{ name }}.{{ lan_dns_domain }}/
 {% for ip in lan_dns_targets %}
 address=/{{ name }}.{{ lan_dns_domain }}/{{ ip }}
 {% endfor %}
+{% endfor %}
+{# 지역 서비스 이름: 그 지역의 서비스 VIP(지역 Traefik). 허브가 없어도 내부망에서 이름으로 붙습니다 #}
+{% for c in k8s_clusters.values() if c.lan_dns_names is defined %}
+{% for name in c.lan_dns_names %}
+local=/{{ name }}.{{ lan_dns_domain }}/
+address=/{{ name }}.{{ lan_dns_domain }}/{{ c.service_vip }}
+{% endfor %}
+{% endfor %}
+{# 호스트 이름(<이름>.<도메인>): inventory 의 모든 호스트(Proxmox 노드, DNS CT, 시험 VM …)와 k8s_clusters 의 노드.
+   노드를 바꾸면 k8s-cluster.yml 끝에서 이 설정을 다시 만들므로, 스크립트·문서는 IP 대신 이 이름을 씁니다. #}
+{% set hosts = {} %}
+{% for h in groups['all'] if hostvars[h].ansible_host is defined %}
+{% set _ = hosts.update({h: hostvars[h].ansible_host}) %}
+{% endfor %}
+{% for c in k8s_clusters.values() %}
+{% for n in c.nodes %}
+{% set _ = hosts.update({n.name: n.ip}) %}
+{% endfor %}
+{% endfor %}
+{# 역할 이름: k8s-<클러스터>(API VIP), kubectl-<클러스터>(kubectl 을 돌리는 첫 control plane), iot-<클러스터>(LoadBalancer 서비스 VIP) #}
+{% for c in k8s_clusters.values() if c.dns_name is defined %}
+{% set _ = hosts.update({'k8s-' ~ c.dns_name: c.vip}) %}
+{% set _ = hosts.update({'kubectl-' ~ c.dns_name: (c.nodes | selectattr('role', 'eq', 'control-plane') | rejectattr('retire', 'defined') | first).ip}) %}
+{% if c.service_vip is defined %}
+{% set _ = hosts.update({'iot-' ~ c.dns_name: c.service_vip}) %}
+{% endif %}
+{% endfor %}
+{% for name, ip in hosts | dictsort %}
+local=/{{ name }}.{{ lan_dns_domain }}/
+address=/{{ name }}.{{ lan_dns_domain }}/{{ ip }}
 {% endfor %}
