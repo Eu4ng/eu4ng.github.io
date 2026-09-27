@@ -19,7 +19,9 @@ OTBR_URL=http://127.0.0.1:8081                      # 같은 노드의 hostNetwo
 # Cloudflare 프록시 대역(https://www.cloudflare.com/ips-v4). 밖에서 Cloudflare 를 거쳐 오면 이 대역까지 신뢰해야 HA 가 실제 접속자 IP 를 보고,
 # 로그인 실패 차단도 Cloudflare 주소가 아니라 그 접속자에게 겁니다.
 CLOUDFLARE_IPV4="173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22"
-TRUSTED_PROXIES="[HUB_NODE_IP_1] [HUB_NODE_IP_2] $CLOUDFLARE_IPV4"   # HA 앞 역방향 프록시 주소(허브 파드 요청은 허브 노드 주소로 들어옴)와 Cloudflare. 비우면 HTTP 설정 생략
+# HA 가 보는 요청 출처(프록시) 주소와 Cloudflare. 비우면 HTTP 설정 생략. 엣지 HA 를 서비스 VIP(kube-vip LoadBalancer)로 받으면 요청이
+# VIP 를 가진 엣지 control plane 주소로 SNAT 되어 오므로 그 주소들을, hostNetwork 노드 주소로 직접 받으면 허브 노드 주소들을 적습니다.
+TRUSTED_PROXIES="[PROXY_IP_1] [PROXY_IP_2] $CLOUDFLARE_IPV4"
 LOGIN_ATTEMPTS=5                                    # 로그인 실패가 이 횟수면 그 IP 를 차단
 HA_TOKEN_SECRET=home-assistant/ha-api-token         # 토큰을 담은 Secret (네임스페이스/이름, 키 token)
 KUBECTL="kubectl --kubeconfig $HOME/k3s-[SITE].yaml"   # 이 HA 가 있는 클러스터에 접근하는 kubectl

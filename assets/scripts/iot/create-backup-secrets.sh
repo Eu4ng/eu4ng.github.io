@@ -74,6 +74,21 @@ PGPASS=$("${HUB[@]}" -n timescaledb get secret timescaledb-credentials -o jsonpa
 printf '{"stringData":{"PGPASSWORD":"%s"}}' "$PGPASS" \
   | "${HUB[@]}" -n backup patch secret backup-credentials --type merge --patch-file=/dev/stdin >/dev/null
 
+# Longhorn 복제 볼륨(Grafana, 중앙 HA)은 다른 네임스페이스의 PVC 라 그 네임스페이스의 CronJob 이 마운트해 올립니다.
+# 그 CronJob 들이 쓸 Secret 을 복사합니다(DB 비밀번호는 빼고). 이미지 pull Secret ghcr-pull 은 mineru 의 것을 씁니다.
+for ns in monitoring home-assistant; do
+  "${HUB[@]}" get ns "$ns" >/dev/null 2>&1 || "${HUB[@]}" create ns "$ns" >/dev/null
+  for src in backup/backup-credentials backup/backup-ssh mineru/ghcr-pull; do
+    "${HUB[@]}" -n "${src%/*}" get secret "${src#*/}" -o json | python3 -c '
+import sys, json
+d = json.load(sys.stdin); d["data"].pop("PGPASSWORD", None)
+print(json.dumps({"apiVersion": "v1", "kind": "Secret", "type": d["type"],
+                  "metadata": {"name": d["metadata"]["name"], "namespace": sys.argv[1]}, "data": d["data"]}))' "$ns" \
+      | "${HUB[@]}" apply -f - >/dev/null
+  done
+  echo "  hub: $ns 에 backup-credentials·backup-ssh·ghcr-pull 복사"
+done
+
 # ---------- 5. 안내 ----------
 log "완료"
 if [ "$NEW_PASSWORD" = yes ]; then
