@@ -42,7 +42,7 @@ permalink: /posts/46/
 
 {% raw %}
 ```yaml
-vm_template_vmid: 9000                        # playbooks/vm-template.yml 이 만드는 Ubuntu 클라우드 이미지 템플릿 (SSH 키·qemu-guest-agent 포함)
+vm_template_vmid: 9000                        # playbooks/vm-template.yml 이 노드마다 만드는 Ubuntu 클라우드 이미지 템플릿 (SSH 키·qemu-guest-agent 포함). 노드별 값은 inventory
 vm_template_name: ubuntu-2404-cloud
 vm_template_image_url: https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
 vm_template_user: ubuntu                      # 복제한 VM 의 접속 계정 (cloud-init)
@@ -148,7 +148,7 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/vm-template.yml -o pla
           ansible.builtin.shell: |
             set -e
             qm create {{ vm_template_vmid }} --name {{ vm_template_name }} --ostype l26 \
-              --cpu host --cores 2 --memory 2048 --agent 1 \
+              --cpu host --cores 2 --memory 2048 --balloon 0 --agent 1 \
               --net0 virtio,bridge={{ vm_bridge }} --scsihw virtio-scsi-single --serial0 socket --vga serial0
             qm set {{ vm_template_vmid }} --scsi0 {{ vm_disk_storage }}:0,import-from={{ image_path }},iothread=1,discard=on,ssd=1
             qm set {{ vm_template_vmid }} --ide2 {{ vm_disk_storage }}:cloudinit --boot order=scsi0

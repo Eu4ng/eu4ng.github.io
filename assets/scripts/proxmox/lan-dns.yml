@@ -2,7 +2,7 @@
 #   ansible-playbook playbooks/lan-dns.yml   (PROXMOX_* 환경변수 필요, README 참고)
 ---
 - name: CT 템플릿 준비
-  hosts: proxmox
+  hosts: proxmox_primary
   gather_facts: false
   tasks:
     - name: 템플릿 내려받기 (없을 때만)
@@ -50,6 +50,9 @@
       ansible.builtin.raw: command -v python3 >/dev/null || (apt-get update -q && apt-get install -y -q python3)
       changed_when: false
   tasks:
+    - name: 시간대
+      community.general.timezone:
+        name: "{{ timezone }}"
     - name: dnsmasq 설치
       ansible.builtin.apt:
         name: dnsmasq
@@ -74,7 +77,7 @@
         state: restarted
 
 - name: 호스트 정리와 확인
-  hosts: proxmox
+  hosts: proxmox_primary
   gather_facts: false
   vars:
     first_name: "{{ lan_dns_names[0] }}.{{ lan_dns_domain }}"

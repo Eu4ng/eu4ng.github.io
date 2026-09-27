@@ -82,11 +82,15 @@ collections:
 ```yaml
 all:
   children:
-    proxmox:                      # Proxmox 호스트
+    proxmox:                      # Proxmox 호스트. 호스트 이름이 곧 노드 이름(pvesh get /nodes)입니다
       hosts:
-        server:
+        pve01:
           ansible_host: [PROXMOX_IP]
           ansible_user: root
+      children:
+        proxmox_primary:          # CT 를 만드는 노드. 호스트가 한 대면 그 호스트입니다
+          hosts:
+            pve01:
     lan_dns:                      # playbooks/lan-dns.yml 이 만드는 CT
       hosts:
         lan-dns:
@@ -95,20 +99,22 @@ all:
 ```
 {: file="inventory.yml" }
 
-- **확인:** `ansible-inventory --graph` 에 `@proxmox` 아래 `server`, `@lan_dns` 아래 `lan-dns` 가 보입니다.
+- **확인:** `ansible-inventory --graph` 에 `@proxmox` 아래 `pve01`(과 `@proxmox_primary`), `@lan_dns` 아래 `lan-dns` 가 보입니다.
 
 ## 3. 변수 채우기
 
 값은 이 파일에서만 바꿉니다. 플레이북과 템플릿은 변수만 참조합니다.
 
+{% raw %}
 ```yaml
 proxmox_api_host: [PROXMOX_IP]
-proxmox_node: server                          # pvesh get /nodes 의 노드 이름
+proxmox_node: "{{ groups.proxmox_primary[0] }}"   # CT 를 만드는 노드(pvesh get /nodes 의 이름). inventory 의 proxmox_primary
 ct_template_storage: local                    # CT 템플릿을 두는 스토리지
 ct_disk_storage: local-lvm                    # CT 디스크를 두는 스토리지
 ct_bridge: vmbr0
 ct_gateway: [GATEWAY_IP]
 ct_ssh_pubkey: "[SSH_PUBLIC_KEY]"             # ~/.ssh/id_ed25519.pub 의 내용
+timezone: Asia/Seoul                          # CT 의 시간대
 
 # ---- lan-dns: 내부망 DNS ----
 lan_dns_vmid: 202
@@ -121,8 +127,9 @@ lan_dns_targets: [[NODE_IP_1], [NODE_IP_2]]                 # Traefik 이 443 �
 lan_dns_upstream: [1.1.1.1, 1.0.0.1]                        # 그 외 이름을 넘길 DNS
 ```
 {: file="group_vars/all.yml" }
+{% endraw %}
 
-dnsmasq 설정 템플릿입니다. 이름마다 `local=` 로 dnsmasq 가 직접 답하게 하고 `address=` 로 노드 IP 를 줍니다. `local=` 이 없으면 AAAA 처럼 `address=` 에 없는 질의를 상위로 넘겨 Cloudflare 의 IPv6 주소가 새어 나갑니다.
+dnsmasq 설정 템플릿입니다. 이름마다 `local=` 로 dnsmasq 가 직접 답하게 하고 `address=` 로 노드 IP 를 줍니다. `local=` 이 없으면 AAAA 처럼 `address=` 에 없는 질의를 상위로 넘겨 Cloudflare 의 IPv6 주소가 새어 나갑니다. 맨 아래 블록은 Proxmox 호스트의 FQDN(`pve01.[DOMAIN]`)을 inventory 주소로 답합니다.
 
 {% raw %}
 ```text
@@ -141,6 +148,11 @@ local=/{{ name }}.{{ lan_dns_domain }}/
 {% for ip in lan_dns_targets %}
 address=/{{ name }}.{{ lan_dns_domain }}/{{ ip }}
 {% endfor %}
+{% endfor %}
+{# Proxmox 노드의 FQDN(pve01.<도메인> 등). 주소는 inventory 의 proxmox 그룹에서 가져옵니다 #}
+{% for host in groups['proxmox'] %}
+local=/{{ host }}.{{ lan_dns_domain }}/
+address=/{{ host }}.{{ lan_dns_domain }}/{{ hostvars[host].ansible_host }}
 {% endfor %}
 ```
 {: file="templates/dnsmasq-lan.conf.j2" }
@@ -166,7 +178,7 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/dnsmasq-lan.conf.j2 -o
 #   ansible-playbook playbooks/lan-dns.yml   (PROXMOX_* 환경변수 필요, README 참고)
 ---
 - name: CT 템플릿 준비
-  hosts: proxmox
+  hosts: proxmox_primary
   gather_facts: false
   tasks:
     - name: 템플릿 내려받기 (없을 때만)
@@ -214,6 +226,9 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/dnsmasq-lan.conf.j2 -o
       ansible.builtin.raw: command -v python3 >/dev/null || (apt-get update -q && apt-get install -y -q python3)
       changed_when: false
   tasks:
+    - name: 시간대
+      community.general.timezone:
+        name: "{{ timezone }}"
     - name: dnsmasq 설치
       ansible.builtin.apt:
         name: dnsmasq
@@ -238,7 +253,7 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/dnsmasq-lan.conf.j2 -o
         state: restarted
 
 - name: 호스트 정리와 확인
-  hosts: proxmox
+  hosts: proxmox_primary
   gather_facts: false
   vars:
     first_name: "{{ lan_dns_names[0] }}.{{ lan_dns_domain }}"

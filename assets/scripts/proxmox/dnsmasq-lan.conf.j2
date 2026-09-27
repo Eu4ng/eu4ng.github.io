@@ -14,3 +14,8 @@ local=/{{ name }}.{{ lan_dns_domain }}/
 address=/{{ name }}.{{ lan_dns_domain }}/{{ ip }}
 {% endfor %}
 {% endfor %}
+{# Proxmox 노드의 FQDN(pve01.<도메인> 등). 주소는 inventory 의 proxmox 그룹에서 가져옵니다 #}
+{% for host in groups['proxmox'] %}
+local=/{{ host }}.{{ lan_dns_domain }}/
+address=/{{ host }}.{{ lan_dns_domain }}/{{ hostvars[host].ansible_host }}
+{% endfor %}
