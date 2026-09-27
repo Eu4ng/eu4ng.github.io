@@ -24,7 +24,7 @@ Thread 기기(Matter over Thread)를 LAN 과 잇는 **OpenThread Border Router**
 
 | 항목 | 버전 |
 | :--- | :--- |
-| 엣지 Kubernetes | `v1.36` (k3s) |
+| 엣지 Kubernetes | `v1.37` (kubeadm) |
 | OpenThread Border Router | `openthread/border-router:sha-9802eb8` (Thread 1.4) |
 | 라디오 | `SLZB-MR3U` EFR32MG24, RCP 펌웨어 `SL-OPENTHREAD/2.7.2.0` |
 | Home Assistant | `2026.9.3` |
@@ -32,7 +32,7 @@ Thread 기기(Matter over Thread)를 LAN 과 잇는 **OpenThread Border Router**
 
 다음 항목이 준비되어 있어야 합니다.
 
-- IPv6 포워딩과 `tun` 모듈이 설정된 엣지 노드 ([Proxmox에 Ansible로 k3s 엣지 클러스터 만들고 Argo CD 원격 클러스터로 등록하는 방법](/posts/42/)의 플레이북이 넣습니다)
+- IPv6 포워딩과 `tun` 모듈이 설정된 엣지 노드 ([Proxmox에 Ansible로 kubeadm 엣지 클러스터 만들고 Argo CD 원격 클러스터로 등록하는 방법](/posts/42/)의 `playbooks/k8s-cluster.yml` 이 클러스터 정의에 `otbr_host: true` 가 있으면 노드마다 `/etc/sysctl.d/60-otbr.conf` 와 `tun` 모듈을 넣습니다)
 - 라디오 하나가 "Thread to remote OTBR" 모드인 SLZB-MR3U ([SLZB-MR3U 초기 설정하고 Zigbee와 Thread 라디오 모드 나누는 방법](/posts/45/))
 - 엣지 클러스터의 Home Assistant 와 통합 설정 스크립트 ([엣지 클러스터에 Home Assistant와 Matter 서버 배포하고 API로 통합 설정하는 방법](/posts/48/))
 - GHCR 비공개 이미지를 받을 pull Secret(`ghcr-pull`) 과 이미지를 빌드할 GitHub Actions
@@ -123,7 +123,7 @@ git push
 
 ## 3. 엣지 베이스와 지역 오버레이
 
-OTBR 은 노드에 `wpan0` 인터페이스를 만들고 LAN 쪽(`eth0`)으로 Thread 망 경로를 광고해야 하므로 `hostNetwork` 와 `privileged` 로 띄웁니다. 호스트의 ip6tables 에 Thread 망 필터 규칙도 넣습니다. 데이터셋과 기기 등록 정보는 `/data`(볼륨)에 남습니다. REST API(8081)는 Home Assistant 가 붙도록 모든 주소에서 열고, 웹 화면(8080)은 노드 안에서만 엽니다.
+OTBR 은 노드에 `wpan0` 인터페이스를 만들고 LAN 쪽(`eth0`)으로 Thread 망 경로를 광고해야 하므로 `hostNetwork` 와 `privileged` 로 띄웁니다. 호스트의 ip6tables 에 Thread 망 필터 규칙도 넣습니다. 데이터셋과 기기 등록 정보는 `/data`(볼륨)에 남습니다. REST API(8081)는 Home Assistant 가 붙도록 모든 주소에서 열고, 웹 화면(8080)은 노드 안에서만 엽니다. HA 의 OTBR 통합이 `http://127.0.0.1:8081` 로 붙으므로 `podAffinity` 의 `required` 규칙으로 HA 파드와 같은 노드에만 뜨게 합니다. 서비스 VIP 를 거치지 않으므로 Service 는 두지 않습니다.
 
 ```yaml
 # 엣지의 Thread 보더 라우터(OpenThread Border Router). SLZB 의 Thread 라디오(RCP, TCP 포트)에 socat 으로 붙습니다.
@@ -151,6 +151,12 @@ spec:
       labels: { app: otbr }
     spec:
       hostNetwork: true                    # wpan0 인터페이스를 노드에 만들고 eth0 로 RA 를 보내 LAN 이 Thread 망 경로를 배우게 합니다
+      affinity:                            # HA 와 같은 노드에 둡니다(HA 의 OTBR 통합이 http://127.0.0.1:8081 로 붙습니다)
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector: { matchLabels: { app: home-assistant } }
+              namespaces: [home-assistant]
+              topologyKey: kubernetes.io/hostname
       dnsPolicy: ClusterFirstWithHostNet
       imagePullSecrets:
         - name: ghcr-pull                  # 비공개 GHCR 패키지. kubectl create secret docker-registry 로 미리 만듭니다 (허브의 것과 같은 토큰)
@@ -209,7 +215,7 @@ spec:
 지역 오버레이는 라디오 주소만 바꿉니다.
 
 ```yaml
-# 지역 엣지의 Thread 보더 라우터. 라디오는 SLZB-MR3U 의 EFR32MG24("Thread to remote OTBR" 모드, 포트 6638).
+# [SITE] 엣지의 Thread 보더 라우터. 라디오는 SLZB-MR3U 의 EFR32MG24("Thread to remote OTBR" 모드, 포트 6638).
 resources:
   - ../../../edge/otbr
 patches:
@@ -231,8 +237,8 @@ patches:
 이미지가 비공개라 엣지의 `otbr` 네임스페이스에도 pull Secret 이 필요합니다. 허브에 있는 것을 그대로 복사합니다.
 
 ```bash
-# control plane: 허브의 ghcr-pull 을 엣지 otbr 네임스페이스로 복사
-E="--kubeconfig ~/k3s-[SITE].yaml"
+# 허브 control plane: 허브의 ghcr-pull 을 엣지 otbr 네임스페이스로 복사
+E="--kubeconfig ~/k8s-[SITE].yaml"
 kubectl $E create namespace otbr --dry-run=client -o yaml | kubectl $E apply -f -
 kubectl -n mineru get secret ghcr-pull -o json \
   | python3 -c 'import sys,json; d=json.load(sys.stdin); print(json.dumps({"apiVersion":"v1","kind":"Secret","type":d["type"],"metadata":{"name":"ghcr-pull","namespace":"otbr"},"data":d["data"]}))' \
@@ -244,7 +250,7 @@ git commit -m "feat(iot): 엣지에 OpenThread Border Router 추가"
 git push
 ```
 
-- **확인:** Argo CD 의 `[SITE]-otbr` 가 `Synced`, `Healthy`. 파드 로그에 `Radio URL: spinel+hdlc+forkpty:///usr/bin/socat?…` 와 `RCP => … Reset info` 가 보이면 라디오와 통신한 것입니다. `curl http://[EDGE_IP]:8081/node/state` 는 아직 데이터셋이 없어 `"disabled"` 입니다.
+- **확인:** Argo CD 의 `[SITE]-otbr` 가 `Synced`, `Healthy`. `kubectl $E -n otbr get pods -o wide` 의 `NODE` 가 `home-assistant` 파드와 같은 worker 이고, 그 노드 IP 를 아래에서 `[OTBR_NODE_IP]` 로 씁니다. 파드 로그에 `Radio URL: spinel+hdlc+forkpty:///usr/bin/socat?…` 와 `RCP => … Reset info` 가 보이면 라디오와 통신한 것입니다. `curl http://[OTBR_NODE_IP]:8081/node/state` 는 아직 데이터셋이 없어 `"disabled"` 입니다.
 
 ```bash
 # 라디오 펌웨어 버전 (RCP 와 통신하는지)
@@ -253,26 +259,26 @@ kubectl $E -n otbr exec deploy/otbr -- ot-ctl rcp version
 
 ## 4. Home Assistant 에 연결해 Thread 망 만들기
 
-HA 의 OpenThread Border Router 통합을 추가하면, 데이터셋이 없는 OTBR 에 HA 가 새 Thread 망(`ha-thread-xxxx`)을 만들어 넣고 켭니다. [통합 설정 스크립트](/posts/48/)가 이 통합을 추가하고 HA 의 **기본 Thread 네트워크**로 지정까지 하므로, 스크립트의 `OTBR_URL` 을 `http://127.0.0.1:8081`(HA 와 OTBR 모두 호스트 네트워크) 로 두고 다시 실행합니다. 이미 된 단계는 건너뜁니다.
+HA 의 OpenThread Border Router 통합을 추가하면, 데이터셋이 없는 OTBR 에 HA 가 새 Thread 망(`ha-thread-xxxx`)을 만들어 넣고 켭니다. [통합 설정 스크립트](/posts/48/)가 이 통합을 추가하고 HA 의 **기본 Thread 네트워크**로 지정까지 하므로, 스크립트의 `OTBR_URL` 을 `http://127.0.0.1:8081`(HA 와 OTBR 이 같은 노드의 호스트 네트워크) 로 두고 다시 실행합니다. 이미 된 단계는 건너뜁니다.
 
 ```bash
-# control plane
-bash setup-home-assistant.sh http://[EDGE_IP]:8123
+# 허브 control plane
+bash setup-home-assistant.sh http://[EDGE_SERVICE_VIP]:8123
 ```
 
 기본 네트워크 지정이 중요합니다. 휴대폰의 Home Assistant 앱으로 Thread 기기를 등록할 때 앱이 HA 의 기본 Thread 망 자격 증명을 받아 기기에 넘기기 때문입니다. 집에 다른 제조사의 Thread 보더 라우터(스마트 TV, 스피커 등)가 있어도 망이 다르면 서로 간섭하지 않습니다.
 
-- **확인:** 스크립트 출력에 `otbr: 추가됨`, `Thread: ha-thread-xxxx (채널 15) 을 기본 네트워크로 지정` 이 보이고, `curl http://[EDGE_IP]:8081/node/state` 가 `"leader"` 입니다.
+- **확인:** 스크립트 출력에 `otbr: 추가됨`, `Thread: ha-thread-xxxx (채널 15) 을 기본 네트워크로 지정` 이 보이고, `curl http://[OTBR_NODE_IP]:8081/node/state` 가 `"leader"` 입니다(망에 다른 Thread 라우터가 먼저 리더로 있으면 `"router"` 이고, 이것도 정상입니다).
 
 ## 5. 확인과 교체 드릴
 
 ```bash
-# 엣지 노드: Thread 인터페이스와 LAN 에 광고된 경로
+# OTBR 이 뜬 엣지 worker 노드: Thread 인터페이스와 LAN 에 광고된 경로
 ip -br addr show wpan0
 ip -6 route | grep wpan0
 
 # 데이터셋 (16진수 TLV)
-curl -s -H 'Accept: text/plain' http://[EDGE_IP]:8081/node/dataset/active
+curl -s -H 'Accept: text/plain' http://[OTBR_NODE_IP]:8081/node/dataset/active
 ```
 
 - **확인:** `wpan0` 에 `fd..` 로 시작하는 Thread 망 주소들이 보이고 경로 표에 `dev wpan0` 경로가 있습니다. 데이터셋이 출력됩니다. Zigbee 와 같은 2.4GHz 를 쓰므로 채널이 겹치지 않는지 봅니다. 이 글의 구성은 Thread 15, Zigbee 25 입니다.
@@ -281,11 +287,11 @@ OTBR 파드를 지워 새로 뜨게 하고 같은 망으로 돌아오는지 봅�
 
 ```bash
 # 교체 드릴: 파드 삭제 → 재생성 → 같은 데이터셋으로 leader 복귀
-before=$(curl -s -H 'Accept: text/plain' http://[EDGE_IP]:8081/node/dataset/active)
+before=$(curl -s -H 'Accept: text/plain' http://[OTBR_NODE_IP]:8081/node/dataset/active)
 kubectl $E -n otbr delete pod -l app=otbr
 kubectl $E -n otbr rollout status deploy/otbr
-sleep 20; curl -s http://[EDGE_IP]:8081/node/state
-[ "$before" = "$(curl -s -H 'Accept: text/plain' http://[EDGE_IP]:8081/node/dataset/active)" ] && echo "데이터셋 같음"
+sleep 20; curl -s http://[OTBR_NODE_IP]:8081/node/state
+[ "$before" = "$(curl -s -H 'Accept: text/plain' http://[OTBR_NODE_IP]:8081/node/dataset/active)" ] && echo "데이터셋 같음"
 ```
 
 - **확인:** 이 글을 쓰며 실행했을 때 약 15초 만에 `"leader"` 로 돌아왔고 데이터셋이 같았습니다. SLZB 를 새 기기로 바꿀 때도 같은 원리로, 새 기기를 "Thread to remote OTBR" 모드로 같은 주소에 두면 OTBR 이 볼륨의 데이터셋으로 망을 다시 엽니다.
@@ -310,8 +316,8 @@ otbr-agent exited with code 1
 
 ```bash
 # 내 PC: 서버 쪽은 정상인지 (리더이고 HA 망 이름이 보이면 정상)
-curl -s http://[EDGE_IP]:8081/node/state
-curl -s http://[EDGE_IP]:8081/node/network-name
+curl -s http://[OTBR_NODE_IP]:8081/node/state
+curl -s http://[OTBR_NODE_IP]:8081/node/network-name
 ```
 
 - **원인:** 휴대폰에 HA Thread 망의 자격 증명이 없습니다. Android 는 Google Play 서비스에 자격 증명이 저장된 Thread 망의 보더 라우터만 인식하므로, OTBR 이 LAN 에 정상적으로 광고되고 있어도 이 메시지가 뜹니다. 같은 LAN 에 다른 제조사 보더 라우터(SmartThings Station 등)가 있어도 망이 다르면 인식하지 않습니다.

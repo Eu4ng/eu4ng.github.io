@@ -1,7 +1,7 @@
 ---
 layout: post
 title: 엣지 클러스터에 Home Assistant와 Matter 서버 배포하고 API로 통합 설정하는 방법
-description: 엣지 k3s 클러스터에 Home Assistant 와 Matter 서버(matterjs-server)를 GitOps 폴더로 배포하고, MQTT·Matter·OpenThread Border Router 통합과 역방향 프록시 설정을 웹 화면 대신 API 스크립트로 넣은 뒤, Matter 기기 상태를 허브 TimescaleDB 로 모으는 방법을 정리했습니다.
+description: 엣지 쿠버네티스 클러스터에 Home Assistant 와 Matter 서버(matterjs-server)를 GitOps 폴더로 배포하고, MQTT·Matter·OpenThread Border Router 통합과 역방향 프록시 설정을 웹 화면 대신 API 스크립트로 넣은 뒤, Matter 기기 상태를 허브 TimescaleDB 로 모으는 방법을 정리했습니다.
 author: Eu4ng
 tags: [iot, home-assistant, matter, thread, mqtt, telegraf, kubernetes, argo-cd, gitops, edge]
 permalink: /posts/48/
@@ -25,7 +25,7 @@ permalink: /posts/48/
 
 | 항목 | 버전 |
 | :--- | :--- |
-| 엣지 Kubernetes | `v1.36` (k3s) |
+| 엣지 Kubernetes | `v1.37` (kubeadm) |
 | Home Assistant | `2026.9.3` |
 | matterjs-server | `1.4.0` |
 | telegraf | `1.40.1` |
@@ -35,11 +35,12 @@ permalink: /posts/48/
 
 - 엣지 클러스터의 Mosquitto·Telegraf 와 허브 TimescaleDB, 시크릿 스크립트가 만든 브로커 계정 `homeassistant` ([엣지 Mosquitto와 Telegraf 디스크 버퍼로 중앙 TimescaleDB에 유실 없이 IoT 데이터 모으는 방법](/posts/43/))
 - 허브 Traefik 과 oauth2-proxy 로 서비스를 밖에 여는 구성 ([쿠버네티스 서비스를 VPN 없이 외부에서 HTTPS로 접속하는 방법](/posts/40/))
+- LoadBalancer Service 에 서비스 VIP 를 주는 kube-vip 가 있는 엣지 클러스터와 허브 control plane 에 복사한 엣지 kubeconfig `~/k8s-[SITE].yaml` ([Proxmox에 Ansible로 kubeadm 엣지 클러스터 만들고 Argo CD 원격 클러스터로 등록하는 방법](/posts/42/))
 - Thread 기기를 쓸 경우 엣지 클러스터의 OpenThread Border Router. 없으면 3단계에서 `OTBR_URL` 을 비웁니다.
 
 ## 1. 매니페스트 추가와 배포
 
-HA 와 Matter 서버는 기기 탐색(mDNS)과 IPv6 로 LAN 의 기기와 직접 통신해야 해서 `hostNetwork` 로 띄웁니다. 파드 네트워크(Flannel)는 IPv4 만 다루기 때문입니다. HA 는 `configuration.yaml` 을 스스로 만들고 고치므로 PVC 에 두고, initContainer 가 자동화 파일을 복사하고 그 파일을 읽는 줄만 한 번 덧붙입니다. 파일에는 자동화가 두 개 있습니다. `matter_statestream` 은 **Matter 통합에 속한 엔티티**(`integration_entities('matter')`)의 상태나 속성이 바뀔 때 발행하고, `control_events` 는 기기로 간 명령과 자동화 실행을 누가 했는지와 함께 발행합니다(4단계). Zigbee 기기도 HA 에 보이지만 MQTT 통합 소속이고 이미 Zigbee2MQTT 경로로 수집되므로 걸리지 않습니다. 기기 이름과 무관하게 거르므로 Matter 기기를 등록할 때 이름 규칙을 지킬 필요가 없습니다.
+HA 와 Matter 서버는 기기 탐색(mDNS)과 IPv6 로 LAN 의 기기와 직접 통신해야 해서 `hostNetwork` 로 띄웁니다. 파드 네트워크(Flannel)는 IPv4 만 다루기 때문입니다. HA 는 Matter 서버와 OTBR 에 `127.0.0.1` 로 붙으므로 세 파드가 한 worker 에 모여야 합니다. Matter 서버와 OTBR 은 `podAffinity` 의 `required` 규칙으로 HA 를 따라가고, HA 는 `preferred` 규칙으로 Matter 서버 쪽을 선호합니다. 파드가 어느 worker 에 떠도 같은 주소로 열리도록 LAN 쪽 접속은 노드 IP 대신 LoadBalancer Service 로 받고, 엣지의 kube-vip 가 지역 오버레이에 적은 **서비스 VIP** 를 붙입니다. HA 는 `configuration.yaml` 을 스스로 만들고 고치므로 PVC 에 두고, initContainer 가 자동화 파일을 복사하고 그 파일을 읽는 줄만 한 번 덧붙입니다. 파일에는 자동화가 두 개 있습니다. `matter_statestream` 은 **Matter 통합에 속한 엔티티**(`integration_entities('matter')`)의 상태나 속성이 바뀔 때 발행하고, `control_events` 는 기기로 간 명령과 자동화 실행을 누가 했는지와 함께 발행합니다(4단계). Zigbee 기기도 HA 에 보이지만 MQTT 통합 소속이고 이미 Zigbee2MQTT 경로로 수집되므로 걸리지 않습니다. 기기 이름과 무관하게 거르므로 Matter 기기를 등록할 때 이름 규칙을 지킬 필요가 없습니다.
 
 > HA 의 `mqtt_statestream` 도 같은 토픽 형식으로 발행하지만 도메인·엔티티 이름으로만 거를 수 있고 통합 단위로는 거르지 못합니다. 그래서 `matter_*` 같은 이름 규칙이 필요해지고, 기기 이름에서 자동으로 만들어진 엔티티는 빠집니다.
 {: .prompt-info }
@@ -49,11 +50,14 @@ HA 와 Matter 서버는 기기 탐색(mDNS)과 IPv6 로 LAN 의 기기와 직접
 # Matter 통합의 엔티티 상태·속성과 기기 제어 기록을 자동화(matter-statestream.yaml)로 브로커에 발행해 Telegraf 가 받게 합니다 (initContainer 가 /config 로 복사하고 configuration.yaml 에 include 를 한 번 덧붙임).
 resources:
   - deployment.yaml
+  - service.yaml
   - pvc.yaml
 configMapGenerator:
   - name: home-assistant-seed
     files:
       - matter-statestream.yaml
+      - remote.yaml
+      - install-remote.py
 ```
 {: file="iot/edge/home-assistant/kustomization.yaml" }
 
@@ -253,6 +257,50 @@ configMapGenerator:
 {: file="iot/edge/home-assistant/matter-statestream.yaml" }
 {% endraw %}
 
+`install-remote.py` 와 `remote.yaml` 은 [중앙 HA](/posts/49/)가 이 HA 에 붙을 수 있게 커뮤니티 통합 Remote Home Assistant 를 설치하고 `configuration.yaml` 에 빈 `remote_homeassistant:` 블록을 덧붙입니다. 인터넷이 없어 받지 못해도 경고만 남기고 기동을 막지 않습니다.
+
+```python
+# Remote Home Assistant(HACS 커뮤니티 통합)를 /config/custom_components 에 설치합니다. 버전이 같으면 건너뜁니다.
+# 중앙 HA 가 지역 HA 를 모아 보려면 양쪽 모두에 설치돼 있어야 합니다. 인터넷이 없어 받지 못해도 HA 기동을 막지 않습니다.
+import io, json, os, shutil, sys, tarfile, urllib.request
+
+ver = os.environ.get("REMOTE_HA_VERSION", "4.6")
+dst = "/config/custom_components/remote_homeassistant"
+try:
+    cur = json.load(open(os.path.join(dst, "manifest.json")))["version"]
+except Exception:
+    cur = None
+if cur == ver:
+    print(f"remote_homeassistant {ver}: 이미 설치됨"); sys.exit(0)
+url = f"https://codeload.github.com/custom-components/remote_homeassistant/tar.gz/refs/tags/{ver}"
+try:
+    data = urllib.request.urlopen(url, timeout=60).read()
+except Exception as e:
+    print(f"경고: {url} 를 받지 못했습니다({e}). 현재 버전({cur}) 그대로 둡니다."); sys.exit(0)
+tmp = dst + ".new"
+shutil.rmtree(tmp, ignore_errors=True)
+with tarfile.open(fileobj=io.BytesIO(data)) as tar:
+    for m in tar.getmembers():
+        parts = m.name.split("/", 1)
+        if len(parts) == 2 and parts[1].startswith("custom_components/remote_homeassistant/") and m.isfile():
+            rel = parts[1][len("custom_components/remote_homeassistant/"):]
+            os.makedirs(os.path.join(tmp, os.path.dirname(rel)), exist_ok=True)
+            with open(os.path.join(tmp, rel), "wb") as f:
+                f.write(tar.extractfile(m).read())
+shutil.rmtree(dst, ignore_errors=True)
+os.makedirs(os.path.dirname(dst), exist_ok=True)
+os.rename(tmp, dst)
+print(f"remote_homeassistant {ver}: 설치함 (이전 {cur})")
+```
+{: file="iot/edge/home-assistant/install-remote.py" }
+
+```yaml
+# --- iot/edge/home-assistant 가 덧붙인 설정. 중앙 HA(Remote Home Assistant)가 이 HA 에 붙을 수 있게 합니다 (원격 쪽 필수) ---
+remote_homeassistant:
+  instances:
+```
+{: file="iot/edge/home-assistant/remote.yaml" }
+
 ```yaml
 apiVersion: apps/v1
 kind: Deployment
@@ -269,9 +317,17 @@ spec:
       labels: { app: home-assistant }
     spec:
       hostNetwork: true                    # 기기 탐색(mDNS·SSDP)과 Matter 서버·OTBR 접근을 노드 네트워크에서 직접 합니다
+      affinity:                            # Matter 서버·OTBR 에 127.0.0.1 로 붙으므로 그 파드들과 같은 노드에 둡니다(그쪽이 HA 를 따라옴)
+        podAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector: { matchLabels: { app: matter-server } }
+                namespaces: [matter]
+                topologyKey: kubernetes.io/hostname
       dnsPolicy: ClusterFirstWithHostNet   # hostNetwork 에서도 mosquitto.mosquitto.svc 같은 클러스터 이름을 풉니다
-      # 첫 기동에 HA 가 만든 configuration.yaml 에 Matter 재발행 자동화 include 가 없으면 덧붙입니다. 파일이 아직 없으면(최초 기동) 건너뛰고 다음 기동에 붙입니다.
-      # 자동화 파일은 매 기동 복사해 이 저장소의 수정이 재기동으로 반영됩니다.
+      # 첫 기동에 HA 가 만든 configuration.yaml 에 Matter 재발행 자동화 include·remote_homeassistant 블록이 없으면 덧붙이고, Remote Home Assistant 를 설치합니다. 파일이 아직 없으면(최초 기동) 건너뛰고 다음 기동에 붙입니다.
+      # 자동화 파일은 매 기동 복사해 이 저장소의 수정이 재기동으로 반영됩니다. 예전에 덧붙인 mqtt_statestream 블록(이름 규칙 matter_*)은 지웁니다.
       # 프록시 신뢰(http)는 HA 2026 부터 YAML 이 아니라 .storage 에서 관리하므로 setup-home-assistant.sh 가 API 로 설정합니다.
       initContainers:
         - name: seed-config
@@ -280,10 +336,15 @@ spec:
             - /bin/sh
             - -c
             - |
+              python3 /seed/install-remote.py
               f=/config/configuration.yaml
               [ -f $f ] || exit 0
               cp /seed/matter-statestream.yaml /config/matter-statestream.yaml
+              sed -i '/^# --- iot\/edge\/home-assistant 가 덧붙인 설정. Matter 기기 상태/,/^      - "\*\.matter_\*"$/d' $f
               grep -q '^automation matter:' $f || printf '\n# --- iot/edge/home-assistant 가 덧붙인 설정. Matter 통합 엔티티 상태를 MQTT 로 재발행합니다 (자동화는 initContainer 가 복사) ---\nautomation matter: !include matter-statestream.yaml\n' >> $f
+              grep -q '^remote_homeassistant:' $f || cat /seed/remote.yaml >> $f
+          env:
+            - { name: REMOTE_HA_VERSION, value: "4.6" }   # custom-components/remote_homeassistant 태그
           volumeMounts:
             - { name: config, mountPath: /config }
             - { name: seed, mountPath: /seed }
@@ -314,6 +375,21 @@ spec:
 {: file="iot/edge/home-assistant/deployment.yaml" }
 
 ```yaml
+# HA 는 hostNetwork 라 노드 IP:8123 에 뜹니다. 어느 노드에 떠도 같은 주소로 붙도록 LoadBalancer VIP(kube-vip)로 엽니다.
+# VIP 주소는 지역 오버레이가 annotation kube-vip.io/loadbalancerIPs 로 줍니다(같은 VIP 를 Mosquitto·Z2M·Matter 가 함께 씀).
+apiVersion: v1
+kind: Service
+metadata:
+  name: home-assistant
+spec:
+  type: LoadBalancer
+  selector: { app: home-assistant }
+  ports:
+    - { name: http, port: 8123, targetPort: 8123 }
+```
+{: file="iot/edge/home-assistant/service.yaml" }
+
+```yaml
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -328,13 +404,14 @@ spec:
 ```
 {: file="iot/edge/home-assistant/pvc.yaml" }
 
-Matter 서버는 패브릭(기기 인증서)을 PVC 에 보관합니다. HA 와 따로 두어 HA 를 지우거나 다시 만들어도 등록한 Matter 기기는 그대로입니다. `PRODUCTION_MODE` 는 5단계에서 대시보드를 역방향 프록시 뒤에서 열 때 같은 주소의 WebSocket 으로 붙게 합니다.
+Matter 서버는 패브릭(기기 인증서)을 PVC 에 보관합니다. HA 와 따로 두어 HA 를 지우거나 다시 만들어도 등록한 Matter 기기는 그대로입니다. `PRODUCTION_MODE` 는 5단계에서 대시보드를 역방향 프록시 뒤에서 열 때 같은 주소의 WebSocket 으로 붙게 합니다. HA 는 같은 노드에서 `127.0.0.1` 로 붙고, Service 는 LAN 과 허브에서 대시보드를 열 때 씁니다.
 
 ```yaml
 # 엣지의 Matter 컨트롤러(matterjs-server). Home Assistant 가 이 서버의 WebSocket 으로 Matter 기기를 커미셔닝·제어합니다.
 # 패브릭(기기 인증서)이 PVC 에 있으므로 HA 를 지워도 기기는 그대로입니다. Thread 보더 라우터는 iot/edge/otbr 에 따로 있습니다.
 resources:
   - deployment.yaml
+  - service.yaml
   - pvc.yaml
 ```
 {: file="iot/edge/matter/kustomization.yaml" }
@@ -355,6 +432,12 @@ spec:
       labels: { app: matter-server }
     spec:
       hostNetwork: true                    # Matter 기기 탐색(mDNS)과 IPv6 통신은 노드의 네트워크에서 직접 해야 합니다 (파드 네트워크는 IPv4 뿐)
+      affinity:                            # HA 와 같은 노드에 둡니다(HA 가 ws://127.0.0.1:5580 으로 붙습니다)
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector: { matchLabels: { app: home-assistant } }
+              namespaces: [home-assistant]
+              topologyKey: kubernetes.io/hostname
       dnsPolicy: ClusterFirstWithHostNet
       securityContext:
         runAsUser: 1000                    # 이미지가 비특권 계정(1000)으로 돕니다
@@ -388,6 +471,21 @@ spec:
 {: file="iot/edge/matter/deployment.yaml" }
 
 ```yaml
+# Matter 서버 대시보드·WebSocket(5580). HA 는 같은 노드에서 127.0.0.1 로 붙고, 이 Service 는 LAN·허브(matter-[SITE_CODE])용입니다.
+# VIP 주소는 지역 오버레이가 annotation kube-vip.io/loadbalancerIPs 로 줍니다.
+apiVersion: v1
+kind: Service
+metadata:
+  name: matter-server
+spec:
+  type: LoadBalancer
+  selector: { app: matter-server }
+  ports:
+    - { name: http, port: 5580, targetPort: 5580 }
+```
+{: file="iot/edge/matter/service.yaml" }
+
+```yaml
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -402,17 +500,37 @@ spec:
 ```
 {: file="iot/edge/matter/pvc.yaml" }
 
-지역 오버레이는 두 폴더 모두 베이스를 그대로 참조합니다.
+지역 오버레이는 두 폴더 모두 베이스를 참조하고 Service 에 서비스 VIP 만 붙입니다. 같은 지역의 Zigbee2MQTT·Mosquitto 도 포트만 달리해 이 주소를 함께 씁니다.
 
 ```yaml
+# [SITE] 엣지의 Home Assistant. 베이스 그대로 씁니다.
 resources:
   - ../../../edge/home-assistant
+patches:
+  # [SITE] 엣지의 서비스 VIP(kube-vip). HA·Z2M·Matter·Mosquitto 가 포트만 달리해 같은 주소를 씁니다(LAN 기기·허브가 이 주소로 붙음)
+  - patch: |
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: home-assistant
+        annotations:
+          kube-vip.io/loadbalancerIPs: "[EDGE_SERVICE_VIP]"
 ```
 {: file="iot/clusters/[SITE]/home-assistant/kustomization.yaml" }
 
 ```yaml
+# [SITE] 엣지의 Matter 컨트롤러. 베이스 그대로 씁니다 (LAN 인터페이스 eth0).
 resources:
   - ../../../edge/matter
+patches:
+  # [SITE] 엣지의 서비스 VIP(kube-vip). HA·Z2M·Matter·Mosquitto 가 포트만 달리해 같은 주소를 씁니다(LAN 기기·허브가 이 주소로 붙음)
+  - patch: |
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: matter-server
+        annotations:
+          kube-vip.io/loadbalancerIPs: "[EDGE_SERVICE_VIP]"
 ```
 {: file="iot/clusters/[SITE]/matter/kustomization.yaml" }
 
@@ -423,16 +541,16 @@ git commit -m "feat(iot): 엣지 Home Assistant 와 Matter 컨트롤러(matterjs
 git push
 ```
 
-- **확인:** Argo CD 에 `[SITE]-home-assistant`, `[SITE]-matter` 가 `Synced`, `Healthy`. `curl http://[EDGE_IP]:5580/health` 가 `{"version":"1.4.0","node_count":0}` 처럼 응답하고, `http://[EDGE_IP]:8123` 에 HA 첫 화면이 열립니다.
+- **확인:** Argo CD 에 `[SITE]-home-assistant`, `[SITE]-matter` 가 `Synced`, `Healthy`. 허브 control plane 에서 `kubectl --kubeconfig ~/k8s-[SITE].yaml get pods -A -o wide | grep -E 'home-assistant|matter-server'` 의 두 파드 `NODE` 가 같은 worker 이고, `get svc -A` 의 `home-assistant`, `matter-server` 의 `EXTERNAL-IP` 가 `[EDGE_SERVICE_VIP]` 입니다. `curl http://[EDGE_SERVICE_VIP]:5580/health` 가 `{"version":"1.4.0","node_count":0}` 처럼 응답하고, `http://[EDGE_SERVICE_VIP]:8123` 에 HA 첫 화면이 열립니다.
 
 ## 2. 온보딩과 장기 액세스 토큰
 
-브라우저로 `http://[EDGE_IP]:8123` 을 열어 소유자 계정을 만들고 위치·단위 화면을 마칩니다. 이후 설정은 API 로 하므로 관리자 권한의 **장기 액세스 토큰**이 필요합니다. HA 의 왼쪽 아래 사용자 이름을 눌러 프로필로 들어가 **보안** 탭의 **장기 액세스 토큰**에서 토큰을 만들고, 값은 한 번만 보이니 바로 엣지 클러스터 Secret 에 넣습니다.
+브라우저로 `http://[EDGE_SERVICE_VIP]:8123` 을 열어 소유자 계정을 만들고 위치·단위 화면을 마칩니다. 이후 설정은 API 로 하므로 관리자 권한의 **장기 액세스 토큰**이 필요합니다. HA 의 왼쪽 아래 사용자 이름을 눌러 프로필로 들어가 **보안** 탭의 **장기 액세스 토큰**에서 토큰을 만들고, 값은 한 번만 보이니 바로 엣지 클러스터 Secret 에 넣습니다.
 
 ```bash
-# control plane. 붙여 넣은 토큰은 화면에 보이지 않습니다
+# 허브 control plane. 붙여 넣은 토큰은 화면에 보이지 않습니다
 read -rsp "HA 장기 토큰: " T; echo; echo "입력 길이: ${#T}"
-[ -n "$T" ] && printf '%s' "$T" | kubectl --kubeconfig ~/k3s-[SITE].yaml -n home-assistant \
+[ -n "$T" ] && printf '%s' "$T" | kubectl --kubeconfig ~/k8s-[SITE].yaml -n home-assistant \
   create secret generic ha-api-token --from-file=token=/dev/stdin
 unset T
 ```
@@ -440,7 +558,7 @@ unset T
 > `입력 길이` 가 0 이면 입력이 들어가지 않은 것입니다. 이 상태로 Secret 을 만들면 값이 빈 채로 생기고, 다시 만들 때 `already exists` 오류가 납니다. 이때는 `kubectl ... delete secret ha-api-token` 뒤 다시 실행합니다.
 {: .prompt-warning }
 
-- **확인:** `kubectl --kubeconfig ~/k3s-[SITE].yaml -n home-assistant get secret ha-api-token -o jsonpath='{.data.token}' | base64 -d | wc -c` 가 0 이 아닌 값(180 안팎)입니다.
+- **확인:** `kubectl --kubeconfig ~/k8s-[SITE].yaml -n home-assistant get secret ha-api-token -o jsonpath='{.data.token}' | base64 -d | wc -c` 가 0 이 아닌 값(180 안팎)입니다.
 
 ## 3. 통합 설정 스크립트 실행
 
@@ -451,7 +569,7 @@ HA 2026 부터는 역방향 프록시 설정(`http:`)을 `configuration.yaml` �
 변수 블록의 `REMOTES` 는 여러 지역 HA 를 모아 보는 중앙 HA 에서만 씁니다([중앙 Home Assistant로 여러 지역 Home Assistant 모아 보는 방법](/posts/49/)). 지역 HA 에서는 비워 둡니다.
 
 ```bash
-# control plane 에서 스크립트 내려받기
+# 허브 control plane 에서 스크립트 내려받기
 wget https://eu4ng.github.io/assets/scripts/iot/setup-home-assistant.sh
 ```
 
@@ -465,7 +583,7 @@ wget https://eu4ng.github.io/assets/scripts/iot/setup-home-assistant.sh
 # "기기 및 서비스 > 통합구성요소 추가" 와 같은 설정 흐름(config flow)을 순서대로 밟습니다. 이미 있는 통합은 건너뜁니다.
 # 역방향 프록시(허브 Traefik) 뒤에서 접속받도록 HA 의 HTTP 설정(프록시 신뢰, 로그인 실패 차단)도 API 로 바꿉니다.
 # 중앙 HA 에서는 MQTT·Matter·OTBR 을 비우고 REMOTES 에 지역 HA 를 적으면 Remote Home Assistant 로 지역 엔티티를 모읍니다.
-# HA 에 접속할 수 있는 곳에서 실행합니다: bash setup-home-assistant.sh [HA_URL]   (예: http://[EDGE_IP]:8123)
+# HA 에 접속할 수 있는 곳에서 실행합니다: bash setup-home-assistant.sh [HA_URL]   (예: http://[EDGE_SERVICE_VIP]:8123)
 # 준비: HA 프로필 > 보안 > 장기 액세스 토큰 에서 토큰을 만들어 엣지 클러스터 Secret 에 넣어 둡니다(아래 HA_TOKEN_SECRET).
 #       kubectl 로 그 Secret 을 읽을 수 없으면 실행 중 토큰을 입력받습니다. MQTT 비밀번호는 실행 중 입력받습니다.
 
@@ -480,13 +598,15 @@ OTBR_URL=http://127.0.0.1:8081                      # 같은 노드의 hostNetwo
 # Cloudflare 프록시 대역(https://www.cloudflare.com/ips-v4). 밖에서 Cloudflare 를 거쳐 오면 이 대역까지 신뢰해야 HA 가 실제 접속자 IP 를 보고,
 # 로그인 실패 차단도 Cloudflare 주소가 아니라 그 접속자에게 겁니다.
 CLOUDFLARE_IPV4="173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22"
-TRUSTED_PROXIES="[HUB_NODE_IP_1] [HUB_NODE_IP_2] $CLOUDFLARE_IPV4"   # HA 앞 역방향 프록시 주소(허브 파드 요청은 허브 노드 주소로 들어옴)와 Cloudflare. 비우면 HTTP 설정 생략
+# HA 가 보는 요청 출처(프록시) 주소와 Cloudflare. 비우면 HTTP 설정 생략. 엣지 HA 를 서비스 VIP(kube-vip LoadBalancer)로 받으면 요청이
+# VIP 를 가진 엣지 control plane 주소로 SNAT 되어 오므로 그 주소들을, hostNetwork 노드 주소로 직접 받으면 허브 노드 주소들을 적습니다.
+TRUSTED_PROXIES="[PROXY_IP_1] [PROXY_IP_2] $CLOUDFLARE_IPV4"
 LOGIN_ATTEMPTS=5                                    # 로그인 실패가 이 횟수면 그 IP 를 차단
 HA_TOKEN_SECRET=home-assistant/ha-api-token         # 토큰을 담은 Secret (네임스페이스/이름, 키 token)
-KUBECTL="kubectl --kubeconfig $HOME/k3s-[SITE].yaml"   # 이 HA 가 있는 클러스터에 접근하는 kubectl
+KUBECTL="kubectl --kubeconfig $HOME/k8s-[SITE].yaml"   # 이 HA 가 있는 클러스터에 접근하는 kubectl
 # 중앙 HA 전용: 모아 볼 지역 HA. "엔티티접두사|주소:포트|지역클러스터 kubeconfig|표시이름접두사" 를 공백으로 구분.
 # 지역 HA 의 토큰은 그 클러스터의 HA_TOKEN_SECRET 에서 읽습니다. 지역 HA 에도 Remote Home Assistant 가 설치돼 있어야 합니다.
-REMOTES=""                                          # 예: "dj_|[EDGE_IP]:8123|$HOME/k3s-[SITE].yaml|대전 "
+REMOTES=""                                          # 예: "dj_|[EDGE_SERVICE_VIP]:8123|$HOME/k8s-[SITE].yaml|대전 "
 # --------------------------------------
 
 log() { echo -e "\n\033[1;32m==>\033[0m $*"; }
@@ -722,11 +842,11 @@ log "완료. 상태가 loaded 가 아니면 HA 로그를 확인합니다."
 
 </details>
 
-스크립트 위쪽의 `TRUSTED_PROXIES` 에 HA 앞에 올 역방향 프록시의 주소를 넣습니다. 5단계처럼 허브 Traefik 을 거치면 허브 파드의 요청이 허브 노드 주소로 바뀌어 엣지에 도착하므로 허브 노드 IP 들을 적습니다. 밖에서 오는 요청은 그 앞에 Cloudflare 를 거치므로, 기본값처럼 스크립트의 Cloudflare 대역(`$CLOUDFLARE_IPV4`)도 남겨 둡니다. 빼면 HA 가 Cloudflare 주소를 접속자로 보고 로그인 실패 차단도 그 주소에 겁니다. `KUBECTL` 에는 엣지 kubeconfig 를 적습니다.
+스크립트 위쪽의 `TRUSTED_PROXIES` 에 HA 가 요청의 출처로 보는 프록시 주소를 넣습니다. 5단계의 허브 Traefik 과 지역 Traefik 은 모두 서비스 VIP 로 HA 에 붙고, 서비스 VIP 를 거친 요청은 VIP 를 가진 엣지 control plane 의 주소로 바뀌어(SNAT) HA 에 도착하므로 `[PROXY_IP_1] [PROXY_IP_2]` 자리에 엣지 control plane 노드 IP 들을 적습니다. VIP 는 control plane 사이를 옮겨 다니므로 모든 control plane 을 적습니다. 밖에서 오는 요청은 그 앞에 Cloudflare 를 거치므로, 기본값처럼 스크립트의 Cloudflare 대역(`$CLOUDFLARE_IPV4`)도 남겨 둡니다. 빼면 HA 가 Cloudflare 주소를 접속자로 보고 로그인 실패 차단도 그 주소에 겁니다. `KUBECTL` 에는 엣지 kubeconfig(`$HOME/k8s-[SITE].yaml`)를 적습니다.
 
 ```bash
 # 실행. MQTT 비밀번호(homeassistant 계정)는 실행 중 입력합니다
-bash setup-home-assistant.sh http://[EDGE_IP]:8123
+bash setup-home-assistant.sh http://[EDGE_SERVICE_VIP]:8123
 ```
 
 - **확인:** 마지막에 `통합 상태` 표에 `mqtt`, `matter`, `otbr`, `thread` 가 모두 `loaded`, 그 아래에 `Thread: … 을 기본 네트워크로 지정` 과 `확정: {'use_x_forwarded_for': True, …}` 가 보입니다. HTTP 설정 단계에서 HA 가 한 번 재시작하므로 30초쯤 걸립니다. 다시 실행하면 모든 줄이 `건너뜀` 입니다.
@@ -817,25 +937,26 @@ git push
 
 Telegraf 는 기기 이름이 `<방>-<종류>[-<기준>][번호]` 규칙(칸은 `-` 로 나누고 칸 안의 단어는 `_` 로 잇는 영문 소문자·숫자)에 맞는 값만 기록하므로, 등록 직후의 기본 이름(`Air Quality Sensor` 등)으로 보낸 값은 DB 에 남지 않습니다. Matter 기기를 하나 등록하고 이름을 규칙대로 바꾼 뒤 **개발자 도구** > **상태** 에서 그 기기의 센서 엔티티 상태를 임의 값으로 바꿔 보면, 실제 값이 바뀔 때까지 기다리지 않고 경로 전체를 확인할 수 있습니다. 스마트 플러그는 종류를 `plug` 로 두고 기준 칸에 꽂은 제품을 적습니다(`bedroom2-plug-monitor_27gp850`). 다른 제품을 꽂으면 기준 칸만 바꾸면 되고, 과거 행은 옛 제품으로 남습니다.
 
-- **확인:** 허브에서 `kubectl -n timescaledb exec deploy/timescaledb -- psql -U iot -d iot -c "select time, site, room, device, anchor, property, value, value_text, hw_id, node from readings where protocol = 'matter' order by time desc limit 5;"` 에 `site` 가 `[SITE]`, `room`·`device`·`anchor` 가 HA 기기 이름을 나눈 방·종류·기준, `property` 가 측정 항목인 행이 보이고, 숫자 상태는 `value`, `on` 은 `value` 1 과 `value_text` `on` 으로 들어갑니다. `hw_id` 에는 시리얼, `node` 에는 노드 ID 가 들어갑니다. Telegraf 가 다시 붙을 때 브로커가 유지 메시지를 다시 보내므로 재시작 직후 각 엔티티의 마지막 값이 원래 시각으로 한 번 더 들어올 수 있습니다. HA 앱에서 플러그를 껐다 켜면 `select time, anchor, property, action, origin, actor from events order by time desc limit 2;` 에 `switch.turn_off`·`switch.turn_on` 두 행이 `origin` `user`, `actor` 에 사람 이름으로 보이고, readings 에는 0.1초쯤 뒤 같은 플러그의 `outlet` 상태 행이 보입니다.
+- **확인:** 허브에서 `kubectl -n timescaledb exec $(kubectl -n timescaledb get pod -l role=primary -o name) -- psql -U iot -d iot -c "select time, site, room, device, anchor, property, value, value_text, hw_id, node from readings where protocol = 'matter' order by time desc limit 5;"` 에 `site` 가 `[SITE]`, `room`·`device`·`anchor` 가 HA 기기 이름을 나눈 방·종류·기준, `property` 가 측정 항목인 행이 보이고, 숫자 상태는 `value`, `on` 은 `value` 1 과 `value_text` `on` 으로 들어갑니다. `hw_id` 에는 시리얼, `node` 에는 노드 ID 가 들어갑니다. Telegraf 가 다시 붙을 때 브로커가 유지 메시지를 다시 보내므로 재시작 직후 각 엔티티의 마지막 값이 원래 시각으로 한 번 더 들어올 수 있습니다. HA 앱에서 플러그를 껐다 켜면 `select time, anchor, property, action, origin, actor from events order by time desc limit 2;` 에 `switch.turn_off`·`switch.turn_on` 두 행이 `origin` `user`, `actor` 에 사람 이름으로 보이고, readings 에는 0.1초쯤 뒤 같은 플러그의 `outlet` 상태 행이 보입니다.
 
 > `property` 는 엔티티 ID 에서 기기 이름을 떼어 만듭니다. 한국어 HA 는 기기 이름을 바꾸고 방을 지정할 때 엔티티 ID 를 `방 + 기기 이름 + 엔티티 이름` 의 로마자로 다시 만듭니다(`sensor.cimsil2_bedroom2_air_quality_ondo`). 기기를 등록하고 이름을 정한 직후 [중앙 HA 글](/posts/49/)의 `ha-registry.py --rename-matter --assign-areas` 를 실행해 `sensor.bedroom2_air_quality_temperature` 처럼 영문 ID 로 맞추고 영역도 이름의 방으로 지정합니다. 영문 ID 여야 `property` 가 `temperature` 처럼 깔끔하게 남습니다. 화면의 표시 이름은 한국어 그대로입니다. 엔티티 ID 가 바뀌어도 `hw_id`(시리얼)는 그대로이므로, 옛 ID 로 쌓인 기록도 `hw_id` 로 같은 기기에 묶어 볼 수 있습니다.
 {: .prompt-tip }
 
 ## 5. 밖에서 열기와 2단계 인증
 
-지역 서비스는 `<서비스>-<지역약자>.[DOMAIN]` 으로 엽니다. 무료 Cloudflare 인증서가 한 단계 하위 도메인만 덮기 때문에 `ha.[SITE].[DOMAIN]` 같은 계층 대신 평면 이름을 씁니다. 엣지 노드는 허브와 같은 LAN 에 있으므로 허브 Traefik 이 엣지 노드 주소로 중계합니다. Zigbee2MQTT 와 Matter 대시보드는 다른 관리 화면처럼 밖에서 Google 로그인(oauth2-proxy)을 거치게 하고, HA 는 휴대폰 앱이 로그인 페이지 리디렉트를 처리하지 못하므로 oauth2-proxy 없이 HA 자체 로그인과 2단계 인증으로 보호합니다.
+지역 서비스는 `<서비스>-<지역약자>.[DOMAIN]` 으로 엽니다. 무료 Cloudflare 인증서가 한 단계 하위 도메인만 덮기 때문에 `ha.[SITE].[DOMAIN]` 같은 계층 대신 평면 이름을 씁니다. 엣지는 허브와 같은 LAN 에 있으므로 밖에서 온 요청은 허브 Traefik 이 엣지 서비스 VIP 로 중계합니다. 내부망에서는 내부망 DNS 가 이 이름들을 지역 서비스 VIP 로 답하고 엣지의 지역 Traefik 이 받으므로, 허브나 인터넷이 끊겨도 같은 이름으로 열립니다(지역 Traefik 은 [지역 엣지에 TimescaleDB와 Grafana를 두어 인터넷 없이도 기록하고 보는 방법](/posts/56/)에서 다룹니다). Zigbee2MQTT 와 Matter 대시보드는 다른 관리 화면처럼 밖에서 Google 로그인(oauth2-proxy)을 거치게 하고, HA 는 휴대폰 앱이 로그인 페이지 리디렉트를 처리하지 못하므로 oauth2-proxy 없이 HA 자체 로그인과 2단계 인증으로 보호합니다.
 
 ```yaml
-# 지역 엣지 클러스터(k3s, [EDGE_IP])의 웹 UI 를 허브 Traefik 뒤에 둡니다. 허브와 엣지가 같은 LAN 이라 노드 주소로 바로 붙습니다.
-# 엣지 쪽 포트: HA·Matter 는 hostNetwork, Z2M 은 NodePort 30083. (EndpointSlice 는 Argo CD 가 무시하므로 ExternalName 을 씁니다)
+# 지역 엣지 클러스터([SITE])의 웹 UI 를 허브 Traefik 뒤에 둡니다. 허브와 엣지가 같은 LAN 이라 엣지 서비스 VIP([EDGE_SERVICE_VIP], kube-vip)로 바로 붙습니다.
+# 엣지 쪽 포트는 LoadBalancer 서비스 포트입니다: HA 8123, Z2M 30083, Matter 5580, Grafana 3000. (EndpointSlice 는 Argo CD 가 무시하므로 ExternalName 을 씁니다)
+# VIP 를 거친 요청은 엣지 control plane 주소로 SNAT 되어 도착하므로, 엣지 HA 의 신뢰 프록시는 엣지 control plane 주소입니다.
 apiVersion: v1
 kind: Service
 metadata:
   name: ha
 spec:
   type: ExternalName
-  externalName: [EDGE_IP]
+  externalName: [EDGE_SERVICE_VIP]
   ports:
     - { name: http, port: 8123 }
 ---
@@ -845,7 +966,7 @@ metadata:
   name: z2m
 spec:
   type: ExternalName
-  externalName: [EDGE_IP]
+  externalName: [EDGE_SERVICE_VIP]
   ports:
     - { name: http, port: 30083 }
 ---
@@ -855,14 +976,25 @@ metadata:
   name: matter
 spec:
   type: ExternalName
-  externalName: [EDGE_IP]
+  externalName: [EDGE_SERVICE_VIP]
   ports:
     - { name: http, port: 5580 }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+spec:
+  type: ExternalName
+  externalName: [EDGE_SERVICE_VIP]
+  ports:
+    - { name: http, port: 3000 }
 ```
 {: file="iot/hub/edge-web-[SITE]/services.yaml" }
 
 ```yaml
-# 지역 서비스 이름은 <서비스>-<지역약자>.[DOMAIN] (예: 대전 dj). 내부망은 Google 로그인 없이, 외부는 Google 로그인(oauth2-proxy) 뒤에 둡니다.
+# 지역 서비스 이름은 <서비스>-<지역약자>.[DOMAIN] (예: 대전 dj). 외부(Cloudflare → 공유기 → 허브)는 여기서 Google 로그인(oauth2-proxy) 뒤에 둡니다.
+# 내부망은 내부망 DNS 가 이 이름들을 지역 서비스 VIP 로 답해 지역 Traefik(iot/clusters/[SITE]/traefik)이 받습니다. 아래 내부망 규칙은 그 DNS 를 쓰지 않는 기기용입니다.
 # HA 는 휴대폰 앱이 로그인 페이지 리디렉트를 처리하지 못하므로 oauth2-proxy 없이 HA 자체 로그인 + 2단계 인증(OTP)으로 보호합니다.
 apiVersion: traefik.io/v1alpha1
 kind: IngressRoute
@@ -915,29 +1047,49 @@ spec:
       kind: Rule
       services:
         - { name: ha, port: 8123 }
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: grafana-[SITE_CODE]
+spec:
+  entryPoints: [websecure]
+  routes:
+    - match: Host(`grafana-[SITE_CODE].[DOMAIN]`) && ClientIP(`[LAN_CIDR]`)   # 내부망: Google 로그인 없이 Grafana 로그인만
+      kind: Rule
+      priority: 20
+      services:
+        - { name: grafana, port: 3000 }
+    - match: Host(`grafana-[SITE_CODE].[DOMAIN]`)                                    # 외부: Google 로그인 뒤 Grafana 로그인
+      kind: Rule
+      priority: 10
+      middlewares:
+        - { name: forward-auth, namespace: oauth2-proxy }
+      services:
+        - { name: grafana, port: 3000 }
 ```
 {: file="iot/hub/edge-web-[SITE]/ingressroutes.yaml" }
 
-`iot/hub/` 아래 폴더는 허브에 배포됩니다. 이름을 밖에서 찾을 수 있게 DDNS 목록(`services/cloudflare-ddns` 의 `DOMAINS`)과 내부망 DNS(`lan_dns_names`)에 `ha-[SITE_CODE]`, `z2m-[SITE_CODE]`, `matter-[SITE_CODE]` 를 추가합니다. 방법은 [외부 접속 글](/posts/40/)과 [내부망 DNS 글](/posts/41/)의 서비스 추가 절차와 같습니다.
+`iot/hub/` 아래 폴더는 허브에 배포됩니다. `grafana-[SITE_CODE]` 는 지역 Grafana 용이며 위 글에서 배포합니다. 이름을 밖에서 찾을 수 있게 DDNS 목록(`services/cloudflare-ddns` 의 `DOMAINS`)에 `ha-[SITE_CODE]`, `z2m-[SITE_CODE]`, `matter-[SITE_CODE]` 를 추가하고, 내부망 DNS 에서는 proxmox-ansible `group_vars/all.yml` 의 `k8s_clusters.[SITE].lan_dns_names` 에 같은 이름을 넣어 지역 서비스 VIP 로 답하게 합니다. 방법은 [외부 접속 글](/posts/40/)과 [내부망 DNS 글](/posts/41/)의 서비스 추가 절차와 같습니다.
 
 2단계 인증은 HA 프로필의 **보안** 탭에서 **다단계 인증 모듈**의 **인증 앱**을 켜고, 화면의 QR 코드를 Google OTP 같은 TOTP 인증 앱으로 찍어 등록합니다. 코드는 휴대폰 시계로 만들어지므로 인터넷이 끊겨도 집 안에서 로그인할 수 있습니다.
 
 > HA 는 2단계 인증의 백업 코드를 주지 않습니다. 인증 앱의 클라우드 백업을 켜 두거나 두 번째 기기에도 등록해 둡니다. 잠겼을 때는 HA 설정 볼륨의 `.storage` 에서 해당 사용자의 다단계 인증 모듈을 끄고 다시 시작해야 합니다.
 {: .prompt-danger }
 
-HA 휴대폰 앱에서는 **내부 URL** 을 `http://[EDGE_IP]:8123`(집 Wi-Fi 에서), **외부 URL** 을 `https://ha-[SITE_CODE].[DOMAIN]` 으로 두면 인터넷이 끊겨도 집 안에서는 앱이 계속 동작합니다.
+HA 휴대폰 앱에서는 **내부 URL** 을 `http://[EDGE_SERVICE_VIP]:8123`(집 Wi-Fi 에서), **외부 URL** 을 `https://ha-[SITE_CODE].[DOMAIN]` 으로 두면 인터넷이 끊겨도 집 안에서는 앱이 계속 동작합니다.
 
-- **확인:** 휴대폰 데이터망에서 `https://ha-[SITE_CODE].[DOMAIN]` 이 HA 로그인 화면을, `https://z2m-[SITE_CODE].[DOMAIN]` 과 `https://matter-[SITE_CODE].[DOMAIN]` 이 Google 로그인 화면을 보여 줍니다. 허브에서 `curl -s -o /dev/null -w "%{http_code}" https://ha-[SITE_CODE].[DOMAIN]/` 가 `200` 입니다. 프록시 설정이 없으면 여기서 `400` 이 나오고 HA 로그에 `A request from a reverse proxy was received … not set-up for reverse proxies` 가 남습니다.
+- **확인:** 휴대폰 데이터망에서 `https://ha-[SITE_CODE].[DOMAIN]` 이 HA 로그인 화면을, `https://z2m-[SITE_CODE].[DOMAIN]` 과 `https://matter-[SITE_CODE].[DOMAIN]` 이 Google 로그인 화면을 보여 줍니다. 허브에서 `curl -s -o /dev/null -w "%{http_code}" https://ha-[SITE_CODE].[DOMAIN]/` 가 `200` 입니다(내부망 DNS 를 쓰는 곳에서는 지역 Traefik 을 거칩니다). 프록시 설정이 없으면 여기서 `400` 이 나오고 HA 로그에 `A request from a reverse proxy was received … not set-up for reverse proxies` 가 남습니다.
 
 ## 6. 확인
 
 ```bash
-# 엣지 kubeconfig 로 HA 로그의 오류와 통합 상태
-E="--kubeconfig ~/k3s-[SITE].yaml"
+# 허브 control plane: 엣지 kubeconfig 로 HA 로그의 오류와 통합 상태
+E="--kubeconfig ~/k8s-[SITE].yaml"
 kubectl $E -n home-assistant logs deploy/home-assistant | grep -E "automation|reverse proxy" | tail -3
 
-# Thread 보더 라우터 상태 (OTBR 을 쓰는 경우)
-curl -s http://[EDGE_IP]:8081/node/state
+# Thread 보더 라우터 상태 (OTBR 을 쓰는 경우, HA 가 뜬 worker 노드 IP)
+curl -s http://[OTBR_NODE_IP]:8081/node/state
 ```
 
 - **확인:** HA 로그에 자동화 설정 오류나 reverse proxy 오류가 없고, **설정 > 자동화 및 장면** 에 `Matter 상태를 MQTT 로 재발행` 과 `기기 제어 기록을 MQTT 로 발행` 이 보입니다. OTBR 상태는 `"leader"` 입니다. HA 의 **설정 > 기기 및 서비스**에 MQTT 아래 Zigbee2MQTT 브리지와 기기들이 자동으로 보입니다.

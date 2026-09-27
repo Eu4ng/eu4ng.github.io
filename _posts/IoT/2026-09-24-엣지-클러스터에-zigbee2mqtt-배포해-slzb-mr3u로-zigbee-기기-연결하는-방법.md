@@ -24,7 +24,7 @@ permalink: /posts/44/
 
 | 항목 | 버전 |
 | :--- | :--- |
-| 엣지 Kubernetes | `v1.36` (k3s) |
+| 엣지 Kubernetes | `v1.37` (kubeadm, 기본 StorageClass Longhorn) |
 | Zigbee2MQTT | `2.14.1` |
 | 코디네이터 | `SLZB-MR3U` (CC2674P10, Z-Stack `20240705`, SLZB-OS `v3.2.6`) |
 | 작성 기준일 | `2026-09-24` |
@@ -164,16 +164,16 @@ spec:
 {: file="iot/edge/zigbee2mqtt/deployment.yaml" }
 
 ```yaml
-# 프런트엔드. LAN 에서 http://[엣지 노드 IP]:30083 으로 열고 auth_token 으로 들어갑니다.
+# 프런트엔드. LAN 에서 http://[엣지 VIP]:30083 으로 열고 auth_token 으로 들어갑니다. VIP 는 지역 오버레이가 kube-vip.io/loadbalancerIPs 로 줍니다.
 apiVersion: v1
 kind: Service
 metadata:
   name: zigbee2mqtt
 spec:
-  type: NodePort
+  type: LoadBalancer
   selector: { app: zigbee2mqtt }
   ports:
-    - { port: 8080, targetPort: 8080, nodePort: 30083 }
+    - { name: http, port: 30083, targetPort: 8080 }
 ```
 {: file="iot/edge/zigbee2mqtt/service.yaml" }
 
@@ -198,13 +198,21 @@ spec:
 
 ## 3. 지역 오버레이 추가와 배포
 
-`iot/clusters/[SITE]/zigbee2mqtt/` 에 베이스를 참조하고 코디네이터 주소만 넣는 오버레이를 만듭니다. `adapter` 는 라디오 칩에 맞춥니다. CC26xx·CC2674 계열(Z-Stack)은 `zstack`, EFR32 계열은 `ember` 입니다.
+`iot/clusters/[SITE]/zigbee2mqtt/` 에 베이스를 참조하고 서비스 VIP 와 코디네이터 주소만 넣는 오버레이를 만듭니다. 서비스 VIP 는 엣지의 kube-vip 가 LoadBalancer Service 에 붙이는 LAN 주소이고, 같은 지역의 HA·Matter·Mosquitto 도 포트만 달리해 이 주소를 함께 씁니다. `adapter` 는 라디오 칩에 맞춥니다. CC26xx·CC2674 계열(Z-Stack)은 `zstack`, EFR32 계열은 `ember` 입니다.
 
 ```yaml
 # [SITE] 엣지의 Zigbee2MQTT. 코디네이터는 SLZB-MR3U 의 CC2674P10 라디오(네트워크 모드, 포트 7638).
 resources:
   - ../../../edge/zigbee2mqtt
 patches:
+  # [SITE] 엣지의 서비스 VIP(kube-vip). HA·Z2M·Matter·Mosquitto 가 포트만 달리해 같은 주소를 씁니다(LAN 기기·허브가 이 주소로 붙음)
+  - patch: |
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: zigbee2mqtt
+        annotations:
+          kube-vip.io/loadbalancerIPs: "[EDGE_SERVICE_VIP]"
   - patch: |
       apiVersion: apps/v1
       kind: Deployment
@@ -232,17 +240,17 @@ git push
 Argo CD 가 저장소를 다시 읽으면 `[SITE]-zigbee2mqtt` Application 이 생깁니다. 첫 기동은 코디네이터 연결과 설정 스키마 마이그레이션에 30초쯤 걸립니다.
 
 ```bash
-# control plane: 파드와 로그
-E="--kubeconfig k3s-[SITE].yaml"
+# 허브 control plane(엣지 kubeconfig): 파드와 로그
+E="--kubeconfig ~/k8s-[SITE].yaml"
 kubectl $E -n zigbee2mqtt get pods,pvc,svc
 kubectl $E -n zigbee2mqtt logs deploy/zigbee2mqtt | grep -E 'Socket connected|Coordinator firmware|Connected to MQTT|frontend|started'
 ```
 
-- **확인:** Application 이 `Synced`, `Healthy`. 로그에 `zh:zstack:znp: Socket connected`, `Coordinator firmware version: ... "type":"ZStack3x0"`, `Connected to MQTT server`, `Started frontend on port 8080`, `Zigbee2MQTT started!` 가 순서대로 보입니다. PVC 의 `configuration.yaml` 에는 `network_key` 가 숫자 배열로 바뀌어 있고 `coordinator_backup.json` 이 함께 생깁니다.
+- **확인:** Application 이 `Synced`, `Healthy`. `svc/zigbee2mqtt` 의 `EXTERNAL-IP` 가 `[EDGE_SERVICE_VIP]`, 포트가 `30083` 이고 PVC 는 `longhorn` StorageClass 로 `Bound` 입니다. 로그에 `zh:zstack:znp: Socket connected`, `Coordinator firmware version: ... "type":"ZStack3x0"`, `Connected to MQTT server`, `Started frontend on port 8080`, `Zigbee2MQTT started!` 가 순서대로 보입니다. PVC 의 `configuration.yaml` 에는 `network_key` 가 숫자 배열로 바뀌어 있고 `coordinator_backup.json` 이 함께 생깁니다.
 
 ## 4. 프런트엔드 접속과 기기 페어링
 
-내 PC 브라우저에서 `http://[EDGE_IP]:30083` 을 열고 시크릿 스크립트에 입력한 프런트엔드 토큰으로 들어갑니다. 상단의 **Permit join** 을 켠 뒤 기기를 페어링 모드로 만들면(기기마다 버튼을 몇 초 누르는 식) 목록에 나타납니다. 기기 이름(friendly name)은 토픽에 그대로 쓰이고 DB 에서는 `room`·`device`·`anchor` 컬럼으로 나뉘므로 `<방>-<종류>[-<기준>][번호]` 형식의 영문 소문자로 바꿉니다(예: 온습도계 `bedroom-th`, 멀티 센서 `bedroom-multi`, 문 열림 센서 `bedroom-contact-door`). 종류는 측정 항목이 아니라 기기 역할입니다. 기준(기기가 기준으로 삼는 대상)은 센서의 경우 같은 방 안에서 어디에 두었는지가 값에 영향을 줄 때만 붙이며, 주 출입문에 서서 방 안을 바라본 방향(`door`, `left`, `right`, `back`, `back_left`, `back_right`)이나 방에 하나뿐인 기준물(`window`, `bed`, `desk`), 높이(`ceil`, `floor`)로 적습니다. 같은 이름이 둘 이상이면 `bedroom-th2`, `bedroom-th-left2` 처럼 맨 끝에 번호를 붙입니다. Telegraf 가 이름을 `-` 에서 나눠 `room`(`bedroom`), `device`(`th`), `anchor`(`door`)에 넣으므로 칸 안에서는 `-` 대신 `_` 로 단어를 잇습니다(`living_room`, `air_quality`). Telegraf 는 이 규칙에 맞는 이름만 기록하므로, 페어링 직후의 `0x…` 이름으로 보낸 값은 DB 에 남지 않습니다. 또 `include_device_information` 으로 실린 실물 기기의 IEEE 주소와 모델을 `hw_id`, `model`, `vendor` 컬럼에 넣습니다.
+내 PC 브라우저에서 `http://[EDGE_SERVICE_VIP]:30083` 을 열고 시크릿 스크립트에 입력한 프런트엔드 토큰으로 들어갑니다. 상단의 **Permit join** 을 켠 뒤 기기를 페어링 모드로 만들면(기기마다 버튼을 몇 초 누르는 식) 목록에 나타납니다. 기기 이름(friendly name)은 토픽에 그대로 쓰이고 DB 에서는 `room`·`device`·`anchor` 컬럼으로 나뉘므로 `<방>-<종류>[-<기준>][번호]` 형식의 영문 소문자로 바꿉니다(예: 온습도계 `bedroom-th`, 멀티 센서 `bedroom-multi`, 문 열림 센서 `bedroom-contact-door`). 종류는 측정 항목이 아니라 기기 역할입니다. 기준(기기가 기준으로 삼는 대상)은 센서의 경우 같은 방 안에서 어디에 두었는지가 값에 영향을 줄 때만 붙이며, 주 출입문에 서서 방 안을 바라본 방향(`door`, `left`, `right`, `back`, `back_left`, `back_right`)이나 방에 하나뿐인 기준물(`window`, `bed`, `desk`), 높이(`ceil`, `floor`)로 적습니다. 같은 이름이 둘 이상이면 `bedroom-th2`, `bedroom-th-left2` 처럼 맨 끝에 번호를 붙입니다. Telegraf 가 이름을 `-` 에서 나눠 `room`(`bedroom`), `device`(`th`), `anchor`(`door`)에 넣으므로 칸 안에서는 `-` 대신 `_` 로 단어를 잇습니다(`living_room`, `air_quality`). Telegraf 는 이 규칙에 맞는 이름만 기록하므로, 페어링 직후의 `0x…` 이름으로 보낸 값은 DB 에 남지 않습니다. 또 `include_device_information` 으로 실린 실물 기기의 IEEE 주소와 모델을 `hw_id`, `model`, `vendor` 컬럼에 넣습니다.
 
 - 기기를 다른 방이나 자리로 옮기면 옮기는 즉시 이름을 바꿉니다. 바꾼 시각부터 새 방·기준으로 기록되고, 과거 행은 옛 방·기준으로 남습니다.
 - 기기를 교체하면 옛 기기를 `retired-[기기 이름]` 으로 바꾸거나 제거하고, 새 기기에 옛 이름을 줍니다. 이름은 이어지고 `hw_id`, `model` 만 바뀝니다. `retired-` 이름의 값은 기록되지 않습니다.
@@ -276,8 +284,8 @@ kubectl $E -n zigbee2mqtt exec deploy/zigbee2mqtt -c zigbee2mqtt -- sed -n '/^de
 Telegraf 는 기기 메시지의 필드 하나를 `readings` 테이블의 행 하나(`property`, `value`, `value_text`)로 넣습니다. 기기 설정값(보정값, 감도, 표시등 등)과 펌웨어 업데이트 정보도 같은 방식으로 들어가고, 기기 정보(`device_software_build_id` 등)는 바뀔 때만 들어갑니다. 허브에서 기기별로 들어온 속성을 봅니다.
 
 ```bash
-# 허브 control plane
-kubectl -n timescaledb exec deploy/timescaledb -- psql -U iot -d iot \
+# 허브 control plane: 주 DB 파드(Patroni 가 role=primary 라벨을 붙임)에서 조회
+kubectl -n timescaledb exec $(kubectl -n timescaledb get pod -l role=primary -o name) -- psql -U iot -d iot \
   -c "select room, device, anchor, hw_id, model, string_agg(distinct property, ', ') as properties,
              max(time) filter (where property <> 'availability') as last_seen
       from readings where protocol = 'zigbee' group by 1,2,3,4,5 order by 1,2,3;"
