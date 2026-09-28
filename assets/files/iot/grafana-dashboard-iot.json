@@ -125,8 +125,8 @@
           "type": "grafana-postgresql-datasource",
           "uid": "timescaledb"
         },
-        "query": "SELECT DISTINCT property FROM readings WHERE $__timeFilter(time) AND site IN ($site) AND processing IN ($processing) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device)) AND (device <> 'host' OR device IN ($device))",
-        "definition": "SELECT DISTINCT property FROM readings WHERE $__timeFilter(time) AND site IN ($site) AND processing IN ($processing) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device)) AND (device <> 'host' OR device IN ($device))",
+        "query": "SELECT DISTINCT property FROM readings WHERE $__timeFilter(time) AND site IN ($site) AND processing IN ($processing) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device))",
+        "definition": "SELECT DISTINCT property FROM readings WHERE $__timeFilter(time) AND site IN ($site) AND processing IN ($processing) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device))",
         "refresh": 2,
         "sort": 1,
         "multi": true,
@@ -150,8 +150,8 @@
           "type": "grafana-postgresql-datasource",
           "uid": "timescaledb"
         },
-        "query": "SELECT DISTINCT property FROM readings WHERE $__timeFilter(time) AND site IN ($site) AND processing IN ($processing) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device)) AND (device <> 'host' OR device IN ($device)) AND ('__all__' IN ($property) OR property IN ($property)) AND value IS NOT NULL AND lower(coalesce(value_text, '')) NOT IN ('on', 'off', 'true', 'false', 'online', 'offline') AND property NOT LIKE 'pm%'",
-        "definition": "SELECT DISTINCT property FROM readings WHERE $__timeFilter(time) AND site IN ($site) AND processing IN ($processing) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device)) AND (device <> 'host' OR device IN ($device)) AND ('__all__' IN ($property) OR property IN ($property)) AND value IS NOT NULL AND lower(coalesce(value_text, '')) NOT IN ('on', 'off', 'true', 'false', 'online', 'offline') AND property NOT LIKE 'pm%'",
+        "query": "SELECT DISTINCT property FROM readings WHERE $__timeFilter(time) AND site IN ($site) AND processing IN ($processing) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device)) AND ('__all__' IN ($property) OR property IN ($property)) AND value IS NOT NULL AND lower(coalesce(value_text, '')) NOT IN ('on', 'off', 'true', 'false', 'online', 'offline') AND property NOT LIKE 'pm%'",
+        "definition": "SELECT DISTINCT property FROM readings WHERE $__timeFilter(time) AND site IN ($site) AND processing IN ($processing) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device)) AND ('__all__' IN ($property) OR property IN ($property)) AND value IS NOT NULL AND lower(coalesce(value_text, '')) NOT IN ('on', 'off', 'true', 'false', 'online', 'offline') AND property NOT LIKE 'pm%'",
         "refresh": 2,
         "sort": 1,
         "multi": true,
@@ -175,8 +175,8 @@
           "type": "grafana-postgresql-datasource",
           "uid": "timescaledb"
         },
-        "query": "SELECT property FROM readings WHERE $__timeFilter(time) AND site IN ($site) AND processing IN ($processing) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device)) AND (device <> 'host' OR device IN ($device)) AND ('__all__' IN ($property) OR property IN ($property)) GROUP BY property HAVING count(value_text) > 0 AND (count(value) = 0 OR bool_and(lower(value_text) IN ('on', 'off', 'true', 'false', 'online', 'offline')))",
-        "definition": "SELECT property FROM readings WHERE $__timeFilter(time) AND site IN ($site) AND processing IN ($processing) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device)) AND (device <> 'host' OR device IN ($device)) AND ('__all__' IN ($property) OR property IN ($property)) GROUP BY property HAVING count(value_text) > 0 AND (count(value) = 0 OR bool_and(lower(value_text) IN ('on', 'off', 'true', 'false', 'online', 'offline')))",
+        "query": "SELECT property FROM readings WHERE $__timeFilter(time) AND site IN ($site) AND processing IN ($processing) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device)) AND ('__all__' IN ($property) OR property IN ($property)) GROUP BY property HAVING count(value_text) > 0 AND (count(value) = 0 OR bool_and(lower(value_text) IN ('on', 'off', 'true', 'false', 'online', 'offline')))",
+        "definition": "SELECT property FROM readings WHERE $__timeFilter(time) AND site IN ($site) AND processing IN ($processing) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device)) AND ('__all__' IN ($property) OR property IN ($property)) GROUP BY property HAVING count(value_text) > 0 AND (count(value) = 0 OR bool_and(lower(value_text) IN ('on', 'off', 'true', 'false', 'online', 'offline')))",
         "refresh": 2,
         "sort": 1,
         "multi": true,
@@ -302,7 +302,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT DISTINCT ON (site, room, device, anchor, property, processing) *\nFROM readings\nWHERE $__timeFilter(time) AND site IN ($site) AND processing IN ($processing) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device)) AND (device <> 'host' OR device IN ($device)) AND ('__all__' IN ($property) OR property IN ($property))\nORDER BY site, room, device, anchor, property, processing, time DESC"
+          "rawSql": "SELECT DISTINCT ON (site, room, device, anchor, property, processing) *\nFROM readings\nWHERE $__timeFilter(time) AND site IN ($site) AND processing IN ($processing) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device)) AND ('__all__' IN ($property) OR property IN ($property))\nORDER BY site, room, device, anchor, property, processing, time DESC"
         }
       ],
       "fieldConfig": {
@@ -343,7 +343,48 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT *\nFROM readings\nWHERE $__timeFilter(time) AND site IN ($site) AND processing IN ($processing) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device)) AND (device <> 'host' OR device IN ($device)) AND ('__all__' IN ($property) OR property IN ($property))\nORDER BY time DESC\nLIMIT 500"
+          "rawSql": "SELECT *\nFROM readings\nWHERE $__timeFilter(time) AND site IN ($site) AND processing IN ($processing) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device)) AND ('__all__' IN ($property) OR property IN ($property))\nORDER BY time DESC\nLIMIT 500"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "filterable": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      }
+    },
+    {
+      "type": "table",
+      "title": "재실자 상세 좌표 (occupancy)",
+      "description": "NVR 영상 추론으로 측정한 재실자별 바닥 평면 좌표(x_m, y_m), 이동 속도(speed_mps), 추적 ID(track_id) 기록입니다.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "timescaledb"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 34,
+        "w": 24,
+        "h": 8
+      },
+      "id": 8,
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT time, site, room, device, track_id, round(x_m::numeric, 2) AS x_m, round(y_m::numeric, 2) AS y_m, round(speed_mps::numeric, 2) AS speed_mps, round(confidence::numeric, 2) AS confidence\nFROM occupancy\nWHERE $__timeFilter(time) AND site IN ($site)\nORDER BY time DESC\nLIMIT 200"
         }
       ],
       "fieldConfig": {
@@ -369,7 +410,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 34,
+        "y": 42,
         "w": 24,
         "h": 8
       },
@@ -384,7 +425,7 @@
           "editorMode": "code",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT $__timeGroupAlias(time, $__interval), site, room, device, anchor, property, processing, unit, avg(value) AS value\nFROM readings\nWHERE $__timeFilter(time) AND site IN ($site) AND processing IN ($processing) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device)) AND (device <> 'host' OR device IN ($device)) AND ('__all__' IN ($property) OR property IN ($property)) AND property LIKE 'pm%' AND value IS NOT NULL\nGROUP BY 1, 2, 3, 4, 5, 6, 7, 8\nORDER BY 1"
+          "rawSql": "SELECT $__timeGroupAlias(time, $__interval), site, room, device, anchor, property, processing, unit, avg(value) AS value\nFROM readings\nWHERE $__timeFilter(time) AND site IN ($site) AND processing IN ($processing) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device)) AND ('__all__' IN ($property) OR property IN ($property)) AND property LIKE 'pm%' AND value IS NOT NULL\nGROUP BY 1, 2, 3, 4, 5, 6, 7, 8\nORDER BY 1"
         }
       ],
       "fieldConfig": {
@@ -417,7 +458,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 42,
+        "y": 50,
         "w": 8,
         "h": 8
       },
@@ -432,7 +473,7 @@
           "editorMode": "code",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT $__timeGroupAlias(time, $__interval), site, room, device, anchor, processing, unit, avg(value) AS value\nFROM readings\nWHERE $__timeFilter(time) AND site IN ($site) AND processing IN ($processing) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device)) AND (device <> 'host' OR device IN ($device)) AND property = ${num_property:sqlstring} AND value IS NOT NULL\nGROUP BY 1, 2, 3, 4, 5, 6, 7\nORDER BY 1"
+          "rawSql": "SELECT $__timeGroupAlias(time, $__interval), site, room, device, anchor, processing, unit, avg(value) AS value\nFROM readings\nWHERE $__timeFilter(time) AND site IN ($site) AND processing IN ($processing) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device)) AND property = ${num_property:sqlstring} AND value IS NOT NULL\nGROUP BY 1, 2, 3, 4, 5, 6, 7\nORDER BY 1"
         }
       ],
       "repeat": "num_property",
@@ -468,7 +509,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 50,
+        "y": 58,
         "w": 12,
         "h": 6
       },
@@ -483,7 +524,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "-- 기록이 끝난 이름(같은 실물 hw_id 가 뒤에 다른 이름으로 기록됨)은 그 시각에 빈 값을 넣어 막대를 끊습니다. 없으면 마지막 값이 패널 끝까지 이어집니다\nWITH r AS (\n  SELECT time, hw_id, site, room, device, anchor,\n         concat_ws(' ', site, concat_ws('-', room, device, anchor), nullif(processing, 'raw')) AS name,\n         CASE WHEN lower(value_text) IN ('on', 'off', 'true', 'false', 'online', 'offline') THEN lower(value_text) ELSE value_text END AS value_text\n  FROM readings\n  WHERE $__timeFilter(time) AND site IN ($site) AND processing IN ($processing) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device)) AND (device <> 'host' OR device IN ($device)) AND property = ${text_property:sqlstring} AND value_text IS NOT NULL\n)\nSELECT time, name, value_text FROM r\nUNION ALL\nSELECT n.time, e.name, NULL\nFROM (SELECT name, hw_id, site, room, device, anchor, max(time) AS last FROM r WHERE hw_id IS NOT NULL GROUP BY 1, 2, 3, 4, 5, 6) e\nCROSS JOIN LATERAL (\n  SELECT x.time FROM readings x\n  WHERE x.hw_id = e.hw_id AND x.time >= e.last AND x.time <= $__timeTo()\n    AND (x.site, x.room, x.device, x.anchor) IS DISTINCT FROM (e.site, e.room, e.device, e.anchor)\n  ORDER BY x.time LIMIT 1) n\nORDER BY 1"
+          "rawSql": "-- 기록이 끝난 이름(같은 실물 hw_id 가 뒤에 다른 이름으로 기록됨)은 그 시각에 빈 값을 넣어 막대를 끊습니다. 없으면 마지막 값이 패널 끝까지 이어집니다\nWITH r AS (\n  SELECT time, hw_id, site, room, device, anchor,\n         concat_ws(' ', site, concat_ws('-', room, device, anchor), nullif(processing, 'raw')) AS name,\n         CASE WHEN lower(value_text) IN ('on', 'off', 'true', 'false', 'online', 'offline') THEN lower(value_text) ELSE value_text END AS value_text\n  FROM readings\n  WHERE $__timeFilter(time) AND site IN ($site) AND processing IN ($processing) AND ('__all__' IN ($room) OR room IN ($room)) AND ('__all__' IN ($device) OR device IN ($device)) AND property = ${text_property:sqlstring} AND value_text IS NOT NULL\n)\nSELECT time, name, value_text FROM r\nUNION ALL\nSELECT n.time, e.name, NULL\nFROM (SELECT name, hw_id, site, room, device, anchor, max(time) AS last FROM r WHERE hw_id IS NOT NULL GROUP BY 1, 2, 3, 4, 5, 6) e\nCROSS JOIN LATERAL (\n  SELECT x.time FROM readings x\n  WHERE x.hw_id = e.hw_id AND x.time >= e.last AND x.time <= $__timeTo()\n    AND (x.site, x.room, x.device, x.anchor) IS DISTINCT FROM (e.site, e.room, e.device, e.anchor)\n  ORDER BY x.time LIMIT 1) n\nORDER BY 1"
         }
       ],
       "repeat": "text_property",

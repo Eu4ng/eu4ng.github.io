@@ -306,7 +306,7 @@ done
 
 GitOps 저장소의 `services/ollama/` 폴더에 HAProxy 설정, Deployment, Service 를 둡니다. 폴더 이름을 따라 `ollama` 네임스페이스에 배포됩니다.
 
-HAProxy 설정의 핵심은 `backend by-speed` 입니다. `balance first` 는 위에 적힌 서버부터 연결을 채우고, 서버마다 `maxconn 1` 이라 요청 하나가 서버 하나를 차지합니다. 비어 있는 서버 가운데 가장 위의 서버가 다음 요청을 받고, 모두 바쁘면 `timeout queue` 동안 줄을 세웠다가 먼저 빈 서버로 보냅니다. `/api/version` 헬스체크가 두 번 실패한 서버는 건너뛰므로 PC 가 꺼져 있어도 요청이 멈추지 않습니다. 서버 이름은 파드의 DNS 로 풀고(`resolvers lan`), `init-addr` 에 `none` 이 있어 풀리지 않는 서버가 있어도 HAProxy 가 뜹니다.
+HAProxy 설정의 핵심은 `backend by-speed` 입니다. `balance first` 는 위에 적힌 서버부터 연결을 채우고, 서버마다 `maxconn 1` 이라 요청 하나가 서버 하나를 차지합니다. 비어 있는 서버 가운데 가장 위의 서버가 다음 요청을 받고, 모두 바쁘면 `timeout queue` 동안 줄을 세웠다가 먼저 빈 서버로 보냅니다. `/api/version` 헬스체크가 두 번 실패한 서버는 건너뛰므로 PC 가 꺼져 있어도 요청이 멈추지 않습니다. 서버가 요청을 처리하다 실패하면(연결 실패, 빈 응답, 5xx) `retry-on` 으로 다른 서버에 다시 보내므로, 쓰는 쪽은 어느 서버가 실패했는지 몰라도 됩니다. 다시 보내려면 요청 본문 전체가 버퍼에 들어가야 해서 `tune.bufsize` 를 1MB 로 키웁니다. 서버 이름은 파드의 DNS 로 풀고(`resolvers lan`), `init-addr` 에 `none` 이 있어 풀리지 않는 서버가 있어도 HAProxy 가 뜹니다.
 
 ```bash
 # HAProxy 설정 내려받기
@@ -326,6 +326,8 @@ curl -fsSL https://eu4ng.github.io/assets/files/ollama/haproxy.cfg -o services/o
 # CPU·610M 은 proxmox-ansible playbooks/ollama.yml 의 LXC 이고, 이름은 내부망 DNS 가 풉니다. 이 프로세스 하나가 연결 수를 세므로 replicas 는 1 입니다.
 global
   log stdout format raw local0 info
+  maxconn 200                    # 동시 연결 상한(버퍼가 1MB 라 메모리를 제한). 실제 동시 요청은 서버 수 안팎
+  tune.bufsize 1048576           # 요청 본문 전체를 버퍼에 담아야 다른 서버로 다시 보낼 수 있습니다(64K 컨텍스트 요청도 수백 KB)
 
 resolvers lan
   parse-resolv-conf              # 파드의 resolv.conf(CoreDNS → 내부망 DNS)
@@ -336,6 +338,11 @@ defaults
   log global
   option httplog
   option dontlognull              # 준비 상태 검사처럼 요청 없이 닫힌 연결은 기록하지 않습니다
+  # 서버가 요청을 처리하다 실패하면(연결 실패, 빈 응답, 5xx) 다른 서버로 다시 보냅니다. 쓰는 쪽은 어느 서버가 실패했는지 몰라도 됩니다
+  option http-buffer-request
+  retries 2
+  option redispatch 1
+  retry-on conn-failure empty-response 500 502 503 504
   option http-server-close       # 응답이 끝나면 서버 연결을 닫아, 쉬는 keep-alive 연결이 자리를 차지하지 않게 합니다
   timeout connect 5s
   timeout client 60m
@@ -351,7 +358,7 @@ backend by-speed
   option httpchk GET /api/version
   http-check expect status 200
   default-server check inter 5s fall 2 rise 2 maxconn 1 resolvers lan init-addr last,libc,none
-  server winpc-780m [WINPC_IP]:11434            # 윈도우 PC(Radeon 780M). PC 가 꺼지면 헬스체크로 빠집니다
+  server winpc-780m [WINPC_IP]:11434          # 윈도우 PC(Radeon 780M). PC 가 꺼지면 헬스체크로 빠집니다
   # server pve02-780m ollama-780m.[DOMAIN]:11434   # pve02 메모리를 늘려 LXC 를 만든 뒤 여기(두 번째)에 넣습니다
   server pve01-cpu ollama-cpu.[DOMAIN]:11434
   server pve01-610m ollama-610m.[DOMAIN]:11434
@@ -396,7 +403,7 @@ spec:
             periodSeconds: 5
           resources:
             requests: { cpu: 10m, memory: 32Mi }
-            limits:   { cpu: 500m, memory: 128Mi }
+            limits:   { cpu: 500m, memory: 256Mi }   # 재시도용 요청 버퍼(연결마다 1MB)
       volumes:
         - name: config
           configMap: { name: ollama-router }
@@ -417,22 +424,7 @@ spec:
 ```
 {: file="services/ollama/service.yaml" }
 
-서버는 모델을 하나만 올리므로, 라우터에 두 모델을 섞어 보내면 서버마다 모델을 바꿔 끼우느라 느려집니다. 다른 모델을 계속 쓰는 클라이언트는 라우터 대신 한 서버에 고정한 `ollama-cluster` 주소를 씁니다.
-
-```yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: ollama-cluster
-spec:
-  # 한 서버(pve01 CPU LXC)에 고정해 쓸 때의 주소입니다. 풀(ollama)과 달리 요청마다 서버가 바뀌지 않아 모델을 번갈아 올리지 않습니다
-  # (wiki-papers 의 판정 모델 등). 라우터를 거치지 않으므로 라우터는 이 요청을 모릅니다
-  type: ExternalName
-  externalName: ollama-cpu.[DOMAIN]
-  ports:
-    - { port: 11434 }
-```
-{: file="services/ollama/service-cluster.yaml" }
+클라이언트는 어느 서버(GPU·CPU)가 요청을 받는지 알 필요가 없습니다. 라우터 주소 하나만 쓰고, 서버를 늘리거나 바꿀 때도 라우터 설정만 고칩니다.
 
 `configMapGenerator` 는 `haproxy.cfg` 가 바뀌면 ConfigMap 이름 끝의 해시를 바꿔, 라우터 파드가 새 설정으로 다시 만들어지게 합니다.
 
@@ -441,7 +433,6 @@ spec:
 resources:
   - deployment.yaml
   - service.yaml
-  - service-cluster.yaml
 configMapGenerator:
   - name: ollama-router
     files:
@@ -507,7 +498,7 @@ done; wait
 kubectl -n ollama logs deploy/ollama-router --since=10m | grep api/generate
 ```
 
-클러스터 안의 클라이언트는 `http://ollama.ollama.svc.cluster.local:11434` 하나로 모든 서버를 쓰고, 한 서버에 고정할 때는 `http://ollama-cluster.ollama.svc.cluster.local:11434` 를 씁니다.
+클러스터 안의 클라이언트는 `http://ollama.ollama.svc.cluster.local:11434` 하나로 모든 서버를 씁니다.
 
 - **확인:** 통계의 모든 서버가 `UP`, `L7OK` 이고 `slim` 이 1 입니다. 모델 목록 요청은 로그에 `by-speed/` 뒤 첫 서버 이름으로 남고, 동시에 보낸 세 요청은 `by-speed/winpc-780m`, `by-speed/pve01-cpu`, `by-speed/pve01-610m` 으로 모두 다른 서버에 남습니다.
 

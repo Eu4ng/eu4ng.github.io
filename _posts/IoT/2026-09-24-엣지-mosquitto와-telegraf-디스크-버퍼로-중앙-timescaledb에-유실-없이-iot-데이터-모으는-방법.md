@@ -439,6 +439,7 @@ Telegraf 설정 하나를 모든 지역이 공유합니다. 지역 이름과 허
 # 필드 하나를 행 하나로 쪼개고 값을 value(숫자)와 value_text(문자열)로 나눕니다. 실물 기기 태그 이름도 여기서 통일합니다.
 # 메시지에 property 태그가 있으면(HA) 그 값이 속성 이름이고, 없으면(Zigbee2MQTT) 필드 이름이 속성 이름입니다.
 # 단위는 HA 메시지에는 unit 태그로 실려 오고, Zigbee2MQTT 는 기기 정의(z2m_devices)에서, 호스트는 발견 설정(host_sensors)에서 기억해 둔 값을 붙입니다.
+# 호스트는 발견 설정이 아직 없으면 필드 이름 끝으로 정합니다(HOST_UNITS).
 # Zigbee2MQTT 연결 상태 메시지처럼 실물 정보가 없는 메시지에도 기기 정의에서 기억해 둔 hw_id·model·vendor 를 붙입니다.
 # 기기 정의에서는 기기 정보가 바뀐 것만 device_<키> 행으로 냅니다. 제어 기록(events)은 이름만 나누고 필드는 그대로 둡니다(z2m set 은 필드마다 행).
 [[processors.starlark]]
@@ -551,6 +552,18 @@ def remember_devices(metric):
     state["hw"] = hw
     return out
 
+# 호스트 값(source telegraf)의 예비 단위. 발견 설정에서 배운 단위가 우선이고, 설정이 아직 오지 않았을 때(새 필드가 생긴 직후, Telegraf 재시작 직후)
+# 필드 이름 끝으로 정합니다. 필드 이름은 <부품>_<값> 규칙이고, 값은 proxmox-ansible scripts/host-metrics-discovery.py 의 SENSORS 표와 같아야 합니다.
+# _percent 를 _used 보다 먼저 봅니다(mem_used_percent 가 B 로 잡히지 않게). 여기 없는 끝(_load, _cores, _threads, _ok)은 단위가 없습니다
+HOST_UNITS = [("_percent", "%"), ("_usage", "%"), ("_temp", "°C"), ("_power", "W"), ("_clock", "MHz"),
+              ("_used", "B"), ("_total", "B"), ("_uptime", "s")]
+
+def host_unit(field):
+    for end, unit in HOST_UNITS:
+        if field.endswith(end):
+            return unit
+    return ""
+
 def remember_host_sensor(metric):
     # homeassistant/sensor/<기기>/<필드>/config 중 호스트 Telegraf 가 낸 것만. 빈 메시지는 센서가 지워진 것입니다
     raw = metric.fields.get("value", "")
@@ -565,7 +578,9 @@ def remember_host_sensor(metric):
     if c.get("unit_of_measurement"):
         units[field] = c["unit_of_measurement"]
     d = c.get("device") or {}
-    state.setdefault("host_hw", {})[device] = {"vendor": d.get("manufacturer") or "", "model": d.get("model") or ""}
+    # serial_number 는 호스트의 메인보드 시리얼입니다. 다른 기기의 IEEE 주소·Matter 시리얼과 같은 자리(hw_id)에 넣어 실물 교체 이력이 남습니다
+    state.setdefault("host_hw", {})[device] = {"vendor": d.get("manufacturer") or "", "model": d.get("model") or "",
+                                               "hw_id": d.get("serial_number") or ""}
     return []
 
 def event(metric):
@@ -626,6 +641,8 @@ def apply(metric):
         m.tags["property"] = prop or k
         if "unit" not in tags and units.get(m.tags["property"]):
             m.tags["unit"] = units[m.tags["property"]]
+        elif "unit" not in tags and tags.get("source") == "telegraf" and host_unit(m.tags["property"]):
+            m.tags["unit"] = host_unit(m.tags["property"])
         if set_value(m, v):
             out.append(m)
     return out
@@ -820,6 +837,72 @@ spec:
 
 압축은 `site, room, device, anchor, property, processing` 이 같은 행끼리 묶습니다. 묶음 하나가 시계열 하나(예: 한 기기의 온도)가 되어 값이 비슷한 것끼리 모이므로 압축이 잘 되고, 조회할 때도 필요한 묶음만 풉니다. 청크와 압축은 1일 단위라 압축 전 데이터가 하루치를 넘지 않습니다. 압축된 청크에도 INSERT·UPDATE·DELETE 는 되므로 늦게 도착한 버퍼나 보정은 느려질 뿐 그대로 들어갑니다.
 
+Telegraf 가 재시작하면 브로커가 유지 메시지(Zigbee2MQTT 기기 상태 등)를 다시 보내고, 메시지에 실린 원래 시각으로 같은 행이 한 번 더 저장됩니다. MQTT 는 구독할 때마다 유지 메시지를 보내므로 재수신 자체는 막을 수 없고, Telegraf 의 postgresql 출력은 `ON CONFLICT` 를 지원하지 않아 유니크 인덱스를 걸면 배치가 통째로 실패합니다. 그래서 저장한 뒤 정리합니다. 두 DB 에 아래 SQL 을 한 번씩 실행하면 TimescaleDB 작업 `dedup_readings` 가 1시간마다 압축 전 청크에서 같은 `(time, site, room, device, anchor, property, processing)` 를 하나만 남기고 지웁니다. DB 안에서 도는 작업이라 자격 증명이 필요 없고, Patroni 가 주 DB 를 옮겨도 새 주 DB 에서 이어 돕니다.
+
+<details markdown="1">
+<summary>iot/hub/timescaledb/migrations/2026-09-28-readings-dedup-job.sql 전문</summary>
+
+```sql
+-- readings 의 중복 행을 1시간마다 지우는 TimescaleDB 작업(dedup_readings)을 만듭니다. 허브 DB 와 지역 DB 모두에 실행합니다(다시 실행해도 결과가 같습니다).
+-- 중복이 생기는 까닭: 엣지 Telegraf 가 재시작하면 브로커가 유지(retained) 메시지(Zigbee2MQTT 기기 상태, HA 재발행 상태)를 다시 보내고,
+-- 메시지에 실린 원래 시각으로 같은 행이 또 저장됩니다. MQTT 는 구독할 때마다 유지 메시지를 보내므로 재수신 자체는 막을 수 없고,
+-- Telegraf 의 postgresql 출력은 ON CONFLICT 를 지원하지 않아 유니크 인덱스를 걸면 배치가 통째로 실패합니다. 그래서 저장한 뒤 정리합니다.
+-- events 는 유지 메시지가 아니라(제어 명령·자동화 실행) 대상이 아닙니다.
+-- CronJob 이 아니라 DB 작업으로 두어 자격 증명이 필요 없고, Patroni 가 주 DB 를 옮겨도 새 주 DB 에서 이어 돕니다(압축 정책과 같은 방식).
+--   허브: kubectl -n timescaledb exec -i timescaledb-0 -- psql -h timescaledb -U iot -d iot -v ON_ERROR_STOP=1 < 2026-09-28-readings-dedup-job.sql
+--   지역: kubectl --kubeconfig ~/k8s-<지역>.yaml -n timescaledb exec -i <주 DB 파드> -- psql -U iot -d iot -v ON_ERROR_STOP=1 < 2026-09-28-readings-dedup-job.sql
+
+-- 같은 (time, site, room, device, anchor, property, processing) 가 여럿이면 하나만 남깁니다. 단위·값이 채워진 행이 남습니다.
+-- 청크 테이블에 직접 실행합니다. 하이퍼테이블 전체에서는 ctid 가 유일하지 않지만 청크 하나는 일반 테이블이라 안전합니다.
+-- PARTITION BY 는 NULL 을 한 묶음으로 보므로 anchor 가 없는 기기(bedroom2-th 등)도 정리됩니다.
+-- 압축된 청크는 건드리지 않습니다(압축은 1일 뒤라 1시간마다 도는 이 작업에는 늘 여유가 있습니다). 청크 안에서도 최근 25시간만 봅니다.
+CREATE OR REPLACE PROCEDURE dedup_readings(job_id int, config jsonb)
+LANGUAGE plpgsql AS $$
+DECLARE
+  c record;
+  n bigint;
+  total bigint := 0;
+BEGIN
+  FOR c IN
+    SELECT chunk_schema, chunk_name FROM timescaledb_information.chunks
+    WHERE hypertable_name = 'readings' AND NOT is_compressed AND range_end > now() - interval '25 hours'
+  LOOP
+    EXECUTE format($q$
+      DELETE FROM %1$I.%2$I WHERE ctid IN (
+        SELECT ctid FROM (
+          SELECT ctid, row_number() OVER (
+            PARTITION BY time, site, room, device, anchor, property, processing
+            ORDER BY (coalesce(unit, '') <> '') DESC, (value IS NOT NULL) DESC, ctid) AS rn
+          FROM %1$I.%2$I WHERE time > now() - interval '25 hours') t
+        WHERE rn > 1)$q$, c.chunk_schema, c.chunk_name);
+    GET DIAGNOSTICS n = ROW_COUNT;
+    total := total + n;
+  END LOOP;
+  RAISE NOTICE 'dedup_readings: % 행 삭제', total;
+END
+$$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM timescaledb_information.jobs WHERE proc_name = 'dedup_readings') THEN
+    PERFORM add_job('dedup_readings', INTERVAL '1 hour');
+  END IF;
+END
+$$;
+
+-- 지금 쌓인 중복을 한 번 지웁니다
+CALL dedup_readings(0, NULL);
+
+-- 확인: 작업이 1시간 주기로 있고, 최근 25시간에 중복 묶음이 없어야 합니다(0)
+SELECT job_id, schedule_interval, next_start FROM timescaledb_information.jobs WHERE proc_name = 'dedup_readings';
+SELECT count(*) AS dup_groups FROM (
+  SELECT 1 FROM readings WHERE time > now() - interval '25 hours'
+  GROUP BY time, site, room, device, anchor, property, processing HAVING count(*) > 1) x;
+```
+{: file="iot/hub/timescaledb/migrations/2026-09-28-readings-dedup-job.sql" }
+
+</details>
+
 `events` 테이블은 "행 하나 = 기기 하나에 간 명령 하나" 입니다. 이 글에서는 Zigbee 명령만 들어오고, [Home Assistant 글](/posts/48/)에서 HA 로 제어한 명령과 자동화 실행이 누가 했는지와 함께 들어옵니다. 기기 컬럼은 `readings` 와 같아 명령 직후의 전력 변화처럼 두 테이블을 조인해 볼 수 있습니다. 값을 가공하지 않으므로 `processing` 은 없습니다.
 
 | 컬럼 | 예 | 내용 |
@@ -964,7 +1047,7 @@ configMapGenerator:
 ```
 {: file="iot/hub/timescaledb/kustomization.yaml" }
 
-대시보드(uid `iot-records`)는 2단계의 `TimescaleDB` 데이터소스로 읽기 전용 조회만 합니다. DB 에 잘 저장되는지 확인하는 용도라 컬럼을 가공하지 않고 `SELECT *` 로 그대로 보여 주며, 컬럼이 늘거나 줄면 표에 바로 반영됩니다. 위쪽의 `site`, `processing`, `room`, `device`, `property` 변수로 범위를 좁히고, 오른쪽 위 시간 범위가 모든 패널에 적용됩니다. 서버·PC 자체의 값(`device` 가 `host`, [호스트 부하 글](/posts/74/))은 속성이 많고 행이 많아 `device` 변수에서 `host` 를 직접 고를 때만 나옵니다.
+대시보드(uid `iot-records`)는 2단계의 `TimescaleDB` 데이터소스로 읽기 전용 조회만 합니다. DB 에 잘 저장되는지 확인하는 용도라 컬럼을 가공하지 않고 `SELECT *` 로 그대로 보여 주며, 컬럼이 늘거나 줄면 표에 바로 반영됩니다. 위쪽의 `site`, `processing`, `room`, `device`, `property` 변수로 범위를 좁히고, 오른쪽 위 시간 범위가 모든 패널에 적용됩니다. 서버·PC 자체의 값([호스트 부하 글](/posts/74/))도 다른 기기처럼 속성마다 패널이 자동으로 생기므로 `device`·`property` 변수로 좁혀 봅니다.
 
 | 패널 | 내용 |
 |---|---|
