@@ -50,7 +50,7 @@ Proxmox 호스트에 **Telegraf** 를 설치해 호스트 전체(VM·CT 를 합�
 | `pve01` | `bedroom2-plug-server_ms_a2_1` | `bedroom2-host-server_ms_a2_1` |
 | `pve02` | `bedroom2-plug-server_k12_1` | `bedroom2-host-server_k12_1` |
 
-엣지 Telegraf 가 이름을 나눠 `room` 은 `bedroom2`, `device` 는 `host`, `anchor` 는 `server_ms_a2_1` 로 넣으므로 플러그 행과 `anchor` 가 같습니다. 이름에 `/` 는 쓰지 않습니다(토픽이 두 단계가 되어 수집되지 않음).
+엣지 Telegraf 가 이름을 나눠 `room` 은 `bedroom2`, `device` 는 `host`, `anchor` 는 `server_ms_a2_1` 로 넣으므로 플러그 행과 `anchor` 가 같습니다. 실물 ID(`hw_id`)에는 메인보드 시리얼이 들어가 부품을 바꿔도 같은 이름으로 이어지고 교체 이력이 남습니다. 이름에 `/` 는 쓰지 않습니다(토픽이 두 단계가 되어 수집되지 않음).
 
 ## 2. 변수와 인벤토리
 
@@ -64,10 +64,8 @@ Proxmox 호스트에 **Telegraf** 를 설치해 호스트 전체(VM·CT 를 합�
 host_metrics_telegraf_version: 1.40.1-1       # 엣지 Telegraf(k8s-gitops iot/edge/telegraf) 와 같은 버전. apt-cache madison telegraf
 host_metrics_broker: "{{ k8s_clusters.[SITE].service_vip }}:1883"   # 엣지 Mosquitto(서비스 VIP). Proxmox 호스트는 내부망 DNS 를 쓰지 않아(1.1.1.1) 이름 대신 주소
 host_metrics_mqtt_user: devices               # LAN 기기용 브로커 계정. 비밀번호는 실행할 때 MQTT_PASSWORD 환경변수로 넘깁니다(~/.config/iot/secrets.env 의 MQTT_DEVICES)
-host_metrics_mounts: [/, /boot/efi]           # 용량을 잴 마운트. 호스트마다 다르면 inventory 에서 덮어씁니다
-host_metrics_disks: [nvme0n1]                 # IO 를 잴 디스크(VM 디스크인 dm-* 는 뺌)
-host_metrics_interfaces: [nic0, vmbr0, tailscale0]   # 트래픽을 잴 인터페이스(VM 탭·veth 는 뺌)
-host_metrics_lvm_volumes: [data]              # 사용률을 잴 LVM 논리 볼륨(thin 풀)
+host_metrics_mounts: [/]                      # 용량을 잴 마운트(호스트 루트). 호스트마다 다르면 inventory 에서 덮어씁니다
+host_metrics_disks: [nvme0n1]                 # IO·온도·수명을 잴 물리 디스크(VM 디스크인 dm-* 는 뺌). 여럿이면 가장 높은 값으로 묶습니다
 host_metrics_drm_card: card0                  # iGPU 의 /sys/class/drm/<카드>
 host_metrics_gpu_ppt_scale: 0.000001          # amdgpu PPT(power1_average, 없으면 power1_input) → W. 커널 문서대로 µW. 다르게 나오는 칩은 inventory 에서 덮어씁니다
 ```
@@ -99,22 +97,29 @@ host_metrics_gpu_ppt_scale: 0.000001          # amdgpu PPT(power1_average, 없�
 
 | 파일 | 하는 일 |
 | :--- | :--- |
-| `templates/host-metrics/telegraf.conf.j2` | 입력(cpu, system, processes, kernel, mem, swap, disk, diskio, net, temp, lvm, smart, exec) → starlark 로 평탄한 필드 이름과 초당 값 → merge 로 10초에 메시지 하나 → MQTT |
-| `templates/host-metrics/host-sysfs.sh.j2` | 기본 입력이 못 읽는 값: 코어 클럭 평균·최대, RAPL 누적 에너지, iGPU 사용률·VRAM·GTT·클럭·PPT·전압 |
+| `templates/host-metrics/telegraf.conf.j2` | 입력(cpu, system, mem, swap, disk, diskio, temp, smart, exec) → starlark 로 부품별 대표 필드 → merge 로 10초에 메시지 하나 → MQTT |
+| `templates/host-metrics/host-sysfs.sh.j2` | 기본 입력이 못 읽는 값: 코어 클럭 평균, RAPL 누적 에너지, iGPU 사용률·VRAM·PPT |
 | `scripts/host-metrics-discovery.py` | 실제 메시지를 받아 필드마다 Home Assistant 발견 설정을 맞추고, 없어진 필드의 센서는 지웁니다 |
 | `playbooks/host-metrics.yml` | 설치, 권한, 설정 배포, 발견 설정 |
 
-필드 이름은 `<분류>_<대상>_<값>` 입니다. 누적 카운터(바이트·횟수·에너지)는 호스트의 starlark 가 이전 값과의 차로 초당 값(`_rate`, W)을 만들어 보냅니다. 코어별 사용률·클럭은 코어 수만큼 행이 늘어 보내지 않고 전체 사용률과 평균·최대 클럭만 둡니다.
+필드 이름은 `<부품>_<값>` 이고 뜻마다 이름 하나만 씁니다. 값은 `usage`(활동률 %), `used_percent`(용량 사용률 %), `total`(용량 B), `power`(W), `clock`(MHz), `temp`(°C) 입니다.
+목적이 발열·소비전력이라 부품마다 대표값 하나씩만 보내고, 같은 것을 여러 번 재는 값은 뺍니다. 예를 들어 Ryzen 은 k10temp 가 칩 전체의 제어 온도(Tctl)와 코어 다이별 온도(Tccd1·Tccd2)를 따로 알려 주는데, 팬·부스트가 기준으로 삼는 Tctl 만 씁니다. NVMe 도 센서가 세 개지만 대표값(Composite)만 씁니다.
+메모리 모듈이나 디스크처럼 장치가 여럿인 값은 가장 높은 값 하나로 묶어 호스트끼리 같은 이름으로 비교합니다.
 
-| 분류 | 필드 예 |
+| 부품 | 필드 | 내용 |
+| :--- | :--- | :--- |
+| CPU | `cpu_usage`, `cpu_power`, `cpu_clock`, `cpu_temp` | 사용률, RAPL 패키지 전력, 코어 클럭 평균, k10temp Tctl |
+| GPU | `gpu_usage`, `gpu_power`, `gpu_temp`, `gpu_mem_used_percent` | 사용률, PPT, amdgpu edge 온도, VRAM 사용률 |
+| 메모리 | `mem_used_percent`, `mem_temp`, `swap_used_percent` | 사용률, DIMM 온도(최대), 스왑 사용률 |
+| 디스크 | `disk_used_percent`, `disk_usage`, `disk_temp` | 호스트 `/` 사용률, IO 사용 시간(최대), NVMe 온도(최대) |
+| 시스템 | `system_uptime` | 가동 시간(초). 값이 줄면 재부팅입니다 |
+
+거의 바뀌지 않는 값은 바뀔 때와 1시간마다 한 번만 보냅니다. 용량 부족 시기를 예측하고 장애 원인을 찾을 때 쓰는 값입니다.
+
+| 필드 | 내용 |
 | :--- | :--- |
-| CPU | `cpu_usage`, `cpu_user`, `cpu_system`, `cpu_guest`(VM 이 쓴 몫), `cpu_iowait`, `cpu_clock_avg`, `cpu_clock_max`, `cpu_power`(RAPL 패키지), `cpu_core_power` |
-| 부하 | `load1`, `load5`, `load15`, `uptime`, `processes_total`, `processes_zombies`, `kernel_context_switches_rate` |
-| 메모리 | `mem_total`, `mem_used`, `mem_available`, `mem_cached`, `mem_used_percent`, `swap_used_percent`, `swap_in_rate` |
-| 디스크 | `disk_root_used_percent`, `lvm_data_used_percent`, `diskio_nvme0n1_write_rate`, `diskio_nvme0n1_busy_percent`, `smart_nvme0_wear_percent`, `smart_nvme0_written` |
-| 네트워크 | `net_nic0_rx_rate`, `net_vmbr0_tx_rate`, `net_nic0_errors_rate`, `net_nic0_link_speed` |
-| 온도 | `temp_cpu_tctl`, `temp_cpu_ccd1`, `temp_gpu`, `temp_nvme0`, `temp_ram_1`, `temp_nic` |
-| GPU | `gpu_usage`, `gpu_video_usage`, `gpu_clock`, `gpu_mem_clock`, `gpu_power`, `gpu_vram_used_percent`, `gpu_gtt_used` |
+| `cpu_threads`, `mem_total`, `disk_total` | 사양. CPU 모델·메모리 구성 같은 원문은 DB 의 제품 표(`appliance_specs`)가 맡습니다 |
+| `disk_wear_percent`, `disk_health_ok` | NVMe 수명 사용률과 SMART 상태(정상 1) |
 
 <details markdown="1">
 <summary>templates/host-metrics/telegraf.conf.j2 전문</summary>
@@ -122,9 +127,11 @@ host_metrics_gpu_ppt_scale: 0.000001          # amdgpu PPT(power1_average, 없�
 {% raw %}
 ```toml
 # 호스트 Telegraf. proxmox-ansible playbooks/host-metrics.yml 이 templates/host-metrics/telegraf.conf.j2 에서 만듭니다(여기서 고치지 않습니다).
-# 호스트 전체(VM·CT 합)의 값을 10초마다 모아 JSON 메시지 하나로 hosts/{{ host_metrics_name }} 에 발행합니다.
-#   {"name": "host", "fields": {"cpu_usage": 3.9, "mem_used": 41422155776, ...}, "tags": {}, "timestamp": <ms>}
-# 필드 이름은 <분류>_<대상>_<값> 이고 누적 카운터(바이트·횟수·에너지)는 아래 starlark 가 초당 값(_rate, W)으로 바꿉니다.
+# 호스트 전체(VM·CT 합)의 대표값을 10초마다 모아 JSON 메시지 하나로 hosts/{{ host_metrics_name }} 에 발행합니다.
+#   {"name": "host", "fields": {"cpu_usage": 3.9, "cpu_power": 29.9, "cpu_temp": 55.9, ...}, "tags": {}, "timestamp": <ms>}
+# 목적은 발열·소비전력 분석과 서버 상태 파악이라 부품마다 대표값 하나씩만 냅니다(필드 이름 <부품>_<값>).
+# 같은 것을 여러 번 재는 값(코어 다이별 온도, NVMe 보조 센서, 코어 전력 등)은 내지 않고, 장치가 여럿인 값(DIMM 온도, 디스크)은 가장 높은 값으로 묶습니다.
+# 거의 바뀌지 않는 값(사양·수명)은 바뀔 때와 1시간마다 한 번만 냅니다.
 # Home Assistant 센서는 host-metrics-discovery.py 가 이 필드들로 만들고, 엣지 Telegraf 가 같은 토픽을 받아 DB readings 에 넣습니다.
 [agent]
   interval = "10s"
@@ -141,11 +148,7 @@ host_metrics_gpu_ppt_scale: 0.000001          # amdgpu PPT(power1_average, 없�
   totalcpu = true
   report_active = true                # usage_active = 100 - idle
 
-[[inputs.system]]                     # load, 코어 수, 가동 시간
-
-[[inputs.processes]]
-
-[[inputs.kernel]]                     # 컨텍스트 스위치·인터럽트·fork 누적 횟수
+[[inputs.system]]                     # 논리 코어 수, 가동 시간
 
 [[inputs.mem]]
 
@@ -158,53 +161,28 @@ host_metrics_gpu_ppt_scale: 0.000001          # amdgpu PPT(power1_average, 없�
   devices = {{ host_metrics_disks | to_json }}
   skip_serial_number = true
 
-[[inputs.net]]
-  interfaces = {{ host_metrics_interfaces | to_json }}
-
-[[inputs.temp]]                       # hwmon 의 모든 온도(CPU, GPU, NVMe, 메모리 DIMM, NIC …)
+[[inputs.temp]]                       # hwmon 의 온도. 아래 starlark 가 CPU(Tctl)·GPU·메모리·디스크만 고릅니다
   add_device_tag = true               # 같은 칩이 둘인 메모리(spd5118)를 주소로 나눕니다
 
-[[inputs.lvm]]
-  use_sudo = true
-  [inputs.lvm.tagpass]
-    name = {{ host_metrics_lvm_volumes | to_json }}
-
 [[inputs.smart]]
+  interval = "1m"                     # 수명·상태는 느리게 바뀝니다. 아래 starlark 가 바뀔 때와 1시간마다 한 번만 내보냅니다
   use_sudo = true
-  attributes = true                   # 누적 읽기·쓰기량(Data_Units_*)은 속성에만 있습니다
 
 [[inputs.exec]]
   commands = [["/usr/local/lib/telegraf-host-sysfs.sh"]]   # CPU 클럭, RAPL 전력, iGPU (templates/host-metrics/host-sysfs.sh.j2)
   data_format = "influx"
   timeout = "5s"
 
-# 입력마다 다른 측정값·태그를 host 측정값 하나의 평탄한 필드로 바꿉니다. 시각은 10초 단위로 내려 아래 merge 가 한 메시지로 묶게 합니다.
+# 입력마다 다른 측정값·태그를 host 측정값 하나의 대표 필드로 바꿉니다. 시각은 10초 단위로 내려 아래 merge 가 한 메시지로 묶게 합니다.
 [[processors.starlark]]
   source = '''
 BUCKET = 10 * 1000 * 1000 * 1000
-KEEP = {
-    "cpu": {"usage_active": "cpu_usage", "usage_user": "cpu_user", "usage_system": "cpu_system", "usage_guest": "cpu_guest",
-            "usage_iowait": "cpu_iowait"},
-    "system": {"load1": "load1", "load5": "load5", "load15": "load15", "n_cpus": "cpu_threads", "n_physical_cpus": "cpu_cores", "uptime": "uptime"},
-    "processes": {"total": "processes_total", "running": "processes_running", "sleeping": "processes_sleeping", "blocked": "processes_blocked",
-                  "zombies": "processes_zombies", "total_threads": "processes_threads"},
-    "mem": {"total": "mem_total", "used": "mem_used", "available": "mem_available", "free": "mem_free", "cached": "mem_cached",
-            "buffered": "mem_buffered", "shared": "mem_shared", "slab": "mem_slab", "committed_as": "mem_committed", "used_percent": "mem_used_percent"},
-    "swap": {"total": "swap_total", "used": "swap_used", "used_percent": "swap_used_percent"},
-    "smart_device": {"percentage_used": "wear_percent", "available_spare": "available_spare", "media_errors": "media_errors",
-                     "error_log_entries": "error_log_entries", "critical_warning": "critical_warning", "unsafe_shutdowns": "unsafe_shutdowns",
-                     "power_on_hours": "power_on_hours", "power_cycle_count": "power_cycles", "health_ok": "health_ok"},
-    "sysfs": {"cpu_clock_avg": "cpu_clock_avg", "cpu_clock_max": "cpu_clock_max", "gpu_busy": "gpu_usage", "gpu_vcn_busy": "gpu_video_usage",
-              "gpu_vram_total": "gpu_vram_total", "gpu_vram_used": "gpu_vram_used", "gpu_gtt_total": "gpu_gtt_total", "gpu_gtt_used": "gpu_gtt_used",
-              "gpu_sclk": "gpu_clock", "gpu_mclk": "gpu_mem_clock", "gpu_ppt": "gpu_power", "gpu_vddgfx_mv": "gpu_vddgfx", "gpu_vddnb_mv": "gpu_vddnb"},
-}
-TEMP_CHIPS = {"k10temp": "cpu", "amdgpu": "gpu", "r8169": "nic", "mt7921": "wifi", "acpitz": "acpi"}
-
-def slug(s):
-    out = ""
-    for c in s.lower().elems():
-        out += c if c.isalnum() else "_"
-    return out.strip("_")
+SLOW_PERIOD = 3600 * 1000 * 1000 * 1000   # 사양·수명은 바뀔 때와 이 간격마다 한 번만 냅니다
+# hwmon 센서 이름 → 필드. CPU 는 칩 전체의 제어 온도(Tctl)만, 디스크는 대표값(composite)만 씁니다
+TEMPS = {"k10temp_tctl": "cpu_temp", "amdgpu_edge": "gpu_temp", "spd5118": "mem_temp", "nvme_composite": "disk_temp"}
+MAX_FIELDS = ["mem_temp", "disk_temp", "disk_usage", "disk_wear_percent"]   # 장치가 여럿이면 가장 높은 값
+MIN_FIELDS = ["disk_health_ok"]                                            # 하나라도 이상하면 0
+SLOW_FIELDS = ["cpu_threads", "mem_total", "disk_total", "disk_wear_percent", "disk_health_ok"]
 
 def rate(key, value, t, wrap=0):
     # 누적값 → 초당 값. 첫 값이거나 카운터가 줄었으면(재부팅) 비웁니다. wrap 은 되돌아가는 상한(RAPL)
@@ -220,89 +198,81 @@ def rate(key, value, t, wrap=0):
         return None
     return dv / dt
 
-def temp_name(sensor, device):
-    chip, _, label = sensor.partition("_")
-    if chip == "nvme":                           # nvme_composite, nvme_sensor_1 (device nvme0)
-        return "temp_" + device + ("" if label == "composite" else "_" + label.replace("_", ""))
-    if chip == "spd5118":                        # 메모리 DIMM. 주소 0-0050, 0-0051 → 1, 2
-        return "temp_ram_" + str(int(device.split("-")[-1], 16) - 0x50 + 1)
-    if chip == "amdgpu" and label == "edge":
-        return "temp_gpu"
-    if chip in TEMP_CHIPS:
-        return "temp_" + TEMP_CHIPS[chip] + ("_" + slug(label.replace("tccd", "ccd")) if label and chip in ("k10temp", "amdgpu") else "")
-    return "temp_" + slug(sensor)
+def fold(field, value, bucket):
+    # 장치가 여럿인 값은 지금까지의 최대(또는 최소)를 냅니다. merge 가 같은 필드의 마지막 값을 남기므로 마지막이 곧 그 칸의 최대입니다
+    if field not in MAX_FIELDS and field not in MIN_FIELDS:
+        return value
+    key = "fold_" + field
+    prev = state.get(key)
+    if prev != None and prev[0] == bucket:
+        value = max([prev[1], value]) if field in MAX_FIELDS else min([prev[1], value])
+    state[key] = (bucket, value)
+    return value
+
+def slow(field, value, t):
+    # 값이 바뀌었거나 마지막으로 낸 뒤 SLOW_PERIOD 가 지났을 때만 냅니다
+    key = "slow_" + field
+    prev = state.get(key)
+    if prev != None and prev[0] == value and t - prev[1] < SLOW_PERIOD:
+        return None
+    state[key] = (value, t)
+    return value
 
 def fields_of(metric):
     n, f, tags, t = metric.name, metric.fields, metric.tags, metric.time
     out = {}
-    for k, name in KEEP.get(n, {}).items():
-        if k in f:
-            out[name] = f[k]
     if n == "cpu":
-        out["cpu_irq"] = f.get("usage_irq", 0) + f.get("usage_softirq", 0)
-    elif n == "kernel":
-        for k, name in (("context_switches", "context_switches"), ("interrupts", "interrupts"), ("processes_forked", "forks")):
-            out["kernel_" + name + "_rate"] = rate("kernel_" + k, f[k], t)
-    elif n == "swap" and "in" in f:
-        out["swap_in_rate"] = rate("swap_in", f["in"], t)
-        out["swap_out_rate"] = rate("swap_out", f["out"], t)
+        out["cpu_usage"] = f.get("usage_active")
+    elif n == "system":
+        out["system_uptime"] = f.get("uptime")
+        out["cpu_threads"] = f.get("n_cpus")
+    elif n == "mem":
+        out["mem_used_percent"] = f.get("used_percent")
+        out["mem_total"] = f.get("total")
+    elif n == "swap":
+        out["swap_used_percent"] = f.get("used_percent")
     elif n == "disk":
-        p = "disk_" + (slug(tags["path"]) or "root") + "_"
-        for k in ("total", "used", "free", "used_percent"):
-            out[p + k] = f[k]
-        if f.get("inodes_total", 0) > 0:
-            out[p + "inodes_used_percent"] = f["inodes_used_percent"]
+        out["disk_used_percent"] = f.get("used_percent")
+        out["disk_total"] = f.get("total")
     elif n == "diskio":
-        p = "diskio_" + tags["name"] + "_"
-        out[p + "read_rate"] = rate(p + "read_bytes", f["read_bytes"], t)
-        out[p + "write_rate"] = rate(p + "write_bytes", f["write_bytes"], t)
-        out[p + "read_iops"] = rate(p + "reads", f["reads"], t)
-        out[p + "write_iops"] = rate(p + "writes", f["writes"], t)
-        busy = rate(p + "io_time", f["io_time"], t)   # ms/s
-        out[p + "busy_percent"] = min(busy / 10, 100) if busy != None else None
-    elif n == "net":
-        p = "net_" + tags["interface"] + "_"
-        out[p + "rx_rate"] = rate(p + "rx", f["bytes_recv"], t)
-        out[p + "tx_rate"] = rate(p + "tx", f["bytes_sent"], t)
-        out[p + "rx_packets_rate"] = rate(p + "rx_packets", f["packets_recv"], t)
-        out[p + "tx_packets_rate"] = rate(p + "tx_packets", f["packets_sent"], t)
-        out[p + "errors_rate"] = rate(p + "errors", f["err_in"] + f["err_out"], t)
-        out[p + "drops_rate"] = rate(p + "drops", f["drop_in"] + f["drop_out"], t)
-        if f.get("speed", -1) > 0:
-            out[p + "link_speed"] = f["speed"]
+        busy = rate("io_time_" + tags["name"], f["io_time"], t)      # ms/s → %
+        out["disk_usage"] = min([busy / 10, 100]) if busy != None else None
     elif n == "temp":
-        out[temp_name(tags.get("sensor", ""), tags.get("device", ""))] = f["temp"]
-    elif n == "lvm_logical_vol":
-        p = "lvm_" + slug(tags["name"]) + "_"
-        out[p + "size"] = f["size"]
-        out[p + "used_percent"] = f["data_percent"]
-        out[p + "meta_used_percent"] = f["metadata_percent"]
+        sensor = tags.get("sensor", "")
+        field = TEMPS.get(sensor)
+        if field == None and sensor.startswith("spd5118"):           # 메모리 칩은 라벨이 없어 센서 이름만 옵니다
+            field = "mem_temp"
+        if field != None:
+            out[field] = f.get("temp")
     elif n == "smart_device":
-        out = {"smart_" + tags["device"] + "_" + k: v for k, v in out.items()}
-    elif n == "smart_attribute":
-        units = {"Data_Units_Read": "read", "Data_Units_Written": "written"}   # NVMe 데이터 단위 = 512,000 바이트
-        if tags.get("name") in units:
-            out["smart_" + tags["device"] + "_" + units[tags["name"]]] = f["raw_value"] * 512000
+        out["disk_wear_percent"] = f.get("percentage_used")
+        ok = f.get("health_ok")
+        if ok != None:
+            out["disk_health_ok"] = 1.0 if ok else 0.0
     elif n == "sysfs":
-        for zone, name in (("package", "cpu_power"), ("core", "cpu_core_power")):
-            k = "rapl_" + zone + "_energy_uj"
-            if k in f:
-                w = rate(k, f[k], t, f.get("rapl_" + zone + "_max_uj", 0))
-                out[name] = w / 1e6 if w != None else None
-        for m in ("vram", "gtt"):
-            if f.get("gpu_" + m + "_total", 0) > 0 and "gpu_" + m + "_used" in f:
-                out["gpu_" + m + "_used_percent"] = 100.0 * f["gpu_" + m + "_used"] / f["gpu_" + m + "_total"]
+        for k in ("cpu_clock", "gpu_usage", "gpu_power"):
+            out[k] = f.get(k)
+        if "rapl_energy_uj" in f:
+            w = rate("rapl", f["rapl_energy_uj"], t, f.get("rapl_max_uj", 0))
+            out["cpu_power"] = w / 1e6 if w != None else None
+        if f.get("gpu_vram_total", 0) > 0 and "gpu_vram_used" in f:
+            out["gpu_mem_used_percent"] = 100.0 * f["gpu_vram_used"] / f["gpu_vram_total"]
     return out
 
 def apply(metric):
-    out = fields_of(metric)
+    bucket = metric.time - metric.time % BUCKET
     m = Metric("host")
-    m.time = metric.time - metric.time % BUCKET
+    m.time = bucket
     n = 0
-    for k, v in out.items():
+    for k, v in fields_of(metric).items():
         if v == None:
             continue
-        m.fields[k] = float(v) if type(v) != "bool" else (1.0 if v else 0.0)
+        v = fold(k, float(v), bucket)
+        if k in SLOW_FIELDS:
+            v = slow(k, v, metric.time)
+            if v == None:
+                continue
+        m.fields[k] = v
         n += 1
     return m if n else None
 '''
@@ -337,9 +307,9 @@ def apply(metric):
 #!/bin/bash
 # Telegraf 기본 입력이 읽지 못하는 호스트 값을 InfluxDB line protocol 한 줄(측정값 sysfs)로 냅니다. inputs.exec 가 10초마다 부릅니다.
 # proxmox-ansible templates/host-metrics/host-sysfs.sh.j2 에서 만듭니다.
-#   CPU 클럭: 코어별 현재 클럭의 평균·최대(MHz)
-#   RAPL: 패키지·코어 누적 에너지(µJ)와 되돌아가는 상한. 초당 값(W)은 Telegraf starlark 가 이전 값과의 차로 구합니다
-#   iGPU: 사용률, 영상 엔진(VCN) 사용률, VRAM·GTT 전체·사용(바이트), PPT(W), 코어·메모리 클럭(MHz), 전압(mV)
+#   CPU 클럭: 코어별 현재 클럭의 평균(MHz)
+#   RAPL: 패키지 누적 에너지(µJ)와 되돌아가는 상한. 초당 값(W)은 Telegraf starlark 가 이전 값과의 차로 구합니다
+#   iGPU: 사용률, VRAM 전체·사용(바이트. starlark 가 사용률로 바꿉니다), PPT(W)
 #     PPT 는 amdgpu hwmon power1 입니다. 커널 문서의 단위는 µW 지만 칩마다 다르게 나와 호스트 변수 host_metrics_gpu_ppt_scale 로 W 로 바꿉니다
 #     (pve02 780M 은 µW 이고 SoC 전체라 power1_average 가 RAPL 패키지와 거의 같습니다. pve01 610M(Granite Ridge)은 power1_input 만 있고
 #     1 W 단위 mW 로 나오며 GPU 부하에 따라 움직입니다. 2026-09-28 GPU 부하·RAPL·벽 전력과 비교해 확인)
@@ -348,35 +318,23 @@ fields=()
 add() { [[ -n $2 ]] && fields+=("$1=$2"); }
 val() { [[ -r $1 ]] && tr -d '\n' < "$1"; }
 
-read -r clock_avg clock_max < <(cat /sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_cur_freq 2>/dev/null |
-  awk '{ s += $1; if ($1 > m) m = $1 } END { if (NR) printf "%.0f %.0f\n", s / NR / 1000, m / 1000 }')
-add cpu_clock_avg "$clock_avg"
-add cpu_clock_max "$clock_max"
+add cpu_clock "$(cat /sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_cur_freq 2>/dev/null |
+  awk '{ s += $1 } END { if (NR) printf "%.0f", s / NR / 1000 }')"
 
-for zone in /sys/class/powercap/intel-rapl:0 /sys/class/powercap/intel-rapl:0:0; do
-  [[ -r $zone/energy_uj ]] || continue
-  name=$(val "$zone/name"); name=${name%%-*}          # package-0 → package, core
-  add "rapl_${name}_energy_uj" "$(val "$zone/energy_uj")"
-  add "rapl_${name}_max_uj" "$(val "$zone/max_energy_range_uj")"
-done
+zone=/sys/class/powercap/intel-rapl:0                  # 패키지 전체(코어 영역 intel-rapl:0:0 은 여기에 포함되어 따로 읽지 않습니다)
+if [[ -r $zone/energy_uj ]]; then
+  add rapl_energy_uj "$(val "$zone/energy_uj")"
+  add rapl_max_uj "$(val "$zone/max_energy_range_uj")"
+fi
 
 gpu=/sys/class/drm/{{ host_metrics_drm_card }}/device
 if [[ -d $gpu ]]; then
-  add gpu_busy "$(val "$gpu/gpu_busy_percent")"
-  add gpu_vcn_busy "$(val "$gpu/vcn_busy_percent")"
-  for m in vram gtt; do
-    add "gpu_${m}_total" "$(val "$gpu/mem_info_${m}_total")"
-    add "gpu_${m}_used" "$(val "$gpu/mem_info_${m}_used")"
-  done
-  add gpu_mclk "$(awk '/\*/ { gsub(/[^0-9]/, "", $2); print $2; exit }' "$gpu/pp_dpm_mclk" 2>/dev/null)"
+  add gpu_usage "$(val "$gpu/gpu_busy_percent")"
+  add gpu_vram_total "$(val "$gpu/mem_info_vram_total")"
+  add gpu_vram_used "$(val "$gpu/mem_info_vram_used")"
   for hw in "$gpu"/hwmon/hwmon*; do                    # hwmon 번호는 부팅마다 바뀔 수 있어 카드 아래에서 찾습니다
     ppt=$(val "$hw/power1_average"); [[ -n $ppt ]] || ppt=$(val "$hw/power1_input")   # average 가 있으면(780M) 그것을. input 은 순간값이라 크게 튑니다
-    [[ -n $ppt ]] && add gpu_ppt "$(awk -v v="$ppt" 'BEGIN { printf "%.3f", v * {{ host_metrics_gpu_ppt_scale }} }')"
-    sclk=$(val "$hw/freq1_input"); [[ -n $sclk ]] && add gpu_sclk "$((sclk / 1000000))"
-    for i in 0 1; do
-      label=$(val "$hw/in${i}_label")
-      [[ -n $label ]] && add "gpu_${label}_mv" "$(val "$hw/in${i}_input")"
-    done
+    [[ -n $ppt ]] && add gpu_power "$(awk -v v="$ppt" 'BEGIN { printf "%.3f", v * {{ host_metrics_gpu_ppt_scale }} }')"
   done
 fi
 
@@ -387,7 +345,7 @@ fi
 
 </details>
 
-발견 설정은 센서 목록을 따로 적지 않고 실제 메시지의 필드로 만듭니다. 필드 이름의 규칙표로 한국어 이름·단위·`device_class` 를 붙이고, 규칙에 없는 새 필드도 이름 그대로 센서로 만듭니다. `value_template` 은 필드가 빠진 메시지(Telegraf 재시작 직후 첫 메시지에는 초당 값이 없음)에서 이전 상태를 유지하고, `expire_after` 60초로 호스트가 멈추면 센서가 `unavailable` 이 됩니다. 호스트의 파이썬과 apt 패키지 `python3-paho-mqtt` 만 씁니다.
+발견 설정은 센서 목록을 따로 적지 않고 75초 동안 받은 메시지의 필드로 만듭니다(1시간에 한 번 오는 값도 1분에 한 번은 후보로 올라오게 해 두었습니다). 필드 표로 한국어 이름·단위·`device_class` 를 붙이고, 표에 없는 새 필드도 이름 그대로 센서로 만듭니다. `value_template` 은 필드가 빠진 메시지에서 이전 상태를 유지하고, `expire_after` 60초로 호스트가 멈추면 센서가 `unavailable` 이 됩니다. 1시간에 한 번 오는 값에는 만료를 두지 않고, 창 안에 값이 오지 않아도 그 센서의 설정은 지우지 않습니다. 호스트의 파이썬과 apt 패키지 `python3-paho-mqtt` 만 씁니다.
 
 <details markdown="1">
 <summary>scripts/host-metrics-discovery.py 전문</summary>
@@ -399,9 +357,12 @@ fi
 
 playbooks/host-metrics.yml 이 호스트에 복사해 실행한다. 호스트의 python3 와 apt 패키지 python3-paho-mqtt 만 쓴다.
 실제 메시지를 받아 그 필드로 센서 목록을 정하므로 수집 항목이 늘거나 줄어도 설정을 따로 적지 않는다.
+- 필드는 --window 초 동안 받은 모든 상태 메시지의 합집합이다. 느린 필드(사양·수명)는 1분에 한 번 이상 후보로 올라오므로 창을 그보다 길게 둔다.
 - 브로커에 남아 있는(retained) 설정과 비교해 내용이 다르거나 없는 것만 발행한다(다시 실행해도 같은 결과).
-- 필드가 없어진 센서는 빈 retained 메시지로 지운다(HA 에서 엔티티가 사라짐).
-엣지 Telegraf(k8s-gitops iot/edge/telegraf)는 이 설정의 unit_of_measurement 를 DB readings.unit 으로 쓴다.
+- 필드가 없어진 센서는 빈 retained 메시지로 지운다(HA 에서 엔티티가 사라짐). 단 느린 필드(SLOW_FIELDS)의 설정은
+  창 안에 값이 안 왔을 수 있으므로 지우지 않는다.
+엣지 Telegraf(k8s-gitops iot/edge/telegraf)는 이 설정의 unit_of_measurement 를 DB readings.unit 으로,
+device 의 manufacturer·model·serial_number 를 vendor·model·hw_id 로 쓴다.
 구조: 순수 함수(sensor_meta, build_configs, diff) → 브로커 함수(collect, publish) → CLI(build_parser, main).
 """
 
@@ -411,7 +372,6 @@ import argparse
 import json
 import logging
 import os
-import re
 import sys
 import time
 from pathlib import Path
@@ -424,16 +384,22 @@ DISCOVERY_PREFIX = "homeassistant"
 STATE_PREFIX = "hosts"
 ORIGIN = {
     "name": "host-metrics"
-}  # 엣지 Telegraf 가 이 발견 설정만 골라 단위를 읽는 표식
+}  # 엣지 Telegraf 가 이 발견 설정만 골라 단위·실물 정보를 읽는 표식
 EXPIRE_AFTER = 60  # 초. 호스트나 Telegraf 가 멈추면 센서가 unavailable 이 된다
+
+# 호스트가 바뀔 때와 1시간마다 한 번만 내는 값(사양·수명). expire_after 를 두지 않고, 창 안에 없어도 설정을 지우지 않는다
+SLOW_FIELDS = (
+    "cpu_threads",
+    "mem_total",
+    "disk_total",
+    "disk_wear_percent",
+    "disk_health_ok",
+)
 
 log = logging.getLogger(Path(__file__).stem)
 
 PERCENT = {"unit_of_measurement": "%", "suggested_display_precision": 1}
 BYTES = {"unit_of_measurement": "B", "device_class": "data_size"}
-BYTES_RATE = {"unit_of_measurement": "B/s", "device_class": "data_rate"}
-PER_SECOND = {"unit_of_measurement": "/s", "suggested_display_precision": 0}
-MHZ = {"unit_of_measurement": "MHz", "device_class": "frequency"}
 WATT = {
     "unit_of_measurement": "W",
     "device_class": "power",
@@ -444,178 +410,60 @@ CELSIUS = {
     "device_class": "temperature",
     "suggested_display_precision": 1,
 }
+MHZ = {"unit_of_measurement": "MHz", "device_class": "frequency"}
 DIAG = {"entity_category": "diagnostic"}
 
-WORDS = {
-    "user": "사용자",
-    "system": "시스템",
-    "guest": "게스트(VM)",
-    "iowait": "IO 대기",
-    "irq": "인터럽트",
-    "avg": "평균",
-    "max": "최대",
-    "total": "전체",
-    "used": "사용",
-    "available": "가용",
-    "free": "여유",
-    "cached": "캐시",
-    "buffered": "버퍼",
-    "shared": "공유",
-    "slab": "slab",
-    "committed": "커밋",
-    "running": "실행",
-    "sleeping": "대기",
-    "blocked": "IO 막힘",
-    "zombies": "좀비",
-    "threads": "스레드",
-    "read": "읽기",
-    "write": "쓰기",
-    "rx": "수신",
-    "tx": "송신",
-    "in": "인",
-    "out": "아웃",
-    "vram": "VRAM",
-    "gtt": "GTT",
-    "context_switches": "컨텍스트 스위치",
-    "interrupts": "인터럽트",
-    "forks": "fork",
-}
-TEMP_WORDS = {
-    "cpu": "CPU",
-    "gpu": "GPU",
-    "ram": "RAM",
-    "nic": "NIC",
-    "wifi": "Wi-Fi",
-    "acpi": "ACPI",
-    "tctl": "Tctl",
-    "ccd1": "CCD1",
-    "ccd2": "CCD2",
-}
-SMART = {
-    "wear_percent": ("수명 사용률", PERCENT),
-    "available_spare": ("예비 공간", {"unit_of_measurement": "%"} | DIAG),
-    "media_errors": ("미디어 오류", DIAG),
-    "error_log_entries": ("오류 로그", DIAG),
-    "critical_warning": ("경고 비트", DIAG),
-    "unsafe_shutdowns": ("비정상 종료", DIAG),
-    "power_on_hours": (
-        "전원 켜진 시간",
-        {"unit_of_measurement": "h", "device_class": "duration"} | DIAG,
-    ),
-    "power_cycles": ("전원 켠 횟수", DIAG),
-    "health_ok": ("상태 정상", DIAG),
-    "read": ("누적 읽기", BYTES | {"state_class": "total_increasing"} | DIAG),
-    "written": ("누적 쓰기", BYTES | {"state_class": "total_increasing"} | DIAG),
-}
-
-
-def _w(key: str) -> str:
-    return WORDS.get(key, key)
-
-
-def _mount(slug: str) -> str:
-    return "/" if slug == "root" else "/" + slug.replace("_", "/")
-
-
-# (패턴, 이름 함수, 속성). 위에서부터 처음 맞는 규칙을 쓴다
-RULES: list[tuple[str, object, dict]] = [
-    (r"cpu_usage", lambda m: "CPU 사용률", PERCENT),
-    (r"cpu_(user|system|guest|iowait|irq)", lambda m: f"CPU {_w(m[1])}", PERCENT),
-    (r"cpu_clock_(avg|max)", lambda m: f"CPU 클럭 {_w(m[1])}", MHZ),
-    (r"cpu_power", lambda m: "CPU 패키지 전력", WATT),
-    (r"cpu_core_power", lambda m: "CPU 코어 전력", WATT),
-    (r"cpu_threads", lambda m: "CPU 스레드 수", DIAG),
-    (r"cpu_cores", lambda m: "CPU 코어 수", DIAG),
-    (r"load(1|5|15)", lambda m: f"부하 {m[1]}분", {"suggested_display_precision": 2}),
-    (
-        r"uptime",
-        lambda m: "가동 시간",
+# 필드 → (이름, 속성). 필드 이름은 <부품>_<값> 이고 부품마다 대표값 하나씩이라 규칙 대신 표로 둔다
+SENSORS = {
+    "cpu_usage": ("CPU 사용률", PERCENT),
+    "cpu_power": ("CPU 전력", WATT),
+    "cpu_clock": ("CPU 클럭", MHZ),
+    "cpu_temp": ("CPU 온도", CELSIUS),
+    "gpu_usage": ("GPU 사용률", PERCENT),
+    "gpu_power": ("GPU 전력", WATT),
+    "gpu_temp": ("GPU 온도", CELSIUS),
+    "gpu_mem_used_percent": ("GPU 메모리 사용률", PERCENT),
+    "mem_used_percent": ("메모리 사용률", PERCENT),
+    "mem_temp": ("메모리 온도", CELSIUS),
+    "swap_used_percent": ("스왑 사용률", PERCENT),
+    "disk_used_percent": ("디스크 사용률", PERCENT),
+    "disk_usage": ("디스크 사용 시간", PERCENT),
+    "disk_temp": ("디스크 온도", CELSIUS),
+    "system_uptime": (
+        "가동 시간",
         {"unit_of_measurement": "s", "device_class": "duration"} | DIAG,
     ),
-    (r"processes_total", lambda m: "프로세스 수", {}),
-    (r"processes_(\w+)", lambda m: f"프로세스 {_w(m[1])}", {}),
-    (r"kernel_(\w+)_rate", lambda m: _w(m[1]), PER_SECOND),
-    (r"(mem|swap)_used_percent", lambda m: f"{_mem(m[1])} 사용률", PERCENT),
-    (r"(mem|swap)_(in|out)_rate", lambda m: f"{_mem(m[1])} {_w(m[2])}", BYTES_RATE),
-    (r"(mem|swap)_total", lambda m: f"{_mem(m[1])} 전체", BYTES | DIAG),
-    (r"(mem|swap)_(\w+)", lambda m: f"{_mem(m[1])} {_w(m[2])}", BYTES),
-    (
-        r"disk_(\w+)_inodes_used_percent",
-        lambda m: f"디스크 {_mount(m[1])} inode 사용률",
-        PERCENT | DIAG,
-    ),
-    (r"disk_(\w+)_used_percent", lambda m: f"디스크 {_mount(m[1])} 사용률", PERCENT),
-    (r"disk_(\w+)_total", lambda m: f"디스크 {_mount(m[1])} 전체", BYTES | DIAG),
-    (r"disk_(\w+)_(used|free)", lambda m: f"디스크 {_mount(m[1])} {_w(m[2])}", BYTES),
-    (
-        r"lvm_(\w+)_meta_used_percent",
-        lambda m: f"LVM {m[1]} 메타데이터 사용률",
-        PERCENT,
-    ),
-    (r"lvm_(\w+)_used_percent", lambda m: f"LVM {m[1]} 사용률", PERCENT),
-    (r"lvm_(\w+)_size", lambda m: f"LVM {m[1]} 크기", BYTES | DIAG),
-    (r"diskio_(\w+?)_(read|write)_rate", lambda m: f"{m[1]} {_w(m[2])}", BYTES_RATE),
-    (
-        r"diskio_(\w+?)_(read|write)_iops",
-        lambda m: f"{m[1]} {_w(m[2])} IOPS",
-        {"unit_of_measurement": "IOPS", "suggested_display_precision": 0},
-    ),
-    (r"diskio_(\w+?)_busy_percent", lambda m: f"{m[1]} 사용 시간", PERCENT),
-    (r"net_(\w+?)_(rx|tx)_rate", lambda m: f"{m[1]} {_w(m[2])}", BYTES_RATE),
-    (
-        r"net_(\w+?)_(rx|tx)_packets_rate",
-        lambda m: f"{m[1]} {_w(m[2])} 패킷",
-        {"unit_of_measurement": "packets/s", "suggested_display_precision": 0},
-    ),
-    (r"net_(\w+?)_errors_rate", lambda m: f"{m[1]} 오류", PER_SECOND | DIAG),
-    (r"net_(\w+?)_drops_rate", lambda m: f"{m[1]} 드롭", PER_SECOND | DIAG),
-    (
-        r"net_(\w+?)_link_speed",
-        lambda m: f"{m[1]} 링크 속도",
-        {"unit_of_measurement": "Mbit/s", "device_class": "data_rate"} | DIAG,
-    ),
-    (
-        r"temp_(\w+)",
-        lambda m: "온도 " + " ".join(TEMP_WORDS.get(p, p) for p in m[1].split("_")),
-        CELSIUS,
-    ),
-    (r"gpu_usage", lambda m: "GPU 사용률", PERCENT),
-    (r"gpu_video_usage", lambda m: "GPU 영상 엔진 사용률", PERCENT),
-    (r"gpu_clock", lambda m: "GPU 클럭", MHZ),
-    (r"gpu_mem_clock", lambda m: "GPU 메모리 클럭", MHZ),
-    (r"gpu_power", lambda m: "GPU PPT 전력", WATT),
-    (r"gpu_(vram|gtt)_used_percent", lambda m: f"GPU {_w(m[1])} 사용률", PERCENT),
-    (r"gpu_(vram|gtt)_total", lambda m: f"GPU {_w(m[1])} 전체", BYTES | DIAG),
-    (r"gpu_(vram|gtt)_used", lambda m: f"GPU {_w(m[1])} 사용", BYTES),
-    (
-        r"gpu_(vdd\w+)",
-        lambda m: f"GPU 전압 {m[1]}",
-        {"unit_of_measurement": "mV", "device_class": "voltage"} | DIAG,
-    ),
-]
-
-
-def _mem(kind: str) -> str:
-    return "메모리" if kind == "mem" else "스왑"
+    "cpu_threads": ("CPU 스레드 수", DIAG),
+    "mem_total": ("메모리 용량", BYTES | DIAG),
+    "disk_total": ("디스크 용량", BYTES | DIAG),
+    "disk_wear_percent": ("디스크 수명 사용률", PERCENT | DIAG),
+    "disk_health_ok": ("디스크 상태 정상", DIAG),
+}
 
 
 def sensor_meta(field: str) -> dict:
-    """필드 이름으로 센서 이름·단위·분류를 정한다. 규칙에 없는 필드는 이름만 필드 그대로 준다."""
-    m = re.fullmatch(r"smart_([a-z0-9]+)_(\w+)", field)
-    if m and m[2] in SMART:
-        label, attrs = SMART[m[2]]
-        return {"name": f"{m[1]} {label}"} | attrs
-    for pattern, name, attrs in RULES:
-        m = re.fullmatch(pattern, field)
-        if m:
-            return {"name": name(m)} | attrs
+    """필드 이름으로 센서 이름·단위·분류를 정한다. 표에 없는 새 필드는 이름만 필드 그대로 준다."""
+    if field in SENSORS:
+        name, attrs = SENSORS[field]
+        return {"name": name} | attrs
     return {"name": field}
 
 
 def build_configs(
-    device: str, fields: dict[str, float], manufacturer: str, model: str
+    device: str,
+    fields: dict[str, float],
+    manufacturer: str,
+    model: str,
+    serial: str = "",
 ) -> dict[str, dict]:
     """필드마다 발견 설정(토픽 → 내용)을 만든다."""
+    info = {"identifiers": [device], "name": device}
+    if manufacturer:
+        info["manufacturer"] = manufacturer
+    if model:
+        info["model"] = model
+    if serial:
+        info["serial_number"] = serial  # 엣지 Telegraf 가 readings.hw_id 로 쓴다
     configs = {}
     for field in sorted(fields):
         meta = sensor_meta(field)
@@ -624,21 +472,18 @@ def build_configs(
             "unique_id": f"{device}_{field}",
             "default_entity_id": f"sensor.{device}_{field}",
             "state_topic": f"{STATE_PREFIX}/{device}",
-            # 필드가 빠진 메시지(재시작 직후의 초당 값)는 이전 상태를 유지한다
+            # 필드가 빠진 메시지(느린 값이 없는 주기)는 이전 상태를 유지한다
             "value_template": (
                 f"{{{{ value_json.fields['{field}'] "
                 f"if '{field}' in value_json.fields else this.state }}}}"
             ),
             "state_class": "measurement",
-            "expire_after": EXPIRE_AFTER,
-            "device": {
-                "identifiers": [device],
-                "name": device,
-                "manufacturer": manufacturer,
-                "model": model,
-            },
+            "device": info,
             "origin": ORIGIN,
         }
+        if field not in SLOW_FIELDS:
+            # 느린 값은 1시간에 한 번만 오므로 만료를 두지 않는다
+            config["expire_after"] = EXPIRE_AFTER
         config.update(meta)
         configs[f"{DISCOVERY_PREFIX}/sensor/{device}/{field}/config"] = config
     return configs
@@ -656,7 +501,11 @@ def diff(
             same = False
         if not same:
             publish[topic] = config
-    remove = sorted(t for t in existing if t not in wanted)
+    remove = sorted(
+        t
+        for t in existing
+        if t not in wanted and t.rsplit("/", 2)[-2] not in SLOW_FIELDS
+    )
     return publish, remove
 
 
@@ -672,27 +521,24 @@ def connect(broker: str, user: str, password: str, client_id: str):
     return client
 
 
-def collect(client, device: str, samples: int, timeout: float) -> tuple[dict, dict]:
-    """상태 메시지 samples 개의 필드 합집합과 이 기기의 기존 발견 설정(retained)을 모은다."""
+def collect(client, device: str, window: float) -> tuple[dict, dict]:
+    """window 초 동안 받은 상태 메시지의 필드 합집합과 이 기기의 기존 발견 설정(retained)을 모은다."""
     fields: dict[str, float] = {}
     existing: dict[str, str] = {}
-    received = 0
     config_filter = f"{DISCOVERY_PREFIX}/sensor/{device}/+/config"
     state_topic = f"{STATE_PREFIX}/{device}"
 
     def on_message(_client, _userdata, msg) -> None:
-        nonlocal received
         if msg.topic == state_topic:
             fields.update(json.loads(msg.payload).get("fields", {}))
-            received += 1
         elif msg.retain and msg.payload:
             existing[msg.topic] = msg.payload.decode()
 
     client.on_message = on_message
     client.subscribe([(config_filter, 1), (state_topic, 1)])
-    deadline = time.monotonic() + timeout
-    while received < samples and time.monotonic() < deadline:
-        time.sleep(0.2)
+    deadline = time.monotonic() + window
+    while time.monotonic() < deadline:
+        time.sleep(0.5)
     return fields, existing
 
 
@@ -723,13 +569,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--manufacturer", default="", help="HA 기기 제조사")
     parser.add_argument("--model", default="", help="HA 기기 모델")
     parser.add_argument(
-        "--samples",
-        type=int,
-        default=2,
-        help="필드를 모을 상태 메시지 수(기본 2. 재시작 직후 첫 메시지에는 초당 값이 없음)",
+        "--serial",
+        default="",
+        help="실물 기기 ID(메인보드 시리얼). DB 의 hw_id 가 된다",
     )
     parser.add_argument(
-        "--timeout", type=float, default=45, help="상태 메시지를 기다릴 초"
+        "--window",
+        type=float,
+        default=75,
+        help="필드를 모을 초(기본 75. 1분에 한 번 오는 느린 값까지 받으려면 60 보다 길게 둔다)",
     )
     parser.add_argument(
         "--dry-run", action="store_true", help="발행하지 않고 할 일만 출력한다"
@@ -761,16 +609,18 @@ def main(argv: list[str] | None = None) -> int:
         log.error("브로커 접속 실패: %s", exc)
         return EXIT_FAILED
     try:
-        fields, existing = collect(client, args.device, args.samples, args.timeout)
+        fields, existing = collect(client, args.device, args.window)
         if not fields:
             log.error(
                 "%s 초 동안 %s/%s 메시지를 받지 못했다",
-                args.timeout,
+                args.window,
                 STATE_PREFIX,
                 args.device,
             )
             return EXIT_FAILED
-        wanted = build_configs(args.device, fields, args.manufacturer, args.model)
+        wanted = build_configs(
+            args.device, fields, args.manufacturer, args.model, args.serial
+        )
         to_publish, to_remove = diff(existing, wanted)
         if not args.dry_run:
             publish(
@@ -810,7 +660,7 @@ if __name__ == "__main__":
 
 </details>
 
-플레이북은 InfluxData 저장소에서 엣지와 같은 버전의 Telegraf 를 설치하고 버전을 고정합니다. SMART·LVM 조회는 root 가 필요하므로 Proxmox 에 기본으로 없는 `sudo` 를 설치해 그 명령만 허용하고, RAPL `energy_uj` 는 root 만 읽을 수 있어 서비스에 읽기 권한 검사를 건너뛰는 능력(`CAP_DAC_READ_SEARCH`) 하나만 줍니다.
+플레이북은 InfluxData 저장소에서 엣지와 같은 버전의 Telegraf 를 설치하고 버전을 고정합니다. SMART 조회는 root 가 필요하므로 Proxmox 에 기본으로 없는 `sudo` 를 설치해 `smartctl`·`nvme` 만 허용하고, RAPL `energy_uj` 는 root 만 읽을 수 있어 서비스에 읽기 권한 검사를 건너뛰는 능력(`CAP_DAC_READ_SEARCH`) 하나만 줍니다. 센서를 새로 만들었을 때는 마지막에 Telegraf 를 한 번 더 시작합니다. 1시간에 한 번 오는 값이 발견 설정보다 먼저 발행되면 Home Assistant 가 다음 주기까지 그 센서를 비워 두기 때문입니다.
 
 <details markdown="1">
 <summary>playbooks/host-metrics.yml 전문</summary>
@@ -858,20 +708,20 @@ if __name__ == "__main__":
           - smartmontools        # inputs.smart
           - nvme-cli             # inputs.smart 의 NVMe 추가 속성
           - python3-paho-mqtt    # 발견 설정 스크립트
-          - sudo                 # smart·lvm 입력이 root 로 조회(Proxmox 에는 기본으로 없음)
+          - sudo                 # smart 입력이 root 로 조회(Proxmox 에는 기본으로 없음)
         update_cache: true
     - name: 버전 고정 (apt upgrade 로 엣지와 버전이 갈라지지 않게)
       ansible.builtin.dpkg_selections:
         name: telegraf
         selection: hold
 
-    - name: sudo 허용 (smartctl·nvme·LVM 조회만)
+    - name: sudo 허용 (SMART 조회만)
       ansible.builtin.copy:
         dest: /etc/sudoers.d/telegraf
         mode: "0440"
         validate: visudo -cf %s
         content: |
-          Cmnd_Alias TELEGRAF_HOST = /usr/sbin/smartctl, /usr/sbin/nvme, /usr/sbin/pvs, /usr/sbin/vgs, /usr/sbin/lvs
+          Cmnd_Alias TELEGRAF_HOST = /usr/sbin/smartctl, /usr/sbin/nvme
           telegraf ALL=(root) NOPASSWD: TELEGRAF_HOST
           Defaults!TELEGRAF_HOST !logfile, !syslog, !pam_session
     - name: 비밀번호 (서비스 환경변수)
@@ -944,7 +794,8 @@ if __name__ == "__main__":
   post_tasks:
     - name: 재시작 반영
       ansible.builtin.meta: flush_handlers
-    # 실제 메시지를 하나 받아 필드마다 센서를 만들고, 없어진 필드의 센서는 지웁니다. 내용이 같으면 발행하지 않습니다
+    # 75초 동안 메시지를 받아 필드마다 센서를 만들고, 없어진 필드의 센서는 지웁니다. 내용이 같으면 발행하지 않습니다
+    # 실물 ID(hw_id)는 메인보드 시리얼입니다. 제품 시리얼은 메인보드에 값을 넣지 않은 기기가 있어(pve02 는 "Default string") 쓰지 않습니다
     - name: Home Assistant 발견 설정
       ansible.builtin.command:
         argv:
@@ -959,10 +810,19 @@ if __name__ == "__main__":
           - "{{ ansible_facts['system_vendor'] }}"
           - --model
           - "{{ ansible_facts['product_name'] }}"
+          - --serial
+          - "{{ ansible_facts['board_serial'] }}"
       environment:
         MQTT_PASSWORD: "{{ mqtt_password }}"
       register: discovery
       changed_when: (discovery.stdout | from_json).changed > 0
+    # 느린 값(사양·수명)은 발견 설정보다 먼저 발행되면 HA 가 다음 1시간 주기까지 unknown 으로 둡니다.
+    # 센서를 새로 만든 경우에만 Telegraf 를 다시 시작해 시작 직후 한 번 내는 느린 값을 받게 합니다.
+    - name: 새 센서에 느린 값 채우기 (Telegraf 재시작)
+      ansible.builtin.systemd:
+        name: telegraf
+        state: restarted
+      when: (discovery.stdout | from_json).published | length > 0
 ```
 {: file="playbooks/host-metrics.yml" }
 {% endraw %}
@@ -982,7 +842,7 @@ ansible-playbook playbooks/host-metrics.yml --limit pve01
 ansible-playbook playbooks/host-metrics.yml
 ```
 
-- **확인:** `PLAY RECAP` 에 `failed=0` 이고, 같은 명령을 한 번 더 실행하면 `changed=0` 입니다. 브로커에서 메시지를 하나 받아 보면 필드가 100개 남짓입니다.
+- **확인:** `PLAY RECAP` 에 `failed=0` 이고, 같은 명령을 한 번 더 실행하면 `changed=0` 입니다. 브로커에서 메시지를 하나 받아 보면 필드가 15개입니다.
 
 ```bash
 # 허브 control plane. E 는 엣지 kubeconfig, PW 는 telegraf 계정 비밀번호
@@ -992,7 +852,7 @@ kubectl $E -n mosquitto exec deploy/mosquitto -- mosquitto_sub -u telegraf -P "$
 ```
 
 ```text
-hosts/bedroom2-host-server_ms_a2_1 {"fields":{"cpu_clock_avg":4130,"cpu_clock_max":4235,"cpu_core_power":2.17,"cpu_cores":16,"cpu_guest":3.77, …},"name":"host","tags":{},"timestamp":1790528080000}
+hosts/bedroom2-host-server_ms_a2_1 {"fields":{"cpu_clock":4202,"cpu_power":66.5,"cpu_temp":89.5,"cpu_usage":27.3,"disk_temp":54.85,"disk_usage":1.1,"disk_used_percent":14.57,"gpu_mem_used_percent":0.77,"gpu_power":14,"gpu_temp":76,"gpu_usage":0,"mem_temp":57.25,"mem_used_percent":68.84,"swap_used_percent":5.83,"system_uptime":1358761},"name":"host","tags":{},"timestamp":1790600700000}
 ```
 
 ## 5. Home Assistant 영역 배정
@@ -1011,7 +871,7 @@ $K exec -i deploy/home-assistant -c home-assistant -- env HA_TOKEN="$T" python3 
 
 ## 6. 엣지 Telegraf 에 호스트 입력 추가
 
-엣지 Telegraf 에 입력 두 개를 추가합니다. 첫 입력이 `hosts/+` 의 `fields` 를 필드별 행으로 받고, 둘째 입력이 호스트의 발견 설정을 받아 단위(`unit_of_measurement`)와 제조사·모델을 [Telegraf 글](/posts/43/)의 공통 starlark 에 기억시킵니다. starlark 는 `origin` 이 `host-metrics` 인 발견 설정만 쓰므로 Zigbee2MQTT 의 발견 설정은 무시합니다.
+엣지 Telegraf 에 입력 두 개를 추가합니다. 첫 입력이 `hosts/+` 의 `fields` 를 필드별 행으로 받고, 둘째 입력이 호스트의 발견 설정을 받아 단위(`unit_of_measurement`)와 제조사·모델·실물 ID(`serial_number` → `hw_id`)를 [Telegraf 글](/posts/43/)의 공통 starlark 에 기억시킵니다. starlark 는 `origin` 이 `host-metrics` 인 발견 설정만 쓰므로 Zigbee2MQTT 의 발견 설정은 무시합니다.
 
 ```toml
 # 서버·PC 자체가 잰 값(CPU·메모리·디스크·네트워크·온도·전력·GPU). 호스트의 Telegraf 가 10초마다 hosts/<기기> 에 JSON 하나로 냅니다
@@ -1057,7 +917,7 @@ $K exec -i deploy/home-assistant -c home-assistant -- env HA_TOKEN="$T" python3 
 ```
 {: file="iot/edge/telegraf/telegraf.conf (Zigbee2MQTT 제어 기록 입력 아래에 추가)" }
 
-호스트마다 10초에 100여 행(하루 약 120만 행)이 늘어나므로 `readings` 의 청크와 압축을 1일로 둡니다. Telegraf 글의 `create_templates` 는 이미 1일이라 새로 만드는 테이블은 그대로 두면 되고, 그 전에 만든 테이블은 지역 DB 와 허브 DB 에 아래 SQL 을 한 번씩 실행합니다. 압축된 청크에도 INSERT·UPDATE·DELETE 는 되므로 늦게 온 버퍼나 날씨 백필은 느려질 뿐 그대로 들어갑니다.
+호스트마다 10초에 15행(하루 약 13만 행)이 늘어나므로 `readings` 의 청크와 압축을 1일로 둡니다. Telegraf 글의 `create_templates` 는 이미 1일이라 새로 만드는 테이블은 그대로 두면 되고, 그 전에 만든 테이블은 지역 DB 와 허브 DB 에 아래 SQL 을 한 번씩 실행합니다. 압축된 청크에도 INSERT·UPDATE·DELETE 는 되므로 늦게 온 버퍼나 날씨 백필은 느려질 뿐 그대로 들어갑니다.
 
 ```sql
 -- readings 의 청크 간격과 압축 시점을 7일·30일에서 1일·1일로 줄입니다. 허브 DB 와 지역 DB 모두에 한 번 실행합니다(다시 실행해도 결과가 같습니다).
@@ -1083,17 +943,17 @@ git commit -m "feat(iot): 서버·PC 호스트 값(hosts/+)을 readings 에 기�
 git push
 ```
 
-- **확인:** Argo CD 의 `[SITE]-telegraf` 가 Synced·Healthy 가 된 뒤 20초쯤 지나면 두 DB 에 호스트 행이 보입니다. 단위가 빈 행은 개수·부하처럼 원래 단위가 없는 값(`load1`, `processes_total` 등)뿐입니다. Grafana `IoT 기록` 대시보드에서는 `device` 변수에서 `host` 를 고르면 호스트 속성마다 패널이 나옵니다.
+- **확인:** Argo CD 의 `[SITE]-telegraf` 가 Synced·Healthy 가 된 뒤 20초쯤 지나면 두 DB 에 호스트 행이 보입니다. 단위가 빈 행은 개수·상태처럼 원래 단위가 없는 값(`cpu_threads`, `disk_health_ok`)뿐이고, `hw_id` 에는 메인보드 시리얼이 들어갑니다. Grafana `IoT 기록` 대시보드에는 속성마다 패널이 자동으로 생깁니다.
 
 ```sql
-select anchor, count(distinct property) as props, max(time) as last,
+select anchor, count(distinct property) as props, max(time) as last, min(hw_id) as hw_id,
        count(*) filter (where coalesce(unit, '') = '') as no_unit
 from readings where device = 'host' and time > now() - interval '1 minute' group by 1;
 ```
 
 ## 7. 부하와 소비전력 맞춰 보기
 
-플러그와 호스트는 보고 주기가 달라(플러그 5~8초, 호스트 10초) 1분 평균으로 맞춥니다.
+플러그와 호스트는 보고 주기가 달라(플러그 5~8초, 호스트 10초) 1분이나 1시간 평균으로 맞춥니다. 세 번째 쿼리는 방에 들어간 열(플러그 전력 합)과 방 온도·바깥 기온 차·CO2 를 함께 보여, 서버 발열이 실내에 주는 영향을 봅니다.
 
 ```sql
 -- 1분 평균으로 맞춘 벽 전력(플러그)과 호스트 부하
@@ -1115,12 +975,33 @@ WITH m AS (
   GROUP BY 1)
 SELECT floor(cpu_pct / 10) * 10 AS cpu_from, count(*) AS minutes, round(avg(wall_w)::numeric, 1) AS wall_w
 FROM m WHERE wall_w IS NOT NULL AND cpu_pct IS NOT NULL GROUP BY 1 ORDER BY 1;
+-- 방에 들어간 열(침실2 플러그 전력 합)과 방 온도·바깥 기온 차·CO2. 창문이 열려 있던 시간도 함께 봅니다
+-- 플러그는 제품마다 보고 주기가 달라 제품별 평균을 먼저 낸 뒤 합칩니다(시간당 평균 W = 그 시간의 Wh)
+WITH plug AS (
+  SELECT time_bucket('1 hour', time) AS t, anchor, avg(value) AS w
+  FROM readings
+  WHERE device = 'plug' AND property = 'power' AND processing = 'raw' AND time > now() - interval '7 days'
+  GROUP BY 1, 2),
+env AS (
+  SELECT time_bucket('1 hour', time) AS t,
+    avg(value) FILTER (WHERE room = 'bedroom2' AND device = 'th' AND property = 'temperature')      AS room_c,
+    avg(value) FILTER (WHERE room = 'outdoor' AND property = 'temperature')                          AS outdoor_c,
+    avg(value) FILTER (WHERE device = 'air_quality' AND property = 'carbon_dioxide')                 AS co2,
+    avg(value) FILTER (WHERE device = 'contact' AND anchor = 'window' AND property = 'contact')      AS window_closed
+  FROM readings
+  WHERE processing = 'raw' AND room IN ('bedroom2', 'outdoor') AND time > now() - interval '7 days'
+  GROUP BY 1)
+SELECT p.t, round(sum(p.w)::numeric, 0) AS room_w, round(max(e.room_c)::numeric, 1) AS room_c,
+  round((max(e.room_c) - max(e.outdoor_c))::numeric, 1) AS delta_c, round(max(e.co2)::numeric, 0) AS co2,
+  round(((1 - max(e.window_closed)) * 100)::numeric, 0) AS window_open_pct
+FROM plug p JOIN env e USING (t)
+GROUP BY p.t ORDER BY p.t;
 ```
 
 > `gpu_power` 는 amdgpu 가 알리는 PPT 라 칩마다 뜻이 다릅니다. 780M 은 SoC 전체 전력이라 `cpu_power`(RAPL 패키지)와 거의 같고, 610M(Granite Ridge)은 1 W 단위로 GPU 부하를 따라 움직입니다. 서버끼리 비교할 때는 플러그의 벽 전력과 `cpu_power` 를 씁니다.
 {: .prompt-warning }
 
-- **확인:** 첫 쿼리에서 호스트 값이 들어온 뒤의 분마다 `wall_w` 와 `cpu_pct` 가 함께 채워집니다.
+- **확인:** 첫 쿼리에서 호스트 값이 들어온 뒤의 분마다 `wall_w` 와 `cpu_pct` 가 함께 채워집니다. 창문·문 센서는 상태가 바뀔 때만 보고하므로 세 번째 쿼리의 `window_open_pct` 는 보고가 없던 시간에 비어 있습니다(직전 값이 이어진 것으로 봅니다).
 
 ## 트러블슈팅
 
@@ -1132,7 +1013,7 @@ FROM m WHERE wall_w IS NOT NULL AND cpu_pct IS NOT NULL GROUP BY 1 ORDER BY 1;
 ```
 
 - **원인:** Proxmox 에는 `sudo` 패키지가 기본으로 없어, sudoers 파일을 검사하는 `visudo` 도 없습니다.
-- **해결:** 설치 목록에 `sudo` 를 넣었습니다. Telegraf 의 `smart`·`lvm` 입력이 `use_sudo = true` 로 이 명령들을 부릅니다.
+- **해결:** 설치 목록에 `sudo` 를 넣었습니다. Telegraf 의 `smart` 입력이 `use_sudo = true` 로 `smartctl` 을 부릅니다.
 
 </details>
 

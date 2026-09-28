@@ -565,7 +565,9 @@ def remember_host_sensor(metric):
     if c.get("unit_of_measurement"):
         units[field] = c["unit_of_measurement"]
     d = c.get("device") or {}
-    state.setdefault("host_hw", {})[device] = {"vendor": d.get("manufacturer") or "", "model": d.get("model") or ""}
+    # serial_number 는 호스트의 메인보드 시리얼입니다. 다른 기기의 IEEE 주소·Matter 시리얼과 같은 자리(hw_id)에 넣어 실물 교체 이력이 남습니다
+    state.setdefault("host_hw", {})[device] = {"vendor": d.get("manufacturer") or "", "model": d.get("model") or "",
+                                               "hw_id": d.get("serial_number") or ""}
     return []
 
 def event(metric):
@@ -964,7 +966,7 @@ configMapGenerator:
 ```
 {: file="iot/hub/timescaledb/kustomization.yaml" }
 
-대시보드(uid `iot-records`)는 2단계의 `TimescaleDB` 데이터소스로 읽기 전용 조회만 합니다. DB 에 잘 저장되는지 확인하는 용도라 컬럼을 가공하지 않고 `SELECT *` 로 그대로 보여 주며, 컬럼이 늘거나 줄면 표에 바로 반영됩니다. 위쪽의 `site`, `processing`, `room`, `device`, `property` 변수로 범위를 좁히고, 오른쪽 위 시간 범위가 모든 패널에 적용됩니다. 서버·PC 자체의 값(`device` 가 `host`, [호스트 부하 글](/posts/74/))은 속성이 많고 행이 많아 `device` 변수에서 `host` 를 직접 고를 때만 나옵니다.
+대시보드(uid `iot-records`)는 2단계의 `TimescaleDB` 데이터소스로 읽기 전용 조회만 합니다. DB 에 잘 저장되는지 확인하는 용도라 컬럼을 가공하지 않고 `SELECT *` 로 그대로 보여 주며, 컬럼이 늘거나 줄면 표에 바로 반영됩니다. 위쪽의 `site`, `processing`, `room`, `device`, `property` 변수로 범위를 좁히고, 오른쪽 위 시간 범위가 모든 패널에 적용됩니다. 서버·PC 자체의 값([호스트 부하 글](/posts/74/))도 다른 기기처럼 속성마다 패널이 자동으로 생기므로 `device`·`property` 변수로 좁혀 봅니다.
 
 | 패널 | 내용 |
 |---|---|
