@@ -343,6 +343,8 @@ Telegraf 설정 하나를 모든 지역이 공유합니다. 지역 이름과 허
 #   기기 연결 상태는 property 가 availability 인 행입니다(Zigbee2MQTT 가 알리는 online/offline)
 #   processing 은 원본(raw)·보정(corrected)·계산(derived) 구분입니다. 이 Telegraf 는 raw 만 넣고, 원본 행은 고치지 않습니다
 #   unit 은 기기 정의의 단위입니다(Zigbee2MQTT bridge/devices 의 exposes, HA 의 unit_of_measurement). 단위가 없는 값(presence 등)은 비어 있습니다
+#   exposes 에 빠진 속성은 아래 Z2M_EXTRA_UNITS 로 채웁니다. 재시작 직후 기기 정의보다 먼저 온 메시지는 unit 이 비어 들어가고,
+#   DB 작업 dedup_readings 가 같은 시계열의 단위로 채웁니다(iot/hub/timescaledb/migrations/2026-09-28-readings-dedup-job.sql)
 
 # Zigbee2MQTT 기기 메시지. 한 단계(+)만 구독하면 bridge/#, <기기>/set|get|availability 는 자연히 빠집니다 (friendly_name 에 / 를 쓰지 않는 전제). availability 는 아래 입력이 받습니다.
 [[inputs.mqtt_consumer]]
@@ -378,7 +380,8 @@ Telegraf 설정 하나를 모든 지역이 공유합니다. 지역 이름과 허
 # 기기 메시지에 unit 으로, 연결 상태 메시지에 hw_id·model·vendor 로 붙입니다.
 # 기기 정보(software_build_id, date_code, power_source, network_address …)는 기억해 둔 값과 달라진 것만 device_<키> 행으로 남깁니다(시각은 수신 시각).
 # Telegraf 가 재시작하면 기억이 비므로 그때 한 번은 모두 다시 들어옵니다.
-# 기기를 추가하거나 이름을 바꾸면 Zigbee2MQTT 가 다시 발행합니다. Telegraf 재시작 직후 이보다 먼저 온 메시지 몇 개는 이 값들이 비어 있을 수 있습니다.
+# 기기를 추가하거나 이름을 바꾸면 Zigbee2MQTT 가 다시 발행합니다. Telegraf 재시작 직후 이보다 먼저 온 메시지 몇 개는 이 값들이 비어 들어가고,
+# DB 작업 dedup_readings 가 1시간 안에 같은 시계열의 값으로 채웁니다.
 [[inputs.mqtt_consumer]]
   servers = ["tcp://mosquitto.mosquitto.svc.cluster.local:1883"]
   topics = ["zigbee2mqtt/bridge/devices"]
@@ -447,6 +450,7 @@ Telegraf 설정 하나를 모든 지역이 공유합니다. 지역 이름과 허
   order = 1
   source = '''
 load("json.star", "json")
+load("time.star", "time")
 
 HW_TAGS = {"device_ieeeAddr": "hw_id", "serial": "hw_id", "device_model": "model", "device_manufacturerName": "vendor"}
 ON_OFF = {"on": 1.0, "off": 0.0, "true": 1.0, "false": 0.0, "online": 1.0, "offline": 0.0}
@@ -504,6 +508,10 @@ def clean_tags(metric):
             tags[HW_TAGS.get(k, k)] = v
     return tags
 
+# 기기 정의(exposes)에 없지만 기기가 보내는 속성의 단위(모델별). exposes 에 있으면 그쪽이 우선입니다.
+# voltage 는 플러그가 V, 전지 센서가 mV 라 속성 이름만으로 정하지 않고 모델마다 적습니다
+Z2M_EXTRA_UNITS = {"KKZ-DO021": {"voltage": "mV"}}
+
 def collect_units(expose, units):
     # exposes 는 features 안에 다시 exposes 가 들어 있을 수 있습니다(light, climate 등)
     if expose.get("property") and expose.get("unit"):
@@ -522,6 +530,9 @@ def remember_devices(metric):
         u = {}
         for e in definition.get("exposes", []):
             collect_units(e, u)
+        for k, v in Z2M_EXTRA_UNITS.get(definition.get("model") or "", {}).items():
+            if k not in u:
+                u[k] = v
         units[name] = u
         hw[name] = {"hw_id": d.get("ieee_address") or "", "model": definition.get("model") or "", "vendor": d.get("manufacturer") or ""}
         info = {}
@@ -564,23 +575,28 @@ def host_unit(field):
             return unit
     return ""
 
+# 발견 설정 origin → 그 값을 내는 입력의 source 태그
+SENSOR_ORIGINS = {"host-metrics": "telegraf", "nvr-occupancy": "nvr"}
+
 def remember_host_sensor(metric):
-    # homeassistant/sensor/<기기>/<필드>/config 중 호스트 Telegraf 가 낸 것만. 빈 메시지는 센서가 지워진 것입니다
+    # homeassistant/<구성요소>/<기기>/<필드>/config 중 호스트 Telegraf·NVR 수집기가 낸 것만. 빈 메시지는 센서가 지워진 것입니다
     raw = metric.fields.get("value", "")
     if not raw:
         return []
     c = json.decode(raw)
-    if (c.get("origin") or {}).get("name") != "host-metrics":
+    source = SENSOR_ORIGINS.get((c.get("origin") or {}).get("name"))
+    if not source:
         return []
+    state.setdefault("sensors_seen", {}).setdefault(source, now())
     device = (c.get("device") or {}).get("name", "")
     field = c.get("unique_id", "")[len(device) + 1:]
-    units = state.setdefault("host_units", {}).setdefault(device, {})
+    units = state.setdefault("host_units", {}).setdefault(source + "/" + device, {})
     if c.get("unit_of_measurement"):
         units[field] = c["unit_of_measurement"]
     d = c.get("device") or {}
-    # serial_number 는 호스트의 메인보드 시리얼입니다. 다른 기기의 IEEE 주소·Matter 시리얼과 같은 자리(hw_id)에 넣어 실물 교체 이력이 남습니다
-    state.setdefault("host_hw", {})[device] = {"vendor": d.get("manufacturer") or "", "model": d.get("model") or "",
-                                               "hw_id": d.get("serial_number") or ""}
+    # serial_number 는 호스트의 메인보드 시리얼, 카메라의 MAC 주소입니다. 다른 기기의 IEEE 주소·Matter 시리얼과 같은 자리(hw_id)에 넣어 실물 교체 이력이 남습니다
+    state.setdefault("host_hw", {})[source + "/" + device] = {"vendor": d.get("manufacturer") or "", "model": d.get("model") or "",
+                                                              "hw_id": d.get("serial_number") or ""}
     return []
 
 def event(metric):
@@ -610,7 +626,64 @@ def event(metric):
         out.append(m)
     return out
 
+# 기동 직후 붙잡아 두기. 단위·실물 정보는 유지 메시지(Zigbee2MQTT bridge/devices, 호스트·NVR 의 HA 발견 설정)에서 배워 메모리에 두므로
+# Telegraf 가 재시작하면 비어 있고, 입력마다 MQTT 클라이언트가 달라 기기 값이 이 메시지보다 먼저 올 수 있습니다(도착 순서는 보장되지 않습니다).
+# 그래서 배운 정보가 필요한 수집기(LEARNED_SOURCES)의 값은 정보가 갖춰질 때까지 원본 사본을 붙잡아 두었다가 그때 행으로 만듭니다.
+#   z2m: bridge/devices 를 한 번 받으면 모든 기기가 갖춰집니다
+#   telegraf·nvr: 발견 설정은 필드마다 따로 오고 끝났다는 신호가 없어, 그 수집기의 것을 처음 받은 뒤 SETTLE_SECONDS 가 지나면 갖춰진 것으로 봅니다
+#   (유지 메시지라 구독하자마자 한꺼번에 옵니다)
+# 어느 경우든 기동 뒤 WARMUP_SECONDS 가 지나면 모두 내보냅니다(정보가 끝내 오지 않아도 값은 잃지 않습니다). 붙잡은 원본은 브로커에 전달 완료로 알리므로,
+# 이 사이에 Telegraf 가 죽으면 붙잡은 값은 잃습니다(정상 종료·재시작 직후 몇 초 사이만 해당). 기동 직후가 아닌 때 새 기기·필드가 생겨 빈 값이 들어가면
+# DB 작업 dedup_readings 가 같은 시계열의 값으로 채웁니다(iot/hub/timescaledb/migrations/2026-09-28-readings-dedup-job.sql).
+LEARNED_SOURCES = ["z2m", "telegraf", "nvr"]
+WARMUP_SECONDS = 30
+SETTLE_SECONDS = 5
+HOLD_LIMIT = 100000                   # 붙잡는 메시지 상한. 넘으면 기다리지 않고 바로 내보냅니다(브로커가 쌓아 둔 메시지가 한꺼번에 올 때)
+
+def now():
+    return time.now().unix
+
+def learned_ready(source):
+    started = state.setdefault("started", now())
+    if now() - started >= WARMUP_SECONDS:
+        return True
+    if source == "z2m":
+        return "units" in state
+    first = state.get("sensors_seen", {}).get(source)
+    return first != None and now() - first >= SETTLE_SECONDS
+
+def must_hold(metric):
+    if metric.name not in ("readings", "events"):
+        return False
+    source = metric.tags.get("source", "")
+    return source in LEARNED_SOURCES and not learned_ready(source) and len(state.get("held", [])) < HOLD_LIMIT
+
+def release():
+    held = state.get("held", [])
+    if not held:
+        return []
+    out, keep = [], []
+    for m in held:
+        if learned_ready(m.tags.get("source", "")) or len(held) >= HOLD_LIMIT:
+            out.extend(as_list(shape(m)))
+        else:
+            keep.append(m)
+    state["held"] = keep
+    return out
+
+def as_list(r):
+    if r == None:
+        return []
+    return r if type(r) == "list" else [r]
+
 def apply(metric):
+    state.setdefault("started", now())
+    if must_hold(metric):
+        state.setdefault("held", []).append(deepcopy(metric))   # 추적 정보가 없는 사본. 원본은 전달 완료로 처리됩니다
+        return release()
+    return as_list(shape(metric)) + release()
+
+def shape(metric):
     if metric.name == "z2m_devices":
         return remember_devices(metric)
     if metric.name == "host_sensors":
@@ -621,11 +694,14 @@ def apply(metric):
     if not valid_name(tags.get("device", "")):
         return []                     # 이름이 없거나(옛 형식의 유지 메시지 등) 이름 규칙에 맞지 않는 기기는 버립니다
     name = tags["device"]
-    units = state.get("host_units" if tags.get("source") == "telegraf" else "units", {}).get(name, {})
-    if tags.get("source") == "telegraf":
-        for k, v in state.get("host_hw", {}).get(name, {}).items():
+    learned = tags.get("source") in ("telegraf", "nvr")    # 발견 설정에서 단위·실물 정보를 배운 기기
+    if learned:
+        units = state.get("host_units", {}).get(tags["source"] + "/" + name, {})
+        for k, v in state.get("host_hw", {}).get(tags["source"] + "/" + name, {}).items():
             if v != "":
                 tags[k] = v
+    else:
+        units = state.get("units", {}).get(name, {})
     if tags.get("source") == "z2m" and "hw_id" not in tags:
         for k, v in state.get("hw", {}).get(name, {}).items():
             if v != "":
@@ -823,7 +899,7 @@ spec:
 | `property` | `temperature`, `presence`, `availability` | 측정 항목. `availability` 는 Zigbee 기기의 연결 상태(`online`/`offline`)로, 기기 시각이 없어 수신 시각으로 남습니다 |
 | `processing` | `raw` | 원본(`raw`)·보정(`corrected`)·계산(`derived`) 구분. 이 Telegraf 가 넣는 행은 모두 `raw` 입니다 |
 | `value` | `26.3`, `1` | 숫자 값. `on`/`off`, `true`/`false`, `online`/`offline` 은 1/0 |
-| `unit` | `°C`, `mV`, `μg/m³` | 단위. Zigbee 는 Zigbee2MQTT 기기 정의(`bridge/devices`), Matter 는 HA 의 `unit_of_measurement` 에서 가져옵니다. 단위가 없는 값(`presence` 등)은 비어 있습니다 |
+| `unit` | `°C`, `mV`, `μg/m³` | 단위. Zigbee 는 Zigbee2MQTT 기기 정의(`bridge/devices`), Matter 는 HA 의 `unit_of_measurement` 에서 가져옵니다. 단위가 없는 값(`presence` 등)은 비어 있습니다. 기기 정의에 빠진 속성은 starlark 의 `Z2M_EXTRA_UNITS` 에 모델별로 적습니다 |
 | `value_text` | `ON`, `false` | 문자열 원문 |
 | `protocol` | `zigbee`, `matter` | 기기 통신 방식 |
 | `source` | `z2m`, `hass` | 수집기. 수집기를 바꿔도 `protocol` 은 그대로입니다 |
@@ -837,13 +913,13 @@ spec:
 
 압축은 `site, room, device, anchor, property, processing` 이 같은 행끼리 묶습니다. 묶음 하나가 시계열 하나(예: 한 기기의 온도)가 되어 값이 비슷한 것끼리 모이므로 압축이 잘 되고, 조회할 때도 필요한 묶음만 풉니다. 청크와 압축은 1일 단위라 압축 전 데이터가 하루치를 넘지 않습니다. 압축된 청크에도 INSERT·UPDATE·DELETE 는 되므로 늦게 도착한 버퍼나 보정은 느려질 뿐 그대로 들어갑니다.
 
-Telegraf 가 재시작하면 브로커가 유지 메시지(Zigbee2MQTT 기기 상태 등)를 다시 보내고, 메시지에 실린 원래 시각으로 같은 행이 한 번 더 저장됩니다. MQTT 는 구독할 때마다 유지 메시지를 보내므로 재수신 자체는 막을 수 없고, Telegraf 의 postgresql 출력은 `ON CONFLICT` 를 지원하지 않아 유니크 인덱스를 걸면 배치가 통째로 실패합니다. 그래서 저장한 뒤 정리합니다. 두 DB 에 아래 SQL 을 한 번씩 실행하면 TimescaleDB 작업 `dedup_readings` 가 1시간마다 압축 전 청크에서 같은 `(time, site, room, device, anchor, property, processing)` 를 하나만 남기고 지웁니다. DB 안에서 도는 작업이라 자격 증명이 필요 없고, Patroni 가 주 DB 를 옮겨도 새 주 DB 에서 이어 돕니다.
+Telegraf 가 재시작하면 브로커가 유지 메시지(Zigbee2MQTT 기기 상태 등)를 다시 보내고, 메시지에 실린 원래 시각으로 같은 행이 한 번 더 저장됩니다. MQTT 는 구독할 때마다 유지 메시지를 보내므로 재수신 자체는 막을 수 없고, Telegraf 의 postgresql 출력은 `ON CONFLICT` 를 지원하지 않아 유니크 인덱스를 걸면 배치가 통째로 실패합니다. 그래서 저장한 뒤 정리합니다. 두 DB 에 아래 SQL 을 한 번씩 실행하면 TimescaleDB 작업 `dedup_readings` 가 1시간마다 압축 전 청크에서 같은 `(time, site, room, device, anchor, property, processing)` 를 하나만 남기고 지웁니다. 지우기 전에는 비어 있는 `unit`·`hw_id`·`model`·`vendor` 를 같은 시계열의 최근 25시간 값이 하나뿐일 때 그 값으로 채웁니다. Telegraf 는 단위와 실물 정보를 유지 메시지(`bridge/devices`)에서 배워 메모리에 두기 때문에, 재시작 직후에는 starlark 가 기기 정의가 올 때까지 값을 잠시 붙잡아 두어 빈 행을 막습니다. 채우기는 그 뒤에도 빈 값이 들어가는 경우(기동 직후가 아닌 때 새 기기가 생긴 경우 등)를 위한 것입니다. DB 안에서 도는 작업이라 자격 증명이 필요 없고, Patroni 가 주 DB 를 옮겨도 새 주 DB 에서 이어 돕니다.
 
 <details markdown="1">
 <summary>iot/hub/timescaledb/migrations/2026-09-28-readings-dedup-job.sql 전문</summary>
 
 ```sql
--- readings 의 중복 행을 1시간마다 지우는 TimescaleDB 작업(dedup_readings)을 만듭니다. 허브 DB 와 지역 DB 모두에 실행합니다(다시 실행해도 결과가 같습니다).
+-- readings 의 빈 unit·hw_id·model·vendor 를 채우고 중복 행을 지우는 1시간 주기 TimescaleDB 작업(dedup_readings)을 만듭니다. 허브 DB 와 지역 DB 모두에 실행합니다(다시 실행해도 결과가 같습니다).
 -- 중복이 생기는 까닭: 엣지 Telegraf 가 재시작하면 브로커가 유지(retained) 메시지(Zigbee2MQTT 기기 상태, HA 재발행 상태)를 다시 보내고,
 -- 메시지에 실린 원래 시각으로 같은 행이 또 저장됩니다. MQTT 는 구독할 때마다 유지 메시지를 보내므로 재수신 자체는 막을 수 없고,
 -- Telegraf 의 postgresql 출력은 ON CONFLICT 를 지원하지 않아 유니크 인덱스를 걸면 배치가 통째로 실패합니다. 그래서 저장한 뒤 정리합니다.
@@ -852,7 +928,12 @@ Telegraf 가 재시작하면 브로커가 유지 메시지(Zigbee2MQTT 기기 �
 --   허브: kubectl -n timescaledb exec -i timescaledb-0 -- psql -h timescaledb -U iot -d iot -v ON_ERROR_STOP=1 < 2026-09-28-readings-dedup-job.sql
 --   지역: kubectl --kubeconfig ~/k8s-<지역>.yaml -n timescaledb exec -i <주 DB 파드> -- psql -U iot -d iot -v ON_ERROR_STOP=1 < 2026-09-28-readings-dedup-job.sql
 
--- 같은 (time, site, room, device, anchor, property, processing) 가 여럿이면 하나만 남깁니다. 단위·값이 채워진 행이 남습니다.
+-- 같은 이유로 재시작 직후에는 Zigbee2MQTT 기기 정의(bridge/devices)보다 먼저 처리된 메시지가 unit·hw_id·model·vendor 없이 들어갑니다
+-- (Telegraf 가 기기 정의를 메모리에 기억해 붙이므로 재시작하면 비어 있습니다). 쌍이 없는 유일한 행도 있어 지우기만으로는 남습니다.
+-- 그래서 먼저 채웁니다: 시계열 (site, room, device, anchor, property, processing) 의 최근 25시간 다른 행에 빈 값이 아닌 값이 정확히 하나면 그 값으로 채웁니다
+-- (기준값은 청크 경계와 상관없이 하이퍼테이블에서 구합니다). 25시간 이전 행은 2026-09-29-readings-fill-empty.sql 이 한 번 채웠습니다.
+-- 단위가 원래 없는 속성(presence 등)은 어느 행에도 값이 없어 그대로 둡니다. 이 파일을 다시 실행하면 작업 내용이 갱신됩니다.
+-- 이어서 같은 (time, site, room, device, anchor, property, processing) 가 여럿이면 하나만 남깁니다. 단위·값이 채워진 행이 남습니다.
 -- 청크 테이블에 직접 실행합니다. 하이퍼테이블 전체에서는 ctid 가 유일하지 않지만 청크 하나는 일반 테이블이라 안전합니다.
 -- PARTITION BY 는 NULL 을 한 묶음으로 보므로 anchor 가 없는 기기(bedroom2-th 등)도 정리됩니다.
 -- 압축된 청크는 건드리지 않습니다(압축은 1일 뒤라 1시간마다 도는 이 작업에는 늘 여유가 있습니다). 청크 안에서도 최근 25시간만 봅니다.
@@ -862,11 +943,26 @@ DECLARE
   c record;
   n bigint;
   total bigint := 0;
+  filled bigint := 0;
+  col text;
 BEGIN
   FOR c IN
     SELECT chunk_schema, chunk_name FROM timescaledb_information.chunks
     WHERE hypertable_name = 'readings' AND NOT is_compressed AND range_end > now() - interval '25 hours'
   LOOP
+    FOREACH col IN ARRAY ARRAY['unit', 'hw_id', 'model', 'vendor'] LOOP
+      EXECUTE format($q$
+        UPDATE %1$I.%2$I r SET %3$I = k.v
+        FROM (SELECT site, room, device, anchor, property, processing, min(%3$I) AS v
+              FROM readings WHERE time > now() - interval '25 hours' AND coalesce(%3$I, '') <> ''
+              GROUP BY 1, 2, 3, 4, 5, 6 HAVING count(DISTINCT %3$I) = 1) k
+        WHERE r.time > now() - interval '25 hours' AND coalesce(r.%3$I, '') = ''
+          AND r.site IS NOT DISTINCT FROM k.site AND r.room IS NOT DISTINCT FROM k.room AND r.device IS NOT DISTINCT FROM k.device
+          AND r.anchor IS NOT DISTINCT FROM k.anchor AND r.property IS NOT DISTINCT FROM k.property AND r.processing = k.processing$q$,
+        c.chunk_schema, c.chunk_name, col);
+      GET DIAGNOSTICS n = ROW_COUNT;
+      filled := filled + n;
+    END LOOP;
     EXECUTE format($q$
       DELETE FROM %1$I.%2$I WHERE ctid IN (
         SELECT ctid FROM (
@@ -878,7 +974,7 @@ BEGIN
     GET DIAGNOSTICS n = ROW_COUNT;
     total := total + n;
   END LOOP;
-  RAISE NOTICE 'dedup_readings: % 행 삭제', total;
+  RAISE NOTICE 'dedup_readings: % 칸 채움, % 행 삭제', filled, total;
 END
 $$;
 
@@ -893,11 +989,16 @@ $$;
 -- 지금 쌓인 중복을 한 번 지웁니다
 CALL dedup_readings(0, NULL);
 
--- 확인: 작업이 1시간 주기로 있고, 최근 25시간에 중복 묶음이 없어야 합니다(0)
+-- 확인: 작업이 1시간 주기로 있고, 최근 25시간에 중복 묶음과 빈 값·채운 값으로 갈라진 시계열이 없어야 합니다(모두 0)
 SELECT job_id, schedule_interval, next_start FROM timescaledb_information.jobs WHERE proc_name = 'dedup_readings';
 SELECT count(*) AS dup_groups FROM (
   SELECT 1 FROM readings WHERE time > now() - interval '25 hours'
   GROUP BY time, site, room, device, anchor, property, processing HAVING count(*) > 1) x;
+SELECT count(*) AS split_series FROM (
+  SELECT 1 FROM readings WHERE time > now() - interval '25 hours'
+  GROUP BY site, room, device, anchor, property, processing
+  HAVING (bool_or(coalesce(unit, '') = '') AND bool_or(coalesce(unit, '') <> ''))
+      OR (bool_or(coalesce(hw_id, '') = '') AND bool_or(coalesce(hw_id, '') <> ''))) x;
 ```
 {: file="iot/hub/timescaledb/migrations/2026-09-28-readings-dedup-job.sql" }
 

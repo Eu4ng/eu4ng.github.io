@@ -870,7 +870,7 @@ $K exec -i deploy/home-assistant -c home-assistant -- env HA_TOKEN="$T" python3 
 
 ## 6. 엣지 Telegraf 에 호스트 입력 추가
 
-엣지 Telegraf 에 입력 두 개를 추가합니다. 첫 입력이 `hosts/+` 의 `fields` 를 필드별 행으로 받고, 둘째 입력이 호스트의 발견 설정을 받아 단위(`unit_of_measurement`)와 제조사·모델·실물 ID(`serial_number` → `hw_id`)를 [Telegraf 글](/posts/43/)의 공통 starlark 에 기억시킵니다. starlark 는 `origin` 이 `host-metrics` 인 발견 설정만 쓰므로 Zigbee2MQTT 의 발견 설정은 무시합니다. 발견 설정이 아직 오지 않았을 때(새 필드가 생긴 직후, Telegraf 재시작 직후)는 필드 이름 끝으로 단위를 정해(`HOST_UNITS`) 단위가 빈 행이 생기지 않게 합니다. 이 규칙은 발견 스크립트의 `SENSORS` 표와 같은 값이어야 합니다.
+엣지 Telegraf 에 입력 두 개를 추가합니다. 첫 입력이 `hosts/+` 의 `fields` 를 필드별 행으로 받고, 둘째 입력이 호스트의 발견 설정을 받아 단위(`unit_of_measurement`)와 제조사·모델·실물 ID(`serial_number` → `hw_id`)를 [Telegraf 글](/posts/43/)의 공통 starlark 에 기억시킵니다. starlark 는 `origin` 이 `host-metrics` 인 발견 설정만 쓰므로 Zigbee2MQTT 의 발견 설정은 무시합니다. Telegraf 재시작 직후에는 공통 starlark 가 발견 설정을 받을 때까지 호스트 값을 잠시 붙잡아 두고, 새 필드가 생긴 직후처럼 발견 설정이 아직 없으면 필드 이름 끝으로 단위를 정해(`HOST_UNITS`) 단위가 빈 행이 생기지 않게 합니다. 이 규칙은 발견 스크립트의 `SENSORS` 표와 같은 값이어야 합니다.
 
 ```toml
 # 서버·PC 자체가 잰 값(CPU·메모리·디스크·네트워크·온도·전력·GPU). 호스트의 Telegraf 가 10초마다 hosts/<기기> 에 JSON 하나로 냅니다
