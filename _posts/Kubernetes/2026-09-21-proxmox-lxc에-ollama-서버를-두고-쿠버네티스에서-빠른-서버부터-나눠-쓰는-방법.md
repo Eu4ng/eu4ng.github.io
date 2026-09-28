@@ -78,7 +78,7 @@ all:
 
 ## 2. 플레이북 실행
 
-플레이북은 CT 를 정의하고, `gpu: true` 인 CT 에 `/dev/dri/renderD128` 을 넘기고, CT 를 켠 뒤 Ollama 를 설치하고 모델을 받습니다. Ollama 는 서비스 설정으로 LAN 에서 요청을 받고(`OLLAMA_HOST=0.0.0.0:11434`), 한 번에 모델 하나(`OLLAMA_MAX_LOADED_MODELS=1`)와 요청 하나(`OLLAMA_NUM_PARALLEL=1`)만 다룹니다. 라우터가 서버마다 요청을 하나씩만 보내는 것과 짝을 이룹니다. AMD iGPU 는 ROCm 지원 밖이라 iGPU CT 는 `mesa-vulkan-drivers` 를 깔고 Vulkan 으로 돌립니다(`OLLAMA_VULKAN=1`, `OLLAMA_IGPU_ENABLE=1`). 이미 설치된 버전과 받아 둔 모델은 건너뛰므로 여러 번 실행해도 결과가 같습니다.
+플레이북은 CT 를 정의하고, `gpu: true` 인 CT 에 `/dev/dri/renderD128` 을 넘기고, CT 를 켠 뒤 Ollama 를 설치하고 모델을 받습니다. Ollama 는 서비스 설정으로 LAN 에서 요청을 받고(`OLLAMA_HOST=0.0.0.0:11434`), 한 번에 모델 하나(`OLLAMA_MAX_LOADED_MODELS=1`)와 요청 하나(`OLLAMA_NUM_PARALLEL=1`)만 다룹니다. 라우터가 서버마다 요청을 하나씩만 보내는 것과 짝을 이룹니다. AMD iGPU 는 ROCm 지원 밖이라 iGPU CT 는 `mesa-vulkan-drivers` 를 깔고 Vulkan 으로 돌립니다(`OLLAMA_VULKAN=1`, `OLLAMA_IGPU_ENABLE=1`). Vulkan 의 flash attention 에서 `gemma4:e4b` 가 약 750토큰이 넘는 프롬프트마다 죽어 iGPU CT 는 flash attention 을 끕니다(`OLLAMA_FLASH_ATTENTION=0`). 이미 설치된 버전과 받아 둔 모델은 건너뛰므로 여러 번 실행해도 결과가 같습니다.
 
 ```bash
 # 플레이북 내려받기
@@ -205,6 +205,10 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/ollama.yml -o playbook
           {% if backend.gpu %}
           Environment=OLLAMA_VULKAN=1
           Environment=OLLAMA_IGPU_ENABLE=1
+          # Vulkan(RADV, Radeon 610M)의 flash attention 에서 gemma4:e4b 가 약 750토큰을 넘는 프롬프트마다
+          # llama-server 가 'free(): invalid pointer' 로 죽는다(qwen3.5:9b 는 정상). 끄면 gemma4 프롬프트 처리는 82 -> 61~66 tok/s,
+          # qwen3.5:9b 는 26 -> 33 tok/s 로 오히려 빨라졌다(2026-09-29, ollama 0.34.4).
+          Environment=OLLAMA_FLASH_ATTENTION=0
           {% endif %}
       register: override
     - name: 모델 폴더
