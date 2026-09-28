@@ -5,14 +5,13 @@
 # 허브에 kubectl 로 접근할 수 있고 엣지 kubeconfig 가 있는 곳(control plane)에서 실행합니다: bash create-nvr-secrets.sh [EDGE_KUBECONFIG]
 # 카메라 RTSP 비밀번호는 환경 변수 CAMERA_RTSP_PASSWORD 가 있으면 그것을, 없으면 실행 중에 입력받습니다.
 # MQTT 비밀번호는 환경 변수 MQTT_PASSWORD 가 있으면 그것을, 없으면 엣지 telegraf-credentials 에서 가져옵니다.
-# DB 비밀번호는 허브·지역의 timescaledb/timescaledb-credentials 에서 복사합니다.
+# 수집기는 DB 에 직접 쓰지 않으므로(MQTT → Telegraf → readings) DB 비밀번호는 넣지 않습니다.
 # NAS rsync 용 SSH 키(backup-ssh)는 엣지 backup 네임스페이스에서 복사합니다.
 
 set -euo pipefail
 
 # ---------- 환경에 맞게 수정 ----------
 NAMESPACE=nvr
-DB_SECRET=timescaledb/timescaledb-credentials
 TELEGRAF_SECRET=telegraf/telegraf-credentials
 BACKUP_SECRET=backup/backup-ssh
 # --------------------------------------
@@ -37,13 +36,6 @@ if kubectl "${EDGE[@]}" -n "$NAMESPACE" get secret nvr-credentials >/dev/null 2>
   echo "  엣지 $NAMESPACE/nvr-credentials 있음, 건너뜀"
 else
   log "비밀값 조회"
-  # DB 비밀번호
-  db_password() { kubectl "$@" -n "${DB_SECRET%%/*}" get secret "${DB_SECRET##*/}" -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d; }
-  PG_HUB=$(db_password) || true
-  PG_LOCAL=$(db_password "${EDGE[@]}") || true
-  [ -n "$PG_HUB" ] || die "허브 $DB_SECRET 에서 POSTGRES_PASSWORD 를 읽지 못했습니다."
-  [ -n "$PG_LOCAL" ] || die "엣지 $DB_SECRET 에서 POSTGRES_PASSWORD 를 읽지 못했습니다."
-
   # MQTT 비밀번호
   MQTT_PASSWORD=${MQTT_PASSWORD:-}
   if [ -z "$MQTT_PASSWORD" ]; then
@@ -60,10 +52,9 @@ else
   fi
 
   log "엣지 $NAMESPACE/nvr-credentials 생성"
-  printf 'RTSP_PASSWORD=%s\nMQTT_PASSWORD=%s\nPGPASSWORD_LOCAL=%s\nPGPASSWORD_HUB=%s\n' \
-    "$CAMERA_RTSP_PASSWORD" "$MQTT_PASSWORD" "$PG_LOCAL" "$PG_HUB" \
+  printf 'RTSP_PASSWORD=%s\nMQTT_PASSWORD=%s\n' "$CAMERA_RTSP_PASSWORD" "$MQTT_PASSWORD" \
     | kubectl "${EDGE[@]}" -n "$NAMESPACE" create secret generic nvr-credentials --from-env-file=/dev/stdin
-  unset CAMERA_RTSP_PASSWORD MQTT_PASSWORD PG_HUB PG_LOCAL
+  unset CAMERA_RTSP_PASSWORD MQTT_PASSWORD
 fi
 
 # ---------- 3. backup-ssh 복사 ----------
