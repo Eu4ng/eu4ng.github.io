@@ -88,7 +88,7 @@ ssh ubuntu@192.168.0.133 "df -h /mnt/nvr"
 
 ## 3. 방 기하 설정
 
-재실자 위치는 두 가지로 남깁니다. 사람 박스 아래 가운데(발 위치)의 화면 비율 좌표(`u`, `v`, 왼쪽 위 0 ~ 오른쪽 아래 1)는 원본(raw)이고, 이를 방 바닥 좌표(m)와 속도(m/s)로 바꾼 값은 계산값(derived)입니다. 원본이 DB 에 남으므로 기하 설정을 고치면 계산값을 다시 구할 수 있습니다.
+원본(raw)은 녹화 영상이고, 재실자 값은 모두 영상에서 계산한 값(derived)입니다. 위치는 사람 박스 아래 가운데(발 위치)의 화면 비율 좌표(`u`, `v`, 왼쪽 위 0 ~ 오른쪽 아래 1)와, 이를 방 바닥 좌표(m)·속도(m/s)로 바꾼 값 두 가지로 남깁니다. 화면 좌표와 녹화 원본이 남으므로 기하 설정이나 알고리즘을 바꾸면 다시 계산할 수 있습니다.
 
 계산에는 화면 속 바닥 기준점 4개 이상이 필요합니다. 카메라 프레임을 한 장 뽑아 방 모서리, 침대 다리, 문틀 아래처럼 바닥에 닿은 점을 고르고, 그 점의 화면 비율 좌표와 줄자로 잰 방 바닥 좌표를 짝지어 적습니다.
 
@@ -217,7 +217,7 @@ NVR 파드는 한 파드 안에 세 가지 컨테이너가 협력하는 구조�
 1. **`go2rtc`**: 카메라에 RTSP 세션을 딱 1개만 맺고, 로컬 `:8554`로 스트림을 분배합니다. 저가형 IP 카메라의 동시 연결 수 한계 문제를 원천 차단합니다.
 2. **`recorder`**: `ffmpeg`를 사용해 `rtsp://localhost:8554/main` 스트림을 재인코딩 없이 10분 단위 조각으로 저장합니다 (`/mnt/nvr/rec/%Y-%m-%d/%H-%M-%S.mp4`).
 3. **`occupancy`**: 주 스트림(5MP 20fps)을 PyAV 로 디코딩해 초당 10프레임을 1280x720 으로 받아 YOLOv8n + ByteTrack 으로 추적합니다.
-   - 사람마다 칸(`occupant1`, `occupant2` …)을 배정하고 1초마다 `nvr/bedroom2-camera`(raw)와 `nvr/bedroom2-camera/derived`(계산값)에 `{"fields": {...}, "timestamp": <ms>}` 를 발행합니다. Home Assistant 발견 설정도 함께 내므로 HA 에 기기 `bedroom2-camera` 와 센서가 자동으로 생기고, 엣지 Telegraf 가 같은 토픽을 받아 `readings` 에 넣습니다.
+   - 사람마다 칸(`occupant1`, `occupant2` …)을 배정하고 1초마다 `nvr/bedroom2-camera`(감지 결과)와 `nvr/bedroom2-camera/derived`(방 좌표로 바꾼 값)에 `{"fields": {...}, "timestamp": <ms>}` 를 발행합니다. Home Assistant 발견 설정도 함께 내므로 HA 에 기기 `bedroom2-camera` 와 센서가 자동으로 생기고, 엣지 Telegraf 가 같은 토픽을 받아 `readings` 에 넣습니다.
    - 칸은 동시에 감지된 최대 인원만큼 생기고, 사람이 없는 칸의 **감지** 센서는 `감지되지 않음` 이 됩니다.
    - 추적한 프레임마다 초록 박스와 칸·추적 ID·신뢰도·좌표·시각을 그린 **검수 영상**을 `/mnt/nvr/review/<날짜>/` 에 10분 조각으로 저장합니다.
 
@@ -254,7 +254,7 @@ streams:
 ```
 {: file="iot/edge/nvr/collector-settings.json" }
 
-매일 새벽 04:00에 실행되는 `nvr-daily-archive` CronJob 은 전일 10분 조각을 재인코딩 없이 녹화가 이어진 구간마다 하나로 합칩니다. 끊김 없는 날은 `00-00-00_24-00-00.mp4` 하나가 되고, 조각 사이가 5초 넘게 비면 그 자리에서 나뉘므로 파일 이름의 시각 사이가 녹화가 끊긴 구간입니다. 원본은 720p 로 바꿔, 검수 영상은 그대로 서울 NAS(`/volume3/nvr/daejeon/`, `/volume3/nvr/daejeon-review/`)로 보내고 로컬 30일/NAS 365일 초과분을 정리합니다.
+매일 새벽 04:00에 실행되는 `nvr-daily-archive` CronJob 은 전일 10분 조각을 재인코딩 없이 녹화가 이어진 구간마다 하나로 합칩니다. 끊김 없는 날은 `00-00-00_24-00-00.mp4` 하나가 되고, 조각 사이가 5초 넘게 비면 그 자리에서 나뉘므로 파일 이름의 시각 사이가 녹화가 끊긴 구간입니다. 이미 합친 구간 파일도 다시 읽어 이어지는 조각과 합치므로, 녹화 중인 날을 `MERGE_ONLY=1` 로 미리 합쳐도 됩니다. 원본은 720p 로 바꿔, 검수 영상은 그대로 서울 NAS(`/volume3/nvr/daejeon/`, `/volume3/nvr/daejeon-review/`)로 보내고 로컬 30일/NAS 365일 초과분을 정리합니다.
 
 GitOps 저장소에 커밋하고 push하면 Argo CD `iot-edge` ApplicationSet이 새 폴더를 감지해 자동으로 `daejeon-nvr` 애플리케이션을 생성하고 엣지 클러스터에 배포합니다.
 
@@ -291,7 +291,7 @@ ssh ubuntu@kubectl-hub.eu4ng.com "kubectl --kubeconfig ~/k8s-daejeon.yaml -n nvr
 ssh ubuntu@kubectl-hub.eu4ng.com "kubectl --kubeconfig ~/k8s-daejeon.yaml -n timescaledb exec timescaledb-0 -- psql -U iot -d iot -c \"SELECT property, processing, unit, hw_id, count(*) FROM readings WHERE source='nvr' AND time > now() - interval '5 minutes' GROUP BY 1, 2, 3, 4 ORDER BY 1;\""
 ```
 
-- **확인:** `occupant_count`, `occupant1_detected` 가 `raw` 로 1초마다 들어오고 `hw_id` 에 카메라 MAC 이 붙습니다. 사람이 감지되면 `occupant1_u`·`occupant1_v` 가, 방 기하 설정 뒤에는 `occupant1_x_m`·`occupant1_speed_mps` 가 `derived` 로 들어옵니다.
+- **확인:** `occupant_count`, `occupant1_detected` 가 `derived` 로 1초마다 들어오고 `hw_id` 에 카메라 MAC 이 붙습니다. 사람이 감지되면 `occupant1_u`·`occupant1_v` 가, 방 기하 설정 뒤에는 `occupant1_x_m`·`occupant1_speed_mps` 가 들어옵니다.
 
 - **확인:** Home Assistant 의 **설정** > **기기 및 서비스** > **MQTT** 에 기기 `bedroom2-camera` 가 생기고, `재실자 수`, `재실자1 감지`(감지됨 / 감지되지 않음), 좌표·속도 센서가 보입니다.
 
