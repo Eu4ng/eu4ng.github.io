@@ -67,7 +67,6 @@ host_metrics_mqtt_user: devices               # LAN 기기용 브로커 계정. 
 host_metrics_mounts: [/]                      # 용량을 잴 마운트(호스트 루트). 호스트마다 다르면 inventory 에서 덮어씁니다
 host_metrics_disks: [nvme0n1]                 # IO·온도·수명을 잴 물리 디스크(VM 디스크인 dm-* 는 뺌). 여럿이면 가장 높은 값으로 묶습니다
 host_metrics_drm_card: card0                  # iGPU 의 /sys/class/drm/<카드>
-host_metrics_gpu_ppt_scale: 0.000001          # amdgpu PPT(power1_average, 없으면 power1_input) → W. 커널 문서대로 µW. 다르게 나오는 칩은 inventory 에서 덮어씁니다
 ```
 {: file="group_vars/all.yml (추가 부분)" }
 {% endraw %}
@@ -79,15 +78,12 @@ host_metrics_gpu_ppt_scale: 0.000001          # amdgpu PPT(power1_average, 없�
           ansible_host: [PVE01_IP]
           ansible_user: root
           host_metrics_name: bedroom2-host-server_ms_a2_1   # <방>-host-<제품 키>. 제품 키는 전력 플러그 이름의 기준 칸과 같습니다
-          host_metrics_gpu_ppt_scale: 0.001   # 610M(Granite Ridge)의 PPT 는 1 W 단위 mW 로 나옵니다(GPU 부하 12000, 유휴 5000~6000)
         pve02:
           ansible_host: [PVE02_IP]
           ansible_user: root
           host_metrics_name: bedroom2-host-server_k12_1
 ```
 {: file="inventory.yml (proxmox 그룹 부분)" }
-
-`host_metrics_gpu_ppt_scale` 은 amdgpu 가 알리는 PPT 를 W 로 바꾸는 배율입니다. 커널 문서의 단위는 µW 지만 610M(Granite Ridge)은 1 W 단위의 mW 로 나와 따로 줍니다. 새 서버는 GPU 에 부하를 걸고 `power1_input` 이 RAPL 패키지 전력과 함께 움직이는 크기인지 보고 정합니다.
 
 - **확인:** `ansible-inventory --host pve01` 에 `host_metrics_name` 과 `host_metrics_broker` 가 보이고, 브로커는 `[EDGE_SERVICE_VIP]:1883` 으로 풀립니다.
 
@@ -98,18 +94,18 @@ host_metrics_gpu_ppt_scale: 0.000001          # amdgpu PPT(power1_average, 없�
 | 파일 | 하는 일 |
 | :--- | :--- |
 | `templates/host-metrics/telegraf.conf.j2` | 입력(cpu, system, mem, swap, disk, diskio, temp, smart, exec) → starlark 로 부품별 대표 필드 → merge 로 10초에 메시지 하나 → MQTT |
-| `templates/host-metrics/host-sysfs.sh.j2` | 기본 입력이 못 읽는 값: 코어 클럭 평균, RAPL 누적 에너지, iGPU 사용률·VRAM·PPT |
+| `templates/host-metrics/host-sysfs.sh.j2` | 기본 입력이 못 읽는 값: 코어 클럭 평균, RAPL 누적 에너지, iGPU 사용률·메모리(VRAM+GTT) |
 | `scripts/host-metrics-discovery.py` | 실제 메시지를 받아 필드마다 Home Assistant 발견 설정을 맞추고, 없어진 필드의 센서는 지웁니다 |
 | `playbooks/host-metrics.yml` | 설치, 권한, 설정 배포, 발견 설정 |
 
-필드 이름은 `<부품>_<값>` 이고 뜻마다 이름 하나만 씁니다. 값은 `usage`(활동률 %), `used_percent`(용량 사용률 %), `total`(용량 B), `power`(W), `clock`(MHz), `temp`(°C) 입니다.
+필드 이름은 `<부품>_<값>` 이고 뜻마다 이름 하나만 씁니다. 값은 `usage`(활동률 %), `used_percent`(용량 사용률 %), `used`·`total`(사용량·용량 B), `power`(W), `clock`(MHz), `temp`(°C), `load`(1분 부하 평균, 단위 없음) 입니다. `cpu_load` 를 `cpu_cores` 로 나누면 CPU 사용률이 100% 에 닿은 뒤에도 코어 수 대비 몇 배로 밀렸는지 봅니다.
 목적이 발열·소비전력이라 부품마다 대표값 하나씩만 보내고, 같은 것을 여러 번 재는 값은 뺍니다. 예를 들어 Ryzen 은 k10temp 가 칩 전체의 제어 온도(Tctl)와 코어 다이별 온도(Tccd1·Tccd2)를 따로 알려 주는데, 팬·부스트가 기준으로 삼는 Tctl 만 씁니다. NVMe 도 센서가 세 개지만 대표값(Composite)만 씁니다.
 메모리 모듈이나 디스크처럼 장치가 여럿인 값은 가장 높은 값 하나로 묶어 호스트끼리 같은 이름으로 비교합니다.
 
 | 부품 | 필드 | 내용 |
 | :--- | :--- | :--- |
-| CPU | `cpu_usage`, `cpu_power`, `cpu_clock`, `cpu_temp` | 사용률, RAPL 패키지 전력, 코어 클럭 평균, k10temp Tctl |
-| GPU | `gpu_usage`, `gpu_power`, `gpu_temp`, `gpu_mem_used_percent` | 사용률, PPT, amdgpu edge 온도, VRAM 사용률 |
+| CPU | `cpu_usage`, `cpu_load`, `cpu_power`, `cpu_clock`, `cpu_temp` | 사용률, 1분 부하 평균, RAPL 패키지 전력(iGPU 포함), 코어 클럭 평균, k10temp Tctl |
+| GPU | `gpu_usage`, `gpu_temp`, `gpu_mem_used` | 사용률, amdgpu edge 온도, VRAM+GTT 사용량(B) |
 | 메모리 | `mem_used_percent`, `mem_temp`, `swap_used_percent` | 사용률, DIMM 온도(최대), 스왑 사용률 |
 | 디스크 | `disk_used_percent`, `disk_usage`, `disk_temp` | 호스트 `/` 사용률, IO 사용 시간(최대), NVMe 온도(최대) |
 | 시스템 | `system_uptime` | 가동 시간(초). 값이 줄면 재부팅입니다 |
@@ -118,8 +114,12 @@ host_metrics_gpu_ppt_scale: 0.000001          # amdgpu PPT(power1_average, 없�
 
 | 필드 | 내용 |
 | :--- | :--- |
-| `cpu_threads`, `mem_total`, `disk_total` | 사양. CPU 모델·메모리 구성 같은 원문은 DB 의 제품 표(`appliance_specs`)가 맡습니다 |
+| `cpu_cores`, `cpu_threads`, `mem_total`, `disk_total` | 사양(물리 코어, 논리 프로세서, 메모리·디스크 용량). CPU 모델·메모리 구성 같은 원문은 DB 의 제품 표(`appliance_specs`)가 맡습니다 |
 | `disk_wear_percent`, `disk_health_ok` | NVMe 수명 사용률과 SMART 상태(정상 1) |
+
+GPU 전력은 수집하지 않습니다. amdgpu 가 알리는 값을 610M 에 추론을 걸어 확인해 보니 GPU 부하를 따라가지 않았습니다. hwmon 의 PPT 는 780M 에서는 패키지 전체(`cpu_power` 와 같은 값)였고, 610M 에서는 GPU 가 놀고 CPU 가 바쁠 때가 GPU 100% 일 때보다 두 배 높았습니다. 표 형태로 여러 전력을 알리는 `gpu_metrics` 의 `average_gfx_power` 는 두 칩 모두 GPU 활동과 무관하게 수천~6만 사이를 널뛰었습니다. iGPU 전력은 RAPL 패키지 전력(`cpu_power`)에 포함되므로, GPU 활동은 `gpu_usage` 로 보고 전력은 `cpu_power` 와 플러그의 벽 전력으로 봅니다.
+
+`gpu_mem_used` 는 BIOS 가 떼어 둔 VRAM(pve01 2GiB, pve02 512MiB)과 시스템 RAM 을 빌려 쓰는 GTT 를 합한 값입니다. iGPU 로 모델을 올리면 큰 쪽은 GTT 입니다(610M 추론 때 VRAM 2.1GB, GTT 3.4GB).
 
 <details markdown="1">
 <summary>templates/host-metrics/telegraf.conf.j2 전문</summary>
@@ -128,11 +128,12 @@ host_metrics_gpu_ppt_scale: 0.000001          # amdgpu PPT(power1_average, 없�
 ```toml
 # 호스트 Telegraf. proxmox-ansible playbooks/host-metrics.yml 이 templates/host-metrics/telegraf.conf.j2 에서 만듭니다(여기서 고치지 않습니다).
 # 호스트 전체(VM·CT 합)의 대표값을 10초마다 모아 JSON 메시지 하나로 hosts/{{ host_metrics_name }} 에 발행합니다.
-#   {"name": "host", "fields": {"cpu_usage": 3.9, "cpu_power": 29.9, "cpu_temp": 55.9, ...}, "tags": {}, "timestamp": <ms>}
+#   {"name": "host", "fields": {"cpu_usage": 3.9, "cpu_load": 2.4, "cpu_power": 29.9, "cpu_temp": 55.9, ...}, "tags": {}, "timestamp": <ms>}
 # 목적은 발열·소비전력 분석과 서버 상태 파악이라 부품마다 대표값 하나씩만 냅니다(필드 이름 <부품>_<값>).
 # 같은 것을 여러 번 재는 값(코어 다이별 온도, NVMe 보조 센서, 코어 전력 등)은 내지 않고, 장치가 여럿인 값(DIMM 온도, 디스크)은 가장 높은 값으로 묶습니다.
 # 거의 바뀌지 않는 값(사양·수명)은 바뀔 때와 1시간마다 한 번만 냅니다.
 # Home Assistant 센서는 host-metrics-discovery.py 가 이 필드들로 만들고, 엣지 Telegraf 가 같은 토픽을 받아 DB readings 에 넣습니다.
+# 필드 목록을 바꾸면 scripts/host-metrics-discovery.py 의 SENSORS·SLOW_FIELDS 와 엣지 Telegraf 의 HOST_UNITS(k8s-gitops iot/edge/telegraf)도 맞춥니다.
 [agent]
   interval = "10s"
   round_interval = true
@@ -148,7 +149,7 @@ host_metrics_gpu_ppt_scale: 0.000001          # amdgpu PPT(power1_average, 없�
   totalcpu = true
   report_active = true                # usage_active = 100 - idle
 
-[[inputs.system]]                     # 논리 코어 수, 가동 시간
+[[inputs.system]]                     # 1분 부하 평균, 물리·논리 코어 수, 가동 시간
 
 [[inputs.mem]]
 
@@ -169,7 +170,7 @@ host_metrics_gpu_ppt_scale: 0.000001          # amdgpu PPT(power1_average, 없�
   use_sudo = true
 
 [[inputs.exec]]
-  commands = [["/usr/local/lib/telegraf-host-sysfs.sh"]]   # CPU 클럭, RAPL 전력, iGPU (templates/host-metrics/host-sysfs.sh.j2)
+  commands = [["/usr/local/lib/telegraf-host-sysfs.sh"]]   # CPU 클럭, RAPL 전력, iGPU 사용률·메모리 (templates/host-metrics/host-sysfs.sh.j2)
   data_format = "influx"
   timeout = "5s"
 
@@ -182,7 +183,7 @@ SLOW_PERIOD = 3600 * 1000 * 1000 * 1000   # 사양·수명은 바뀔 때와 이 
 TEMPS = {"k10temp_tctl": "cpu_temp", "amdgpu_edge": "gpu_temp", "spd5118": "mem_temp", "nvme_composite": "disk_temp"}
 MAX_FIELDS = ["mem_temp", "disk_temp", "disk_usage", "disk_wear_percent"]   # 장치가 여럿이면 가장 높은 값
 MIN_FIELDS = ["disk_health_ok"]                                            # 하나라도 이상하면 0
-SLOW_FIELDS = ["cpu_threads", "mem_total", "disk_total", "disk_wear_percent", "disk_health_ok"]
+SLOW_FIELDS = ["cpu_cores", "cpu_threads", "mem_total", "disk_total", "disk_wear_percent", "disk_health_ok"]
 
 def rate(key, value, t, wrap=0):
     # 누적값 → 초당 값. 첫 값이거나 카운터가 줄었으면(재부팅) 비웁니다. wrap 은 되돌아가는 상한(RAPL)
@@ -224,7 +225,9 @@ def fields_of(metric):
     if n == "cpu":
         out["cpu_usage"] = f.get("usage_active")
     elif n == "system":
+        out["cpu_load"] = f.get("load1")
         out["system_uptime"] = f.get("uptime")
+        out["cpu_cores"] = f.get("n_physical_cpus")
         out["cpu_threads"] = f.get("n_cpus")
     elif n == "mem":
         out["mem_used_percent"] = f.get("used_percent")
@@ -250,13 +253,11 @@ def fields_of(metric):
         if ok != None:
             out["disk_health_ok"] = 1.0 if ok else 0.0
     elif n == "sysfs":
-        for k in ("cpu_clock", "gpu_usage", "gpu_power"):
+        for k in ("cpu_clock", "gpu_usage", "gpu_mem_used"):
             out[k] = f.get(k)
         if "rapl_energy_uj" in f:
             w = rate("rapl", f["rapl_energy_uj"], t, f.get("rapl_max_uj", 0))
             out["cpu_power"] = w / 1e6 if w != None else None
-        if f.get("gpu_vram_total", 0) > 0 and "gpu_vram_used" in f:
-            out["gpu_mem_used_percent"] = 100.0 * f["gpu_vram_used"] / f["gpu_vram_total"]
     return out
 
 def apply(metric):
@@ -308,11 +309,10 @@ def apply(metric):
 # Telegraf 기본 입력이 읽지 못하는 호스트 값을 InfluxDB line protocol 한 줄(측정값 sysfs)로 냅니다. inputs.exec 가 10초마다 부릅니다.
 # proxmox-ansible templates/host-metrics/host-sysfs.sh.j2 에서 만듭니다.
 #   CPU 클럭: 코어별 현재 클럭의 평균(MHz)
-#   RAPL: 패키지 누적 에너지(µJ)와 되돌아가는 상한. 초당 값(W)은 Telegraf starlark 가 이전 값과의 차로 구합니다
-#   iGPU: 사용률, VRAM 전체·사용(바이트. starlark 가 사용률로 바꿉니다), PPT(W)
-#     PPT 는 amdgpu hwmon power1 입니다. 커널 문서의 단위는 µW 지만 칩마다 다르게 나와 호스트 변수 host_metrics_gpu_ppt_scale 로 W 로 바꿉니다
-#     (pve02 780M 은 µW 이고 SoC 전체라 power1_average 가 RAPL 패키지와 거의 같습니다. pve01 610M(Granite Ridge)은 power1_input 만 있고
-#     1 W 단위 mW 로 나오며 GPU 부하에 따라 움직입니다. 2026-09-28 GPU 부하·RAPL·벽 전력과 비교해 확인)
+#   RAPL: 패키지 누적 에너지(µJ)와 되돌아가는 상한. 초당 값(W)은 Telegraf starlark 가 이전 값과의 차로 구합니다. iGPU 전력도 여기 포함됩니다
+#   iGPU: 사용률, 메모리 사용량(바이트) = VRAM(BIOS 가 떼어 둔 몫) + GTT(시스템 RAM 을 빌려 쓴 몫). iGPU 로 추론하면 큰 쪽은 GTT 입니다
+# GPU 전력은 읽지 않습니다. amdgpu hwmon 의 PPT 는 780M 에서는 패키지 전체, 610M 에서는 GPU 부하와 무관하게 패키지 전력을 따라갔고,
+# gpu_metrics 의 average_gfx_power 는 두 칩 모두 GPU 활동과 무관하게 널뛰었습니다(2026-09-28 610M 추론으로 확인).
 # RAPL energy_uj 는 root 만 읽을 수 있어 telegraf 서비스에 CAP_DAC_READ_SEARCH 를 줍니다(systemd 드롭인).
 fields=()
 add() { [[ -n $2 ]] && fields+=("$1=$2"); }
@@ -330,12 +330,8 @@ fi
 gpu=/sys/class/drm/{{ host_metrics_drm_card }}/device
 if [[ -d $gpu ]]; then
   add gpu_usage "$(val "$gpu/gpu_busy_percent")"
-  add gpu_vram_total "$(val "$gpu/mem_info_vram_total")"
-  add gpu_vram_used "$(val "$gpu/mem_info_vram_used")"
-  for hw in "$gpu"/hwmon/hwmon*; do                    # hwmon 번호는 부팅마다 바뀔 수 있어 카드 아래에서 찾습니다
-    ppt=$(val "$hw/power1_average"); [[ -n $ppt ]] || ppt=$(val "$hw/power1_input")   # average 가 있으면(780M) 그것을. input 은 순간값이라 크게 튑니다
-    [[ -n $ppt ]] && add gpu_power "$(awk -v v="$ppt" 'BEGIN { printf "%.3f", v * {{ host_metrics_gpu_ppt_scale }} }')"
-  done
+  vram=$(val "$gpu/mem_info_vram_used"); gtt=$(val "$gpu/mem_info_gtt_used")
+  [[ -n $vram && -n $gtt ]] && add gpu_mem_used "$((vram + gtt))"
 fi
 
 (IFS=,; echo "sysfs ${fields[*]}")
@@ -389,6 +385,7 @@ EXPIRE_AFTER = 60  # 초. 호스트나 Telegraf 가 멈추면 센서가 unavaila
 
 # 호스트가 바뀔 때와 1시간마다 한 번만 내는 값(사양·수명). expire_after 를 두지 않고, 창 안에 없어도 설정을 지우지 않는다
 SLOW_FIELDS = (
+    "cpu_cores",
     "cpu_threads",
     "mem_total",
     "disk_total",
@@ -413,16 +410,17 @@ CELSIUS = {
 MHZ = {"unit_of_measurement": "MHz", "device_class": "frequency"}
 DIAG = {"entity_category": "diagnostic"}
 
-# 필드 → (이름, 속성). 필드 이름은 <부품>_<값> 이고 부품마다 대표값 하나씩이라 규칙 대신 표로 둔다
+# 필드 → (이름, 속성). 필드 이름은 <부품>_<값> 이고 부품마다 대표값 하나씩이라 규칙 대신 표로 둔다.
+# 단위는 엣지 Telegraf 의 HOST_UNITS(k8s-gitops iot/edge/telegraf, 필드 이름 끝으로 정하는 예비 단위)와 같아야 한다
 SENSORS = {
     "cpu_usage": ("CPU 사용률", PERCENT),
+    "cpu_load": ("CPU 부하 평균", {"suggested_display_precision": 2}),
     "cpu_power": ("CPU 전력", WATT),
     "cpu_clock": ("CPU 클럭", MHZ),
     "cpu_temp": ("CPU 온도", CELSIUS),
     "gpu_usage": ("GPU 사용률", PERCENT),
-    "gpu_power": ("GPU 전력", WATT),
     "gpu_temp": ("GPU 온도", CELSIUS),
-    "gpu_mem_used_percent": ("GPU 메모리 사용률", PERCENT),
+    "gpu_mem_used": ("GPU 메모리 사용량", BYTES),
     "mem_used_percent": ("메모리 사용률", PERCENT),
     "mem_temp": ("메모리 온도", CELSIUS),
     "swap_used_percent": ("스왑 사용률", PERCENT),
@@ -433,6 +431,7 @@ SENSORS = {
         "가동 시간",
         {"unit_of_measurement": "s", "device_class": "duration"} | DIAG,
     ),
+    "cpu_cores": ("CPU 코어 수", DIAG),
     "cpu_threads": ("CPU 스레드 수", DIAG),
     "mem_total": ("메모리 용량", BYTES | DIAG),
     "disk_total": ("디스크 용량", BYTES | DIAG),
@@ -842,7 +841,7 @@ ansible-playbook playbooks/host-metrics.yml --limit pve01
 ansible-playbook playbooks/host-metrics.yml
 ```
 
-- **확인:** `PLAY RECAP` 에 `failed=0` 이고, 같은 명령을 한 번 더 실행하면 `changed=0` 입니다. 브로커에서 메시지를 하나 받아 보면 필드가 15개입니다.
+- **확인:** `PLAY RECAP` 에 `failed=0` 이고, 같은 명령을 한 번 더 실행하면 `changed=0` 입니다. 브로커에서 메시지를 하나 받아 보면 필드가 15개입니다(Telegraf 가 시작한 직후 한 번과 1시간마다는 사양·수명 6개가 더 붙습니다).
 
 ```bash
 # 허브 control plane. E 는 엣지 kubeconfig, PW 는 telegraf 계정 비밀번호
@@ -852,7 +851,7 @@ kubectl $E -n mosquitto exec deploy/mosquitto -- mosquitto_sub -u telegraf -P "$
 ```
 
 ```text
-hosts/bedroom2-host-server_ms_a2_1 {"fields":{"cpu_clock":4202,"cpu_power":66.5,"cpu_temp":89.5,"cpu_usage":27.3,"disk_temp":54.85,"disk_usage":1.1,"disk_used_percent":14.57,"gpu_mem_used_percent":0.77,"gpu_power":14,"gpu_temp":76,"gpu_usage":0,"mem_temp":57.25,"mem_used_percent":68.84,"swap_used_percent":5.83,"system_uptime":1358761},"name":"host","tags":{},"timestamp":1790600700000}
+hosts/bedroom2-host-server_ms_a2_1 {"fields":{"cpu_clock":4202,"cpu_load":14.56,"cpu_power":83.1,"cpu_temp":89.5,"cpu_usage":47.3,"disk_temp":54.85,"disk_usage":1.1,"disk_used_percent":14.57,"gpu_mem_used":5574176768,"gpu_temp":76,"gpu_usage":0,"mem_temp":57.25,"mem_used_percent":68.84,"swap_used_percent":5.83,"system_uptime":1358761},"name":"host","tags":{},"timestamp":1790605100000}
 ```
 
 ## 5. Home Assistant 영역 배정
@@ -871,7 +870,7 @@ $K exec -i deploy/home-assistant -c home-assistant -- env HA_TOKEN="$T" python3 
 
 ## 6. 엣지 Telegraf 에 호스트 입력 추가
 
-엣지 Telegraf 에 입력 두 개를 추가합니다. 첫 입력이 `hosts/+` 의 `fields` 를 필드별 행으로 받고, 둘째 입력이 호스트의 발견 설정을 받아 단위(`unit_of_measurement`)와 제조사·모델·실물 ID(`serial_number` → `hw_id`)를 [Telegraf 글](/posts/43/)의 공통 starlark 에 기억시킵니다. starlark 는 `origin` 이 `host-metrics` 인 발견 설정만 쓰므로 Zigbee2MQTT 의 발견 설정은 무시합니다.
+엣지 Telegraf 에 입력 두 개를 추가합니다. 첫 입력이 `hosts/+` 의 `fields` 를 필드별 행으로 받고, 둘째 입력이 호스트의 발견 설정을 받아 단위(`unit_of_measurement`)와 제조사·모델·실물 ID(`serial_number` → `hw_id`)를 [Telegraf 글](/posts/43/)의 공통 starlark 에 기억시킵니다. starlark 는 `origin` 이 `host-metrics` 인 발견 설정만 쓰므로 Zigbee2MQTT 의 발견 설정은 무시합니다. 발견 설정이 아직 오지 않았을 때(새 필드가 생긴 직후, Telegraf 재시작 직후)는 필드 이름 끝으로 단위를 정해(`HOST_UNITS`) 단위가 빈 행이 생기지 않게 합니다. 이 규칙은 발견 스크립트의 `SENSORS` 표와 같은 값이어야 합니다.
 
 ```toml
 # 서버·PC 자체가 잰 값(CPU·메모리·디스크·네트워크·온도·전력·GPU). 호스트의 Telegraf 가 10초마다 hosts/<기기> 에 JSON 하나로 냅니다
@@ -943,7 +942,7 @@ git commit -m "feat(iot): 서버·PC 호스트 값(hosts/+)을 readings 에 기�
 git push
 ```
 
-- **확인:** Argo CD 의 `[SITE]-telegraf` 가 Synced·Healthy 가 된 뒤 20초쯤 지나면 두 DB 에 호스트 행이 보입니다. 단위가 빈 행은 개수·상태처럼 원래 단위가 없는 값(`cpu_threads`, `disk_health_ok`)뿐이고, `hw_id` 에는 메인보드 시리얼이 들어갑니다. Grafana `IoT 기록` 대시보드에는 속성마다 패널이 자동으로 생깁니다.
+- **확인:** Argo CD 의 `[SITE]-telegraf` 가 Synced·Healthy 가 된 뒤 20초쯤 지나면 두 DB 에 호스트 행이 보입니다. 단위가 빈 행은 개수·상태처럼 원래 단위가 없는 값(`cpu_load`, `cpu_cores`, `cpu_threads`, `disk_health_ok`)뿐이고, `hw_id` 에는 메인보드 시리얼이 들어갑니다. Grafana `IoT 기록` 대시보드에는 속성마다 패널이 자동으로 생깁니다.
 
 ```sql
 select anchor, count(distinct property) as props, max(time) as last, min(hw_id) as hw_id,
@@ -998,9 +997,6 @@ FROM plug p JOIN env e USING (t)
 GROUP BY p.t ORDER BY p.t;
 ```
 
-> `gpu_power` 는 amdgpu 가 알리는 PPT 라 칩마다 뜻이 다릅니다. 780M 은 SoC 전체 전력이라 `cpu_power`(RAPL 패키지)와 거의 같고, 610M(Granite Ridge)은 1 W 단위로 GPU 부하를 따라 움직입니다. 서버끼리 비교할 때는 플러그의 벽 전력과 `cpu_power` 를 씁니다.
-{: .prompt-warning }
-
 - **확인:** 첫 쿼리에서 호스트 값이 들어온 뒤의 분마다 `wall_w` 와 `cpu_pct` 가 함께 채워집니다. 창문·문 센서는 상태가 바뀔 때만 보고하므로 세 번째 쿼리의 `window_open_pct` 는 보고가 없던 시간에 비어 있습니다(직전 값이 이어진 것으로 봅니다).
 
 ## 트러블슈팅
@@ -1030,16 +1026,16 @@ E! [agent] Failed to connect to [outputs.mqtt], retrying in 15s, error was "netw
 </details>
 
 <details markdown="1">
-<summary><code>gpu_power</code> 가 벽 전력보다 크거나 0.01 W 처럼 작게 나옴</summary>
+<summary>amdgpu 가 알리는 GPU 전력이 GPU 부하를 따라가지 않음</summary>
 
-- **원인:** amdgpu 의 `power1_input` 은 칩마다 단위와 뜻이 다릅니다. 780M 의 `power1_input` 은 순간값이라 18~37 W 로 튀었고(같은 때 `power1_average` 와 RAPL 은 약 16 W), 610M 은 µW 로 읽으면 0.012 W 였습니다.
-- **해결:** `power1_average` 가 있으면 그것을 쓰고, 없으면 `power1_input` 에 호스트별 배율(`host_metrics_gpu_ppt_scale`)을 곱합니다.
+- **원인:** hwmon `power1_input`·`power1_average` 의 PPT 는 칩마다 재는 범위가 다릅니다. 780M 은 패키지 전체라 RAPL 과 같은 값(약 16 W)이었고, 610M 은 GPU 100% 일 때 12 W, GPU 가 놀고 CPU 가 바쁠 때 25 W 로 패키지 전력을 따라갔습니다. `gpu_metrics`(v2.1)의 `average_gfx_power` 는 두 칩 모두 GPU 활동과 무관하게 널뛰었고 `average_cpu_power` 는 미지원(65535)이었습니다.
+- **해결:** GPU 전력을 수집하지 않습니다. iGPU 전력은 `cpu_power`(RAPL 패키지)에 포함되어 있습니다.
 
 </details>
 
 ## 마무리
 
-Proxmox 노드마다 호스트 전체의 부하·온도·전력이 10초마다 Home Assistant 센서와 지역·허브 DB 의 `readings` 에 들어오고, 전력 플러그와 같은 `anchor` 로 부하와 벽 전력을 맞춰 볼 수 있습니다. 디스크·인터페이스가 다른 서버는 인벤토리에서 `host_metrics_*` 를 덮어쓰고 플레이북을 다시 실행하면, 발견 설정이 새 필드에 맞춰 센서를 더하거나 지웁니다.
+Proxmox 노드마다 호스트 전체의 부하·온도·전력이 10초마다 Home Assistant 센서와 지역·허브 DB 의 `readings` 에 들어오고, 전력 플러그와 같은 `anchor` 로 부하와 벽 전력을 맞춰 볼 수 있습니다. 마운트·디스크가 다른 서버는 인벤토리에서 `host_metrics_*` 를 덮어쓰고 플레이북을 다시 실행하면, 발견 설정이 새 필드에 맞춰 센서를 더하거나 지웁니다.
 
 ## 참고 자료
 
