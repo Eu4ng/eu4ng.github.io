@@ -137,7 +137,8 @@ spec:
             # 배터리 기기는 잠들어 ping 에 답하지 못하므로 active 방식을 쓸 수 없고, 제한 시간 동안 메시지가 없으면 offline 으로 봅니다(passive).
             - { name: ZIGBEE2MQTT_CONFIG_AVAILABILITY_ENABLED, value: "true" }
             - { name: ZIGBEE2MQTT_CONFIG_AVAILABILITY_PASSIVE_TIMEOUT, value: "60" }   # 분. 기본 1500. 온습도계가 값이 안 바뀌면 30분까지 조용하므로 그 두 배
-            # 생존 신호 간격이 이보다 긴 기기(문·창문 센서는 상태가 안 바뀌면 약 3시간마다 배터리만 보냄)는 기기별 availability.timeout 을 줍니다.
+            # 생존 신호 간격이 이보다 긴 기기는 기기별 availability.timeout 을 가장 긴 간격의 약 두 배로 줍니다. 문·창문 센서는 상태가 안 바뀌면
+            # 배터리만 보내는데 그 간격이 문 약 4시간 8분·창문 약 3시간이라 둘 다 500분입니다(240분이던 때 문 센서가 매 주기 7분쯤 offline 이 됐음).
             # 기기별 값은 PVC 의 configuration.yaml(devices)에 저장되므로 bridge/request/device/options 요청이나 프런트엔드로 바꿉니다
             # 모든 기기의 기본 옵션입니다. 기기별로 같은 키를 주면 이 값이 가려집니다.
             #   qos 1: 기본 0 이면 Telegraf 가 QoS1 로 구독해도 전달이 QoS0 이 되어, Telegraf 가 내려간 동안 브로커가 메시지를 보관하지 않고 버립니다
@@ -267,17 +268,17 @@ kubectl $E -n mosquitto run mq-sub --rm -i -q --restart=Never --image=eclipse-mo
   --command -- mosquitto_sub -h mosquitto -u telegraf -P "$PW" -t 'zigbee2mqtt/+' -v
 ```
 
-배터리 기기는 값이 바뀔 때와 주기적인 생존 신호(배터리·링크 품질 보고) 때만 메시지를 보내고, 제한 시간(`availability.passive.timeout`, 여기서는 60분) 동안 아무 메시지도 없으면 `offline` 이 됩니다. 문 열림 센서는 문을 계속 열어 두거나 닫아 두면 3시간쯤마다 생존 신호만 보내므로 60분 제한에서는 멀쩡해도 `offline` 으로 표시됩니다. 이런 기기는 기기별 제한 시간을 생존 신호 간격보다 길게 줍니다. 값은 PVC 의 `configuration.yaml` 에 저장되어 재시작해도 유지됩니다.
+배터리 기기는 값이 바뀔 때와 주기적인 생존 신호(배터리·링크 품질 보고) 때만 메시지를 보내고, 제한 시간(`availability.passive.timeout`, 여기서는 60분) 동안 아무 메시지도 없으면 `offline` 이 됩니다. 문·창문 센서는 상태가 바뀌지 않으면 생존 신호(배터리 보고)만 보내는데, 그 간격이 문 센서는 약 4시간 8분, 창문 센서는 약 3시간이라 60분 제한에서는 멀쩡해도 `offline` 으로 표시됩니다. 이런 기기는 기기별 제한 시간을 가장 긴 생존 신호 간격의 약 두 배로 줍니다. 여기서는 둘 다 500분입니다(240분으로 두었을 때 문 센서가 주기마다 7분쯤 `offline` 이 되었습니다). 값은 PVC 의 `configuration.yaml` 에 저장되어 재시작해도 유지됩니다.
 
 ```bash
-# control plane: 문 열림 센서의 연결 상태 제한 시간을 240분으로 (기기마다 반복)
+# control plane: 문·창문 센서의 연결 상태 제한 시간을 500분으로 (기기마다 반복)
 kubectl $E -n mosquitto run mq-opt --rm -i -q --restart=Never --image=eclipse-mosquitto:2.0.22 --env="PW=$PW" \
   --command -- mosquitto_pub -h mosquitto -u telegraf -P "$PW" -t zigbee2mqtt/bridge/request/device/options \
-  -m '{"id": "[기기 이름]", "options": {"availability": {"timeout": 240}}}'
+  -m '{"id": "[기기 이름]", "options": {"availability": {"timeout": 500}}}'
 kubectl $E -n zigbee2mqtt exec deploy/zigbee2mqtt -c zigbee2mqtt -- sed -n '/^devices:/,/^[a-z]/p' /app/data/configuration.yaml
 ```
 
-- **확인:** `configuration.yaml` 의 `devices:` 아래 그 기기 항목에 `availability:` `timeout: 240` 이 보입니다. 브로커의 `zigbee2mqtt/[기기 이름]/availability` 는 `{"state":"online"}` 이고, 생존 신호 간격보다 오래 조용해도 `offline` 으로 바뀌지 않습니다.
+- **확인:** `configuration.yaml` 의 `devices:` 아래 그 기기 항목에 `availability:` `timeout: 500` 이 보입니다. 브로커의 `zigbee2mqtt/[기기 이름]/availability` 는 `{"state":"online"}` 이고, 생존 신호 간격보다 오래 조용해도 `offline` 으로 바뀌지 않습니다.
 
 ## 5. 허브 DB 에서 확인
 
