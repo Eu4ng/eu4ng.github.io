@@ -1,13 +1,13 @@
 ---
 layout: post
 title: ipTIME C500GS 로컬 NVR 구축하고 전수 감지로 재실자 데이터 수집하는 방법
-description: 외부 인터넷을 차단한 ipTIME C500GS 카메라로 엣지 쿠버네티스에서 무인코딩 녹화, YOLOv8 추적 검수 영상, Home Assistant 재실자 센서를 만드는 방법을 정리했습니다.
+description: 외부 인터넷을 차단한 ipTIME C500GS 카메라로 엣지 쿠버네티스에서 무인코딩 녹화, YOLOv8 추적 측정 영상과 사후 검수, Home Assistant 재실자 센서를 만드는 방법을 정리했습니다.
 author: Eu4ng
 tags: [iot, nvr, kubernetes, computer-vision, home-assistant, mqtt, timescaledb, argo-cd, gitops]
 permalink: /posts/76/
 ---
 
-ipTIME C500GS IP 카메라를 공유기 방화벽으로 외부 인터넷과 완전히 차단한 상태에서 로컬 [NVR](/posts/79/)을 구축하고, 영상에서 재실자 수·위치·속도를 뽑아 호스트 센서와 같은 방식의 MQTT 센서로 Home Assistant 와 TimescaleDB 에 넣습니다. 움직임이 있을 때만 동작하는 모션 기반 감지기(Frigate 등)와 달리 초당 10프레임을 움직임과 무관하게 추적하므로, 잠든 사람처럼 오래 움직이지 않는 재실자도 놓치지 않습니다. 추적 결과는 초록 박스를 그린 검수 영상으로도 남겨 알고리즘이 제대로 동작하는지 눈으로 확인합니다.
+ipTIME C500GS IP 카메라를 공유기 방화벽으로 외부 인터넷과 완전히 차단한 상태에서 로컬 [NVR](/posts/79/)을 구축하고, 영상에서 재실자 수·위치·속도를 뽑아 호스트 센서와 같은 방식의 MQTT 센서로 Home Assistant 와 TimescaleDB 에 넣습니다. 움직임이 있을 때만 동작하는 모션 기반 감지기(Frigate 등)와 달리 초당 10프레임을 움직임과 무관하게 추적하므로, 잠든 사람처럼 오래 움직이지 않는 재실자도 놓치지 않습니다. 추적 결과는 초록 박스를 그린 실시간 측정 영상으로 남기고, 자정 뒤에는 하루치 원본의 모든 프레임을 더 큰 모델로 다시 추적해 실시간 값과 다른 구간만 검수 클립으로 남깁니다.
 
 1. 카메라 네트워크 차단 및 RTSP 설정
 2. 워커 노드 NVR 전용 디스크 마운트
@@ -120,7 +120,7 @@ ssh ubuntu@kubectl-hub.eu4ng.com "kubectl --kubeconfig ~/k8s-daejeon.yaml -n nvr
 
 ## 4. NVR Secret 생성
 
-카메라 RTSP 비밀번호, MQTT 인증 비밀번호, 서울 NAS rsync용 SSH 키를 담은 Secret을 엣지 클러스터 `nvr` 네임스페이스에 생성합니다. 수집기는 DB 에 직접 쓰지 않으므로 DB 비밀번호는 넣지 않습니다.
+카메라 RTSP 비밀번호, MQTT 인증 비밀번호, 서울 NAS 이관(SFTP)용 SSH 키, 사후 검수가 실시간 값을 읽을 DB 읽기 전용 계정 비밀번호를 담은 Secret을 엣지 클러스터 `nvr` 네임스페이스에 생성합니다. 수집기는 DB 에 직접 쓰지 않습니다.
 
 ```bash
 # 허브 control plane 에서 실행
@@ -133,13 +133,14 @@ bash assets/scripts/iot/create-nvr-secrets.sh ~/k8s-daejeon.yaml
 ```bash
 #!/usr/bin/env bash
 #
-# NVR(go2rtc, recorder, occupancy 수집기, archive)이 쓰는 Secret(nvr/nvr-credentials, nvr/backup-ssh)을 엣지 클러스터에 만듭니다.
+# NVR(go2rtc, recorder, occupancy 수집기, 일일 작업, 사후 검수)이 쓰는 Secret(nvr/nvr-credentials, nvr/backup-ssh, nvr/nvr-db)을 엣지 클러스터에 만듭니다.
 # GitOps 저장소에는 비밀 값을 넣지 않으므로 매니페스트를 push 하기 전에 실행합니다.
 # 허브에 kubectl 로 접근할 수 있고 엣지 kubeconfig 가 있는 곳(control plane)에서 실행합니다: bash create-nvr-secrets.sh [EDGE_KUBECONFIG]
 # 카메라 RTSP 비밀번호는 환경 변수 CAMERA_RTSP_PASSWORD 가 있으면 그것을, 없으면 실행 중에 입력받습니다.
 # MQTT 비밀번호는 환경 변수 MQTT_PASSWORD 가 있으면 그것을, 없으면 엣지 telegraf-credentials 에서 가져옵니다.
-# 수집기는 DB 에 직접 쓰지 않으므로(MQTT → Telegraf → readings) DB 비밀번호는 넣지 않습니다.
-# NAS rsync 용 SSH 키(backup-ssh)는 엣지 backup 네임스페이스에서 복사합니다.
+# 수집기는 DB 에 직접 쓰지 않습니다(MQTT → Telegraf → readings). 사후 검수는 실시간 재실자 수와 비교하려 DB 를 읽기만 하므로
+# 엣지 timescaledb-credentials 의 읽기 전용 계정(grafana) 비밀번호를 nvr/nvr-db 로 복사합니다.
+# NAS 이관(SFTP)용 SSH 키(backup-ssh)는 엣지 backup 네임스페이스에서 복사합니다.
 
 set -euo pipefail
 
@@ -147,6 +148,7 @@ set -euo pipefail
 NAMESPACE=nvr
 TELEGRAF_SECRET=telegraf/telegraf-credentials
 BACKUP_SECRET=backup/backup-ssh
+DB_SECRET=timescaledb/timescaledb-credentials
 # --------------------------------------
 
 log() { echo -e "\n\033[1;32m==>\033[0m $*"; }
@@ -200,12 +202,24 @@ else
     | kubectl "${EDGE[@]}" apply -f -
 fi
 
+# ---------- 4. nvr-db (사후 검수의 DB 읽기) ----------
+if kubectl "${EDGE[@]}" -n "$NAMESPACE" get secret nvr-db >/dev/null 2>&1; then
+  echo "  엣지 $NAMESPACE/nvr-db 있음, 건너뜀"
+else
+  log "엣지 $NAMESPACE/nvr-db 생성 (읽기 전용 계정 grafana)"
+  PGPASSWORD=$(kubectl "${EDGE[@]}" -n "${DB_SECRET%%/*}" get secret "${DB_SECRET##*/}" -o jsonpath='{.data.GRAFANA_PASSWORD}' | base64 -d)
+  [ -n "$PGPASSWORD" ] || die "엣지 ${DB_SECRET} 에서 GRAFANA_PASSWORD 를 찾지 못했습니다."
+  printf 'PGPASSWORD=%s\n' "$PGPASSWORD" \
+    | kubectl "${EDGE[@]}" -n "$NAMESPACE" create secret generic nvr-db --from-env-file=/dev/stdin
+  unset PGPASSWORD
+fi
+
 log "완료"
 ```
 {: file="assets/scripts/iot/create-nvr-secrets.sh" }
 </details>
 
-- **확인:** 엣지 클러스터 `nvr` 네임스페이스에 Secret 2개가 있는지 확인합니다.
+- **확인:** 엣지 클러스터 `nvr` 네임스페이스에 Secret `nvr-credentials`, `backup-ssh`, `nvr-db` 가 있는지 확인합니다.
 
 ```bash
 ssh ubuntu@kubectl-hub.eu4ng.com "kubectl --kubeconfig ~/k8s-daejeon.yaml -n nvr get secrets"
@@ -213,14 +227,23 @@ ssh ubuntu@kubectl-hub.eu4ng.com "kubectl --kubeconfig ~/k8s-daejeon.yaml -n nvr
 
 ## 5. NVR 서비스 및 수집기 GitOps 배포
 
+영상은 모두 날짜 폴더 `/mnt/nvr/<YYYYMMDD>/` 에 종류마다 MKV 로 둡니다. MKV 는 앞에서부터 차례로 쓰므로 쓰는 중인 파일도 VLC 로 볼 수 있고, 쓰던 프로그램이 죽어도 그때까지 쓴 부분이 남습니다.
+
+| 파일 | 내용 | 로컬 | 서울 NAS |
+| :--- | :--- | :--- | :--- |
+| `<날짜>_rec.mkv` | 5MP H.265 원본(무인코딩) | 7일 | 보내지 않음 |
+| `<날짜>_rec720.mkv` | 720p 10fps 사본 | 7일 | 365일 |
+| `<날짜>_live.mkv` | 실시간 측정 영상(초록 박스) | 7일 | 365일 |
+| `<날짜>_review.json`, `<날짜>_review_<시작>-<끝>.mkv` | 사후 검수 결과와 불일치 구간 클립 | 7일 | 365일 |
+
 NVR 파드는 한 파드 안에 세 가지 컨테이너가 협력하는 구조입니다:
 1. **`go2rtc`**: 카메라에 RTSP 세션을 딱 1개만 맺고, 로컬 `:8554`로 스트림을 분배합니다. 저가형 IP 카메라의 동시 연결 수 한계 문제를 원천 차단합니다.
-2. **`recorder`**: `ffmpeg`를 사용해 `rtsp://localhost:8554/main` 스트림을 재인코딩 없이 10분 단위 조각으로 저장합니다 (`/mnt/nvr/rec/%Y-%m-%d/%H-%M-%S.mp4`).
+2. **`recorder`**: `ffmpeg`를 사용해 `rtsp://localhost:8554/main` 스트림을 재인코딩 없이 날짜마다 MKV 하나로 저장합니다 (`/mnt/nvr/%Y%m%d/%Y%m%d_rec_%H%M%S.mkv`). `-segment_atclocktime` 이 컨테이너 로컬 시각(`TZ=Asia/Seoul`) 자정에 새 파일을 엽니다.
 3. **`occupancy`**: 주 스트림(5MP 20fps)을 PyAV 로 디코딩해 초당 10프레임을 1280x720 으로 받아 YOLOv8n + ByteTrack 으로 [추적](/posts/84/)합니다.
    - 사람마다 칸(`occupant1`, `occupant2` …)을 배정하고 1초마다 `nvr/bedroom2-camera`(감지 결과)와 `nvr/bedroom2-camera/derived`(방 좌표로 바꾼 값)에 `{"fields": {...}, "timestamp": <ms>}` 를 발행합니다. Home Assistant 발견 설정도 함께 내므로 HA 에 기기 `bedroom2-camera` 와 센서가 자동으로 생기고, 엣지 Telegraf 가 같은 토픽을 받아 `readings` 에 넣습니다.
    - 연결 상태는 `nvr/bedroom2-camera/availability` 에 유지 메시지(`{"state": "online"}`)로 냅니다. 발행을 시작하면 `online`, 카메라 프레임이 60초 동안 없거나 수집기가 멈추면 `offline` 이고, 수집기가 끊기면 브로커가 Last Will 로 `offline` 을 냅니다. HA 센서는 이 토픽을 따라 `사용할 수 없음` 이 되고, DB 에는 속성 `availability` 행으로 남습니다.
    - 칸은 동시에 감지된 최대 인원만큼 생기고, 사람이 없는 칸의 **감지** 센서는 `감지되지 않음` 이 됩니다.
-   - 추적한 프레임마다 초록 박스와 칸·추적 ID·신뢰도·좌표·시각을 그린 **검수 영상**을 `/mnt/nvr/review/<날짜>/` 에 10분 조각으로 저장합니다.
+   - 추적한 프레임마다 초록 박스와 칸·추적 ID·신뢰도·좌표·시각을 그린 **실시간 측정 영상**(`_live`)과, 같은 프레임을 그리기 전 그대로 담은 720p 사본(`_rec720`)을 날짜마다 MKV 로 씁니다. 카메라 주 스트림 해상도는 ONVIF 로 바꿀 수 없어 720p 는 수집기가 만듭니다.
 
 GitOps 저장소(`k8s-gitops`)의 `iot/edge/nvr/`에 베이스 매니페스트와 스크립트를 두고, `iot/clusters/daejeon/nvr/`에 오버레이를 둡니다.
 
@@ -254,7 +277,26 @@ streams:
 ```
 {: file="iot/edge/nvr/collector-settings.json" }
 
-매일 새벽 04:00에 실행되는 `nvr-daily-archive` CronJob 은 전일 10분 조각을 재인코딩 없이 녹화가 이어진 구간마다 하나로 합칩니다. 끊김 없는 날은 `00-00-00_24-00-00.mp4` 하나가 되고, 조각 사이가 5초 넘게 비면 그 자리에서 나뉘므로 파일 이름의 시각 사이가 녹화가 끊긴 구간입니다. 이미 합친 구간 파일도 다시 읽어 이어지는 조각과 합치므로, 녹화 중인 날을 `MERGE_ONLY=1` 로 미리 합쳐도 됩니다. 원본은 720p 로 바꿔, 검수 영상은 그대로 서울 NAS(`/volume3/nvr/daejeon/`, `/volume3/nvr/daejeon-review/`)로 보내고 로컬 30일/NAS 365일 초과분을 정리합니다.
+매일 00:05 에 실행되는 `nvr-daily-archive` CronJob 은 전날 파일이 닫히기를 기다린 뒤 종류마다 재인코딩 없이 하나로 합칩니다. 재시작 때문에 파일이 나뉜 날은 녹화가 이어진 구간마다 `<날짜>_<종류>_<시작>-<끝>.mkv` 로 합치므로 이름의 시각 사이가 녹화가 끊긴 구간입니다. 이어서 720p 사본과 실시간 측정 영상을 Tailscale 경유 서울 NAS(`/volume3/backup/nvr/daejeon/<날짜>/`)로 SFTP 로 보내고 로컬 7일, NAS 365일이 지난 날짜 폴더를 지웁니다. NAS 계정은 볼륨 최상위에 폴더를 만들 수 없으므로 기존 공유 폴더 아래에 두고, 시놀로지는 rsync 서비스를 켜지 않으면 rsync-over-ssh 를 거부하므로 SFTP 를 씁니다. SFTP 경로는 공유 폴더 기준(`/backup/nvr/daejeon`)입니다.
+
+`nvr-review` CronJob(매일 00:30)은 사후 검수입니다. 실시간 측정은 움직이는 사람은 잘 잡지만 오래 가만히 있는 사람에게 약하므로, 합친 5MP 원본의 **모든 프레임**을 더 큰 모델로 다시 추적해 초마다 인원을 내고 DB `readings` 의 실시간 `occupant_count` 와 비교합니다. 값이 다른 구간만 왼쪽에 실시간 측정 영상, 오른쪽에 검수 결과를 붙인 2560x720 클립으로 남기고, 일치율과 불일치 구간 목록을 `<날짜>_review.json` 에 씁니다. 마감 시간 없이 검수 안 된 가장 최근 날짜부터 처리하고, CPU 가 모자랄 때 실시간 수집이 먼저 받도록 검수 CronJob 의 CPU request 를 낮게 둡니다. 모델과 비교 기준은 `review-settings.json` 에서 바꿉니다.
+
+```json
+{
+  "model": "yolov8s.pt",
+  "imgsz": 640,
+  "device": "cpu",
+  "frame_step": 1,
+  "threads": 3,
+  "min_mismatch_s": 3,
+  "clip_margin_s": 5,
+  "clip_merge_gap_s": 10
+}
+```
+{: file="iot/edge/nvr/review-settings.json" }
+
+> 6 vCPU 워커의 CPU 로는 `yolov8s` 전 프레임 추적이 초당 약 5프레임이라 하루치(약 130만 프레임)에 사흘 넘게 걸립니다. 그래서 CronJob 을 `suspend: true` 로 배포하고, GPU 를 붙이거나 `frame_step`·모델을 정한 뒤 `false` 로 바꿔 켭니다.
+{: .prompt-warning }
 
 GitOps 저장소에 커밋하고 push하면 Argo CD `iot-edge` ApplicationSet이 새 폴더를 감지해 자동으로 `daejeon-nvr` 애플리케이션을 생성하고 엣지 클러스터에 배포합니다.
 
@@ -267,15 +309,15 @@ ssh ubuntu@kubectl-hub.eu4ng.com "kubectl --kubeconfig ~/k8s-daejeon.yaml -n nvr
 
 ## 6. 배포와 수집 확인
 
-배포가 끝나면 녹화, MQTT 센서, 검수 영상, 일일 합치기를 차례로 확인합니다.
+배포가 끝나면 녹화, MQTT 센서, 실시간 측정 영상, 일일 합치기, 사후 검수를 차례로 확인합니다.
 
-워커 노드의 `/mnt/nvr/rec/` 아래에 오늘 날짜 폴더가 생기고 10분 간격으로 H.265 원본 MP4 파일이 쌓이는지 봅니다.
+워커 노드의 `/mnt/nvr/` 아래에 오늘 날짜 폴더가 생기고 원본·720p 사본·실시간 측정 영상 MKV 가 커지는지 봅니다.
 
 ```bash
-ssh ubuntu@kubectl-hub.eu4ng.com "kubectl --kubeconfig ~/k8s-daejeon.yaml -n nvr exec deploy/nvr -c recorder -- ls -lh /mnt/nvr/rec/$(date +%Y-%m-%d)"
+ssh ubuntu@kubectl-hub.eu4ng.com "kubectl --kubeconfig ~/k8s-daejeon.yaml -n nvr exec deploy/nvr -c recorder -- ls -lh /mnt/nvr/$(date +%Y%m%d)"
 ```
 
-- **확인:** `ffprobe` 로 검사했을 때 원본 해상도(2880x1620, hevc, hvc1 태그)가 그대로 유지되어 있어야 합니다.
+- **확인:** `<날짜>_rec_<시작>.mkv`, `<날짜>_rec720_<시작>.mkv`, `<날짜>_live_<시작>.mkv` 가 보이고 크기가 계속 늘어납니다. 쓰는 중인 원본을 `ffprobe` 로 열면 원본 해상도(2880x1620, hevc)가 그대로입니다.
 
 수집기 로그의 1분 통계에서 추적 프레임 수가 목표를 따라가는지 봅니다.
 
@@ -283,7 +325,7 @@ ssh ubuntu@kubectl-hub.eu4ng.com "kubectl --kubeconfig ~/k8s-daejeon.yaml -n nvr
 ssh ubuntu@kubectl-hub.eu4ng.com "kubectl --kubeconfig ~/k8s-daejeon.yaml -n nvr logs deploy/nvr -c occupancy | grep '1분:'"
 ```
 
-- **확인:** `추적 600프레임(목표 10fps …)`, `밀려 버린 프레임 0` 처럼 나옵니다. 밀려 버린 프레임이 많으면 `track_fps` 를 낮춥니다.
+- **확인:** `추적 600프레임(목표 10fps …)`, `밀려 버린 프레임 0` 처럼 나옵니다. `영상 쓰기` 는 측정 영상과 720p 사본을 쓰는 시간입니다. 밀려 버린 프레임이 많으면 `track_fps` 를 낮춥니다.
 
 재실자 값이 Telegraf 를 거쳐 `readings` 에 들어오는지 쿼리합니다.
 
@@ -296,18 +338,26 @@ ssh ubuntu@kubectl-hub.eu4ng.com "kubectl --kubeconfig ~/k8s-daejeon.yaml -n tim
 
 - **확인:** Home Assistant 의 **설정** > **기기 및 서비스** > **MQTT** 에 기기 `bedroom2-camera` 가 생기고, `재실자 수`, `재실자1 감지`(감지됨 / 감지되지 않음), 좌표·속도 센서가 보입니다.
 
-검수 영상 조각이 생겼는지 보고, 프레임 한 장을 뽑아 박스를 눈으로 확인합니다.
+실시간 측정 영상에서 쓰는 중인 파일의 마지막 프레임을 뽑아 박스를 눈으로 확인합니다.
 
 ```bash
-ssh ubuntu@kubectl-hub.eu4ng.com "kubectl --kubeconfig ~/k8s-daejeon.yaml -n nvr exec deploy/nvr -c recorder -- ls -lh /mnt/nvr/review/$(date +%Y-%m-%d)"
+ssh ubuntu@kubectl-hub.eu4ng.com "kubectl --kubeconfig ~/k8s-daejeon.yaml -n nvr exec deploy/nvr -c recorder -- sh -c 'f=\$(ls /mnt/nvr/\$(date +%Y%m%d)/*_live_*.mkv | tail -1); ffmpeg -v error -sseof -3 -i \$f -frames:v 1 -y /tmp/live.jpg && ls -l /tmp/live.jpg'"
 ```
 
-- **확인:** 1280x720 H.264 조각이 10분마다 생기고, 사람이 있는 프레임에 초록 박스와 `#칸 id 신뢰도` 라벨, 왼쪽 위에 시각과 인원이 보입니다.
+- **확인:** 1280x720 프레임에 사람이 있으면 초록 박스와 `#칸 id 신뢰도` 라벨이, 왼쪽 위에 시각과 인원이 보입니다.
 
-다음 날 04:00 이후 전날 폴더가 구간 파일로 합쳐졌는지 봅니다.
+다음 날 00:05 이후 전날 폴더가 종류마다 합쳐지고 NAS 로 보내졌는지 봅니다.
 
 ```bash
-ssh ubuntu@kubectl-hub.eu4ng.com "kubectl --kubeconfig ~/k8s-daejeon.yaml -n nvr logs job/\$(kubectl --kubeconfig ~/k8s-daejeon.yaml -n nvr get jobs -o name | tail -1 | cut -d/ -f2)"
+ssh ubuntu@kubectl-hub.eu4ng.com "kubectl --kubeconfig ~/k8s-daejeon.yaml -n nvr logs -l job-name --all-containers --prefix --tail=30"
 ```
 
-- **확인:** 로그 끝에 `구간:` 과 `끊김:` 목록이 나오고, 전날 폴더에는 `<시작>_<끝>.mp4` 파일만 남습니다. 파일이 여러 개면 이름의 시각 사이가 녹화가 끊긴 구간입니다.
+- **확인:** `rec: <날짜>_rec.mkv`, `live: <날짜>_live.mkv` 처럼 종류마다 합친 파일 이름이 나오고 `NAS 이관` 줄이 보입니다. 끊긴 날은 `<날짜>_<종류>_<시작>-<끝>.mkv` 로 여러 개입니다.
+
+사후 검수를 켰다면 검수가 끝난 뒤 결과 파일을 봅니다.
+
+```bash
+ssh ubuntu@kubectl-hub.eu4ng.com "kubectl --kubeconfig ~/k8s-daejeon.yaml -n nvr exec deploy/nvr -c recorder -- sh -c 'cat /mnt/nvr/\$(date -d @\$((\$(date +%s) - 86400)) +%Y%m%d)/*_review.json'"
+```
+
+- **확인:** `match_ratio`(일치율), `seconds_mismatch`, `intervals`(불일치 구간과 클립 이름)가 나옵니다. 클립은 왼쪽이 실시간 측정 영상, 오른쪽이 검수 결과이고 값이 다른 초에는 오른쪽 머리줄이 빨갛습니다.
