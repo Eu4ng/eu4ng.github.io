@@ -218,6 +218,7 @@ NVR 파드는 한 파드 안에 세 가지 컨테이너가 협력하는 구조�
 2. **`recorder`**: `ffmpeg`를 사용해 `rtsp://localhost:8554/main` 스트림을 재인코딩 없이 10분 단위 조각으로 저장합니다 (`/mnt/nvr/rec/%Y-%m-%d/%H-%M-%S.mp4`).
 3. **`occupancy`**: 주 스트림(5MP 20fps)을 PyAV 로 디코딩해 초당 10프레임을 1280x720 으로 받아 YOLOv8n + ByteTrack 으로 추적합니다.
    - 사람마다 칸(`occupant1`, `occupant2` …)을 배정하고 1초마다 `nvr/bedroom2-camera`(감지 결과)와 `nvr/bedroom2-camera/derived`(방 좌표로 바꾼 값)에 `{"fields": {...}, "timestamp": <ms>}` 를 발행합니다. Home Assistant 발견 설정도 함께 내므로 HA 에 기기 `bedroom2-camera` 와 센서가 자동으로 생기고, 엣지 Telegraf 가 같은 토픽을 받아 `readings` 에 넣습니다.
+   - 연결 상태는 `nvr/bedroom2-camera/availability` 에 유지 메시지(`{"state": "online"}`)로 냅니다. 발행을 시작하면 `online`, 카메라 프레임이 60초 동안 없거나 수집기가 멈추면 `offline` 이고, 수집기가 끊기면 브로커가 Last Will 로 `offline` 을 냅니다. HA 센서는 이 토픽을 따라 `사용할 수 없음` 이 되고, DB 에는 속성 `availability` 행으로 남습니다.
    - 칸은 동시에 감지된 최대 인원만큼 생기고, 사람이 없는 칸의 **감지** 센서는 `감지되지 않음` 이 됩니다.
    - 추적한 프레임마다 초록 박스와 칸·추적 ID·신뢰도·좌표·시각을 그린 **검수 영상**을 `/mnt/nvr/review/<날짜>/` 에 10분 조각으로 저장합니다.
 
@@ -225,7 +226,6 @@ GitOps 저장소(`k8s-gitops`)의 `iot/edge/nvr/`에 베이스 매니페스트�
 
 {% raw %}
 ```yaml
-# iot/edge/nvr/go2rtc.yaml
 log:
   level: info
 
@@ -289,9 +289,10 @@ ssh ubuntu@kubectl-hub.eu4ng.com "kubectl --kubeconfig ~/k8s-daejeon.yaml -n nvr
 
 ```bash
 ssh ubuntu@kubectl-hub.eu4ng.com "kubectl --kubeconfig ~/k8s-daejeon.yaml -n timescaledb exec timescaledb-0 -- psql -U iot -d iot -c \"SELECT property, processing, unit, hw_id, count(*) FROM readings WHERE source='nvr' AND time > now() - interval '5 minutes' GROUP BY 1, 2, 3, 4 ORDER BY 1;\""
+ssh ubuntu@kubectl-hub.eu4ng.com "kubectl --kubeconfig ~/k8s-daejeon.yaml -n timescaledb exec timescaledb-0 -- psql -U iot -d iot -c \"SELECT time, processing, value_text, value FROM readings WHERE source='nvr' AND property='availability' ORDER BY time DESC LIMIT 1;\""
 ```
 
-- **확인:** `occupant_count`, `occupant1_detected` 가 `derived` 로 1초마다 들어오고 `hw_id` 에 카메라 MAC 이 붙습니다. 사람이 감지되면 `occupant1_u`·`occupant1_v` 가, 방 기하 설정 뒤에는 `occupant1_x_m`·`occupant1_speed_mps` 가 들어옵니다.
+- **확인:** `occupant_count`, `occupant1_detected` 가 `derived` 로 1초마다 들어오고 `hw_id` 에 카메라 MAC 이 붙습니다. 사람이 감지되면 `occupant1_u`·`occupant1_v` 가, 방 기하 설정 뒤에는 `occupant1_x_m`·`occupant1_speed_mps` 가 들어옵니다. 연결 상태는 바뀔 때만 행이 생겨 둘째 쿼리로 마지막 행을 따로 보며, `processing` 이 `raw`, `value_text` 가 `online`, `value` 가 1 입니다.
 
 - **확인:** Home Assistant 의 **설정** > **기기 및 서비스** > **MQTT** 에 기기 `bedroom2-camera` 가 생기고, `재실자 수`, `재실자1 감지`(감지됨 / 감지되지 않음), 좌표·속도 센서가 보입니다.
 
