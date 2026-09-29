@@ -89,14 +89,16 @@ host_metrics_drm_card: card0                  # iGPU 의 /sys/class/drm/<카드>
 
 ## 3. 템플릿과 발견 설정 스크립트
 
-파일 네 개를 저장소에 둡니다. 모두 여러 번 실행해도 결과가 같습니다.
+파일 여섯 개를 저장소에 둡니다. 모두 여러 번 실행해도 결과가 같습니다.
 
 | 파일 | 하는 일 |
 | :--- | :--- |
 | `templates/host-metrics/telegraf.conf.j2` | 입력(cpu, system, mem, swap, disk, diskio, temp, smart, exec) → starlark 로 부품별 대표 필드 → merge 로 10초에 메시지 하나 → MQTT |
 | `templates/host-metrics/host-sysfs.sh.j2` | 기본 입력이 못 읽는 값: 코어 클럭 평균, RAPL 누적 에너지, iGPU 사용률·메모리(VRAM+GTT) |
 | `scripts/host-metrics-discovery.py` | 실제 메시지를 받아 필드마다 Home Assistant 발견 설정을 맞추고, 없어진 필드의 센서는 지웁니다 |
-| `playbooks/host-metrics.yml` | 설치, 권한, 설정 배포, 발견 설정 |
+| `scripts/host-availability.py` | 호스트 연결 상태를 `hosts/[기기 이름]/availability` 에 `online`·`offline` 으로 알리는 상주 스크립트 |
+| `templates/host-metrics/host-availability.service.j2` | 위 스크립트를 Telegraf 와 함께 켜고 함께 멈추는 systemd 서비스 |
+| `playbooks/host-metrics.yml` | 설치, 권한, 설정 배포, 연결 상태 서비스, 발견 설정 |
 
 필드 이름은 `<부품>_<값>` 이고 뜻마다 이름 하나만 씁니다. 값은 `usage`(활동률 %), `used_percent`(용량 사용률 %), `used`·`total`(사용량·용량 B), `power`(W), `clock`(MHz), `temp`(°C), `load`(1분 부하 평균, 단위 없음) 입니다. `cpu_load` 를 `cpu_cores` 로 나누면 CPU 사용률이 100% 에 닿은 뒤에도 코어 수 대비 몇 배로 밀렸는지 봅니다.
 목적이 발열·소비전력이라 부품마다 대표값 하나씩만 보내고, 같은 것을 여러 번 재는 값은 뺍니다. 예를 들어 Ryzen 은 k10temp 가 칩 전체의 제어 온도(Tctl)와 코어 다이별 온도(Tccd1·Tccd2)를 따로 알려 주는데, 팬·부스트가 기준으로 삼는 Tctl 만 씁니다. NVMe 도 센서가 세 개지만 대표값(Composite)만 씁니다.
@@ -341,7 +343,7 @@ fi
 
 </details>
 
-발견 설정은 센서 목록을 따로 적지 않고 75초 동안 받은 메시지의 필드로 만듭니다(1시간에 한 번 오는 값도 1분에 한 번은 후보로 올라오게 해 두었습니다). 필드 표로 한국어 이름·단위·`device_class` 를 붙이고, 표에 없는 새 필드도 이름 그대로 센서로 만듭니다. `value_template` 은 필드가 빠진 메시지에서 이전 상태를 유지하고, `expire_after` 60초로 호스트가 멈추면 센서가 `unavailable` 이 됩니다. 1시간에 한 번 오는 값에는 만료를 두지 않고, 창 안에 값이 오지 않아도 그 센서의 설정은 지우지 않습니다. 호스트의 파이썬과 apt 패키지 `python3-paho-mqtt` 만 씁니다.
+발견 설정은 센서 목록을 따로 적지 않고 75초 동안 받은 메시지의 필드로 만듭니다(1시간에 한 번 오는 값도 1분에 한 번은 후보로 올라오게 해 두었습니다). 필드 표로 한국어 이름·단위·`device_class` 를 붙이고, 표에 없는 새 필드도 이름 그대로 센서로 만듭니다. `value_template` 은 필드가 빠진 메시지에서 이전 상태를 유지합니다. 모든 센서가 연결 상태 토픽 `hosts/[기기 이름]/availability` 를 따르므로 Telegraf 가 멈추거나 호스트가 끊기면 바로 `unavailable` 이 되고, `expire_after` 60초는 연결은 살아 있는데 값만 멈춘 경우를 잡습니다. 1시간에 한 번 오는 값에는 만료를 두지 않고, 창 안에 값이 오지 않아도 그 센서의 설정은 지우지 않습니다. 호스트의 파이썬과 apt 패키지 `python3-paho-mqtt` 만 씁니다.
 
 <details markdown="1">
 <summary>scripts/host-metrics-discovery.py 전문</summary>
@@ -357,6 +359,8 @@ playbooks/host-metrics.yml 이 호스트에 복사해 실행한다. 호스트의
 - 브로커에 남아 있는(retained) 설정과 비교해 내용이 다르거나 없는 것만 발행한다(다시 실행해도 같은 결과).
 - 필드가 없어진 센서는 빈 retained 메시지로 지운다(HA 에서 엔티티가 사라짐). 단 느린 필드(SLOW_FIELDS)의 설정은
   창 안에 값이 안 왔을 수 있으므로 지우지 않는다.
+- 모든 센서는 hosts/<기기>/availability(host-availability.py 가 내는 연결 상태)를 따른다. Telegraf 가 멈추거나 호스트가
+  끊기면 HA 엔티티가 바로 "사용할 수 없음" 이 된다(expire_after 는 연결은 살아 있는데 값만 멈춘 경우를 잡는다).
 엣지 Telegraf(k8s-gitops iot/edge/telegraf)는 이 설정의 unit_of_measurement 를 DB readings.unit 으로,
 device 의 manufacturer·model·serial_number 를 vendor·model·hw_id 로 쓴다.
 구조: 순수 함수(sensor_meta, build_configs, diff) → 브로커 함수(collect, publish) → CLI(build_parser, main).
@@ -477,6 +481,12 @@ def build_configs(
                 f"if '{field}' in value_json.fields else this.state }}}}"
             ),
             "state_class": "measurement",
+            "availability": [
+                {
+                    "topic": f"{STATE_PREFIX}/{device}/availability",
+                    "value_template": "{{ value_json.state }}",
+                }
+            ],
             "device": info,
             "origin": ORIGIN,
         }
@@ -659,6 +669,183 @@ if __name__ == "__main__":
 
 </details>
 
+호스트 Telegraf 의 MQTT 출력에는 Last Will 이 없어, Telegraf 가 멈추거나 호스트가 꺼져도 브로커가 알려 주지 않습니다. 연결 상태는 따로 상주하는 스크립트가 Zigbee2MQTT 와 같은 모양(`{"state": "online"}`)으로 `hosts/[기기 이름]/availability` 에 알립니다. 브로커에 붙을 때마다 `online` 을 유지 메시지로 내고, 서비스가 멈출 때 `offline` 을 내며, 호스트가 꺼지거나 네트워크가 끊기면 브로커가 45초쯤 뒤 Last Will 로 `offline` 을 냅니다. 서비스는 `BindsTo=telegraf.service` 로 Telegraf 에 묶여 Telegraf 가 멈추거나 죽으면 함께 멈추고, `WantedBy=telegraf.service` 로 Telegraf 와 함께 켜집니다. 비밀번호는 Telegraf 와 같은 `/etc/default/telegraf` 에서 읽습니다.
+
+<details markdown="1">
+<summary>scripts/host-availability.py 전문</summary>
+
+```python
+#!/usr/bin/python3
+"""호스트 연결 상태를 hosts/<기기>/availability 에 알린다(Zigbee2MQTT 와 같은 {"state": "online"|"offline"}).
+
+playbooks/host-metrics.yml 이 호스트에 복사하고 systemd 서비스 host-availability 로 상주시킨다. 호스트의 python3 와
+apt 패키지 python3-paho-mqtt 만 쓴다. 호스트 Telegraf 의 MQTT 출력에는 Last Will 이 없어 이 서비스가 대신 알린다.
+- 브로커에 붙을 때마다 online 을 retained 로 낸다.
+- SIGTERM(서비스 정지. telegraf.service 에 BindsTo 로 묶여 Telegraf 가 멈추면 함께 멈춘다)을 받으면 offline 을 내고 끝낸다.
+- 호스트가 꺼지거나 네트워크가 끊기면 브로커가 keepalive 의 1.5배 뒤에 Last Will 로 offline 을 낸다.
+HA 발견 설정(host-metrics-discovery.py)의 availability 와 엣지 Telegraf 의 hosts/+/availability 입력이 이 토픽을 쓴다.
+구조: 순수 함수(availability_topic, availability_payload) → 브로커 함수(run) → CLI(build_parser, main).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+import signal
+import sys
+import threading
+from pathlib import Path
+
+EXIT_OK = 0
+EXIT_FAILED = 1
+EXIT_USAGE = 2
+
+STATE_PREFIX = "hosts"
+KEEPALIVE = 30  # 초. 끊긴 뒤 약 45초 안에 브로커가 offline 을 낸다
+
+log = logging.getLogger(Path(__file__).stem)
+
+
+def availability_topic(device: str) -> str:
+    """기기 연결 상태 토픽."""
+    return f"{STATE_PREFIX}/{device}/availability"
+
+
+def availability_payload(online: bool) -> str:
+    """연결 상태 페이로드. Zigbee2MQTT 와 같은 모양이라 엣지 Telegraf 가 같은 방식으로 읽는다."""
+    return json.dumps({"state": "online" if online else "offline"})
+
+
+def run(
+    broker: str, user: str, password: str, device: str, stop: threading.Event
+) -> int:
+    """stop 이 설정될 때까지 연결을 유지하며 online 을 알리고, 끝날 때 offline 을 알린다. 알린 횟수를 준다."""
+    import paho.mqtt.client as mqtt  # 테스트에서 순수 함수만 쓸 때 paho 없이 불러오게 한다
+
+    topic = availability_topic(device)
+    announced = 0
+
+    def on_connect(client, _userdata, _flags, reason_code, _properties) -> None:
+        nonlocal announced
+        if reason_code != 0:
+            log.warning("브로커 연결 실패: %s", reason_code)
+            return
+        # 끊겼던 동안 브로커가 Last Will 로 offline 을 냈을 수 있으므로 붙을 때마다 알린다
+        client.publish(topic, availability_payload(True), qos=1, retain=True)
+        announced += 1
+        log.info("online: %s", topic)
+
+    host, _, port = broker.rpartition(":")
+    client = mqtt.Client(
+        mqtt.CallbackAPIVersion.VERSION2, client_id=f"host-availability-{device}"
+    )
+    client.username_pw_set(user, password)
+    client.will_set(topic, availability_payload(False), qos=1, retain=True)
+    client.on_connect = on_connect
+    client.connect_async(host, int(port), keepalive=KEEPALIVE)
+    client.loop_start()
+    stop.wait()
+    # 정상 종료에서는 브로커가 Last Will 을 내지 않으므로 직접 알린다
+    info = client.publish(topic, availability_payload(False), qos=1, retain=True)
+    try:
+        info.wait_for_publish(timeout=5)
+        log.info("offline: %s", topic)
+    except (RuntimeError, ValueError) as exc:
+        log.warning("offline 발행 확인 실패: %s", exc)
+    client.loop_stop()
+    client.disconnect()
+    return announced
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="호스트 연결 상태를 hosts/<기기>/availability 에 알린다(상주).",
+        epilog=(
+            "예:\n"
+            "  MQTT_PASSWORD=… host-availability.py --broker <브로커 주소>:1883 "
+            "--user devices --device bedroom2-host-server_ms_a2_1\n\n"
+            "비밀번호: 환경 변수 MQTT_PASSWORD\n"
+            "SIGTERM·SIGINT 를 받으면 offline 을 알리고 끝낸다.\n"
+            '출력: 끝날 때 stdout 에 {"device", "topic", "online_announced"} JSON\n'
+            "exit code: 0 정상 종료, 1 브로커 주소 오류, 2 사용법 오류"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--broker", required=True, help="호스트:포트")
+    parser.add_argument("--user", required=True, help="브로커 계정")
+    parser.add_argument(
+        "--device", required=True, help="기기 이름(hosts/<기기> 의 <기기>)"
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    logging.basicConfig(
+        level=logging.INFO, format="%(levelname)s %(message)s", stream=sys.stderr
+    )
+    password = os.environ.get("MQTT_PASSWORD")
+    if not password:
+        log.error("브로커 비밀번호가 필요하다: 환경 변수 MQTT_PASSWORD 를 설정한다")
+        return EXIT_USAGE
+    if ":" not in args.broker:
+        log.error("--broker 는 호스트:포트 형식이다: %s", args.broker)
+        return EXIT_FAILED
+
+    stop = threading.Event()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, lambda *_: stop.set())
+    announced = run(args.broker, args.user, password, args.device, stop)
+    json.dump(
+        {
+            "device": args.device,
+            "topic": availability_topic(args.device),
+            "online_announced": announced,
+        },
+        sys.stdout,
+        ensure_ascii=False,
+    )
+    sys.stdout.write("\n")
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+{: file="scripts/host-availability.py" }
+
+</details>
+
+<details markdown="1">
+<summary>templates/host-metrics/host-availability.service.j2 전문</summary>
+
+{% raw %}
+```ini
+# 호스트 연결 상태 알림(scripts/host-availability.py). playbooks/host-metrics.yml 이 설치합니다.
+# Telegraf 와 함께 켜지고(WantedBy) 함께 멈춥니다(BindsTo. Telegraf 가 죽어도 멈춤). 멈출 때 offline 을 알립니다.
+[Unit]
+Description=호스트 연결 상태를 MQTT hosts/{{ host_metrics_name }}/availability 에 알림
+BindsTo=telegraf.service
+After=telegraf.service network-online.target
+Wants=network-online.target
+
+[Service]
+User=telegraf
+EnvironmentFile=/etc/default/telegraf
+ExecStart=/usr/local/lib/host-availability.py --broker {{ host_metrics_broker }} --user {{ host_metrics_mqtt_user }} --device {{ host_metrics_name }}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=telegraf.service
+```
+{: file="templates/host-metrics/host-availability.service.j2" }
+{% endraw %}
+
+</details>
+
 플레이북은 InfluxData 저장소에서 엣지와 같은 버전의 Telegraf 를 설치하고 버전을 고정합니다. SMART 조회는 root 가 필요하므로 Proxmox 에 기본으로 없는 `sudo` 를 설치해 `smartctl`·`nvme` 만 허용하고, RAPL `energy_uj` 는 root 만 읽을 수 있어 서비스에 읽기 권한 검사를 건너뛰는 능력(`CAP_DAC_READ_SEARCH`) 하나만 줍니다. 센서를 새로 만들었을 때는 마지막에 Telegraf 를 한 번 더 시작합니다. 1시간에 한 번 오는 값이 발견 설정보다 먼저 발행되면 Home Assistant 가 다음 주기까지 그 센서를 비워 두기 때문입니다.
 
 <details markdown="1">
@@ -669,6 +856,7 @@ if __name__ == "__main__":
 # Proxmox 호스트 자체(VM·CT 를 합한 호스트 전체)의 CPU·메모리·디스크·네트워크·온도·전력·GPU 값을 Telegraf 로 모아 MQTT 에 발행합니다.
 # 10초마다 JSON 메시지 하나를 hosts/<host_metrics_name> 에 내고, Home Assistant MQTT 발견 설정을 만들어 센서로 보이게 합니다.
 # DB 기록은 엣지 Telegraf(k8s-gitops iot/edge/telegraf)가 같은 토픽을 받아 readings 에 넣습니다.
+# 연결 상태는 host-availability 서비스가 hosts/<host_metrics_name>/availability 에 알립니다(Telegraf 에는 Last Will 이 없음).
 #   MQTT_PASSWORD=$(. ~/.config/iot/secrets.env; echo "$MQTT_DEVICES") ansible-playbook playbooks/host-metrics.yml [--limit pve01]
 # 수집 항목이 바뀌면(디스크·인터페이스 추가, 설정 변경) 다시 실행합니다. 발견 설정은 실제 메시지의 필드로 다시 맞춥니다.
 ---
@@ -779,6 +967,26 @@ if __name__ == "__main__":
         state: started
         daemon_reload: true
 
+    # 발견 설정이 availability 를 가리키기 전에 연결 상태를 먼저 알려 HA 엔티티가 잠깐 "사용할 수 없음" 이 되지 않게 합니다
+    - name: 연결 상태 스크립트
+      ansible.builtin.copy:
+        src: ../scripts/host-availability.py
+        dest: /usr/local/lib/host-availability.py
+        mode: "0755"
+      notify: host-availability 재시작
+    - name: 연결 상태 서비스
+      ansible.builtin.template:
+        src: ../templates/host-metrics/host-availability.service.j2
+        dest: /etc/systemd/system/host-availability.service
+        mode: "0644"
+      notify: host-availability 재시작
+    - name: 연결 상태 서비스 켜기
+      ansible.builtin.systemd:
+        name: host-availability
+        enabled: true
+        state: started
+        daemon_reload: true
+
     - name: 발견 설정 스크립트
       ansible.builtin.copy:
         src: ../scripts/host-metrics-discovery.py
@@ -788,6 +996,11 @@ if __name__ == "__main__":
     - name: telegraf 재시작
       ansible.builtin.systemd:
         name: telegraf
+        state: restarted
+        daemon_reload: true
+    - name: host-availability 재시작
+      ansible.builtin.systemd:
+        name: host-availability
         state: restarted
         daemon_reload: true
   post_tasks:
@@ -847,12 +1060,17 @@ ansible-playbook playbooks/host-metrics.yml
 # 허브 control plane. E 는 엣지 kubeconfig, PW 는 telegraf 계정 비밀번호
 E="--kubeconfig k8s-[SITE].yaml"
 PW=$(kubectl $E -n telegraf get secret telegraf-credentials -o jsonpath='{.data.MQTT_PASSWORD}' | base64 -d)
-kubectl $E -n mosquitto exec deploy/mosquitto -- mosquitto_sub -u telegraf -P "$PW" -t 'hosts/#' -C 1 -v
+kubectl $E -n mosquitto exec deploy/mosquitto -- mosquitto_sub -u telegraf -P "$PW" -t 'hosts/+' -C 1 -v
+kubectl $E -n mosquitto exec deploy/mosquitto -- mosquitto_sub -u telegraf -P "$PW" -t 'hosts/+/availability' -C 2 -v
 ```
 
 ```text
 hosts/bedroom2-host-server_ms_a2_1 {"fields":{"cpu_clock":4202,"cpu_load":14.56,"cpu_power":83.1,"cpu_temp":89.5,"cpu_usage":47.3,"disk_temp":54.85,"disk_usage":1.1,"disk_used_percent":14.57,"gpu_mem_used":5574176768,"gpu_temp":76,"gpu_usage":0,"mem_temp":57.25,"mem_used_percent":68.84,"swap_used_percent":5.83,"system_uptime":1358761},"name":"host","tags":{},"timestamp":1790605100000}
+hosts/bedroom2-host-server_ms_a2_1/availability {"state": "online"}
+hosts/bedroom2-host-server_k12_1/availability {"state": "online"}
 ```
+
+- **확인:** 연결 상태는 유지 메시지라 구독하자마자 호스트마다 `online` 이 보이고(`-C` 는 호스트 수), 호스트에서 `systemctl status host-availability` 가 `active (running)` 입니다. Telegraf 를 멈추면(`systemctl stop telegraf`) 이 서비스도 함께 멈추며 `offline` 을 냅니다.
 
 ## 5. Home Assistant 영역 배정
 
@@ -870,7 +1088,7 @@ $K exec -i deploy/home-assistant -c home-assistant -- env HA_TOKEN="$T" python3 
 
 ## 6. 엣지 Telegraf 에 호스트 입력 추가
 
-엣지 Telegraf 에 입력 두 개를 추가합니다. 첫 입력이 `hosts/+` 의 `fields` 를 필드별 행으로 받고, 둘째 입력이 호스트의 발견 설정을 받아 단위(`unit_of_measurement`)와 제조사·모델·실물 ID(`serial_number` → `hw_id`)를 [Telegraf 글](/posts/43/)의 공통 starlark 에 기억시킵니다. starlark 는 `origin` 이 `host-metrics` 인 발견 설정만 쓰므로 Zigbee2MQTT 의 발견 설정은 무시합니다. Telegraf 재시작 직후에는 공통 starlark 가 발견 설정을 받을 때까지 호스트 값을 잠시 붙잡아 두고, 새 필드가 생긴 직후처럼 발견 설정이 아직 없으면 필드 이름 끝으로 단위를 정해(`HOST_UNITS`) 단위가 빈 행이 생기지 않게 합니다. 이 규칙은 발견 스크립트의 `SENSORS` 표와 같은 값이어야 합니다.
+엣지 Telegraf 에 입력 세 개를 추가합니다. 첫 입력이 `hosts/+` 의 `fields` 를 필드별 행으로 받고, 둘째 입력이 `hosts/+/availability` 의 연결 상태를 속성 `availability` 인 행(`online` 1, `offline` 0)으로 받습니다. 셋째 입력은 발견 설정을 받아 단위(`unit_of_measurement`)와 제조사·모델·실물 ID(`serial_number` → `hw_id`)를 [Telegraf 글](/posts/43/)의 공통 starlark 에 기억시킵니다. starlark 는 `origin` 이 `host-metrics`·`nvr-occupancy`·`kma-weather` 인 발견 설정만 쓰므로 Zigbee2MQTT 의 발견 설정은 무시합니다(NVR·날씨 수집기도 같은 입력을 씁니다). Telegraf 재시작 직후에는 공통 starlark 가 발견 설정을 받을 때까지 호스트 값을 잠시 붙잡아 두고, 새 필드가 생긴 직후처럼 발견 설정이 아직 없으면 필드 이름 끝으로 단위를 정해(`HOST_UNITS`) 단위가 빈 행이 생기지 않게 합니다. 이 규칙은 발견 스크립트의 `SENSORS` 표와 같은 값이어야 합니다.
 
 ```toml
 # 서버·PC 자체가 잰 값(CPU·메모리·디스크·네트워크·온도·전력·GPU). 호스트의 Telegraf 가 10초마다 hosts/<기기> 에 JSON 하나로 냅니다
@@ -900,11 +1118,34 @@ $K exec -i deploy/home-assistant -c home-assistant -- env HA_TOKEN="$T" python3 
     topic = "hosts/+"
     tags = "_/device"
 
-# 호스트 값의 단위와 실물 정보. 호스트가 필드마다 Home Assistant 발견 설정(유지 메시지)을 내므로, 아래 starlark 가
-# origin 이 host-metrics 인 것만 골라 unit_of_measurement 와 device.manufacturer·model 을 기억해 두고 호스트 행에 unit·vendor·model 로 붙입니다.
+# 호스트 연결 상태. 호스트의 host-availability 서비스가 hosts/<기기>/availability 에 유지 메시지 {"state": "online"|"offline"} 을 냅니다.
+# offline 은 Telegraf 가 멈출 때(서비스가 함께 멈춤)와 호스트가 끊길 때(Last Will)입니다. 수신 시각으로 남습니다(Zigbee2MQTT 와 같음).
 [[inputs.mqtt_consumer]]
   servers = ["tcp://mosquitto.mosquitto.svc.cluster.local:1883"]
-  topics = ["homeassistant/sensor/+/+/config"]
+  topics = ["hosts/+/availability"]
+  username = "${MQTT_USER}"
+  password = "${MQTT_PASSWORD}"
+  client_id = "telegraf-hosts-availability"
+  persistent_session = true
+  qos = 1
+  topic_tag = ""
+  name_override = "readings"
+  data_format = "json"
+  json_string_fields = ["state"]
+  [inputs.mqtt_consumer.tags]
+    protocol = "mqtt"
+    source = "telegraf"
+    property = "availability"
+  [[inputs.mqtt_consumer.topic_parsing]]
+    topic = "hosts/+/availability"
+    tags = "_/device/_"
+
+# 호스트·NVR·날씨 값의 단위와 실물 정보. 세 수집기가 필드마다 Home Assistant 발견 설정(유지 메시지)을 내므로, 아래 starlark 가
+# origin 이 host-metrics·nvr-occupancy·kma-weather 인 것만 골라 unit_of_measurement 와 device.manufacturer·model·serial_number 를 기억해 두고
+# 그 기기 행에 unit·vendor·model·hw_id 로 붙입니다. NVR 의 감지 여부(occupant<N>_detected)는 binary_sensor 라 그 토픽도 받습니다.
+[[inputs.mqtt_consumer]]
+  servers = ["tcp://mosquitto.mosquitto.svc.cluster.local:1883"]
+  topics = ["homeassistant/sensor/+/+/config", "homeassistant/binary_sensor/+/+/config"]
   username = "${MQTT_USER}"
   password = "${MQTT_PASSWORD}"
   client_id = "telegraf-host-sensors"
@@ -948,6 +1189,13 @@ git push
 select anchor, count(distinct property) as props, max(time) as last, min(hw_id) as hw_id,
        count(*) filter (where coalesce(unit, '') = '') as no_unit
 from readings where device = 'host' and time > now() - interval '1 minute' group by 1;
+```
+
+연결 상태는 바뀔 때만 행이 생깁니다(Telegraf 가 다시 접속할 때는 유지 메시지로 한 번 더). 호스트마다 마지막 행이 `online`·`1` 이면 됩니다.
+
+```sql
+select distinct on (anchor) anchor, time, value_text, value
+from readings where device = 'host' and property = 'availability' order by anchor, time desc;
 ```
 
 ## 7. 부하와 소비전력 맞춰 보기
