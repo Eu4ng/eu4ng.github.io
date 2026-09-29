@@ -807,6 +807,7 @@ URL = os.environ.get("HA_URL", "ws://127.0.0.1:8123/api/websocket")
 ROOMS = {
     "livingroom": "거실", "kitchen": "주방", "bedroom": "침실", "room": "방", "office": "서재", "bathroom": "욕실",
     "laundry": "세탁실", "dressroom": "드레스룸", "utility": "다용도실", "entrance": "현관", "balcony": "베란다",
+    "outdoor": "실외", "outside": "실외",   # 바깥 날씨 지점(outdoor-weather-…)과 실외 기기(outside-…)
 }
 
 
