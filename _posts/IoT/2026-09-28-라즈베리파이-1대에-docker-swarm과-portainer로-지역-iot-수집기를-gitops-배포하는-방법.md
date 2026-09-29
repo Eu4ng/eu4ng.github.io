@@ -8,7 +8,7 @@ mermaid: true
 permalink: /posts/75/
 ---
 
-새 지역에 수집망을 가볍게 시작할 때, [쿠버네티스 엣지 클러스터](/posts/42/) 대신 라즈베리파이 한 대에 Docker Swarm 과 Portainer 를 올리고 수집기(Telegraf)를 GitOps 로 배포합니다. Git 저장소의 `swarm/<지역>/<스택>/stack.yml` 을 Pi 의 Portainer 가 5분마다 읽어 반영하고, Telegraf 는 [대전 엣지와 같은 설정](/posts/43/)으로 브로커의 기기 메시지를 받아 디스크 버퍼를 거쳐 중앙 TimescaleDB 에 씁니다. 이 글은 수집기까지 다루고, Zigbee2MQTT·Home Assistant 같은 제어 쪽을 Pi 로 옮기는 것은 다루지 않습니다.
+새 지역에 수집망을 가볍게 시작할 때, [쿠버네티스 엣지 클러스터](/posts/42/) 대신 라즈베리파이 한 대에 Docker Swarm 과 Portainer 를 올리고 수집기([Telegraf](/posts/82/))를 GitOps 로 배포합니다. Git 저장소의 `swarm/<지역>/<스택>/stack.yml` 을 Pi 의 Portainer 가 5분마다 읽어 반영하고, Telegraf 는 [대전 엣지와 같은 설정](/posts/43/)으로 브로커의 기기 메시지를 받아 디스크 버퍼를 거쳐 중앙 TimescaleDB 에 씁니다. 이 글은 수집기까지 다루고, Zigbee2MQTT·Home Assistant 같은 제어 쪽을 Pi 로 옮기는 것은 다루지 않습니다.
 
 1. Pi 준비
 2. 저장소 폴더 만들기
