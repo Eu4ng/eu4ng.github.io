@@ -7,7 +7,7 @@ tags: [iot, thread, matter, openthread, otbr, slzb-06, home-assistant, kubernete
 permalink: /posts/47/
 ---
 
-Thread 기기(Matter over Thread)를 LAN 과 잇는 **OpenThread Border Router**(OTBR)를 엣지 클러스터의 파드로 띄웁니다. 라디오는 SLZB-MR3U 의 EFR32MG24 로, 기기 안에서 OTBR 을 돌리는 대신 라디오(RCP)로만 쓰고 TCP 포트로 파드와 연결합니다. 이렇게 하면 Thread 망의 데이터셋(네트워크 키, 채널 등)이 기기가 아니라 클러스터 볼륨에 남아서, SLZB 를 바꾸더라도 새 기기를 같은 주소에 두기만 하면 기기를 다시 등록하지 않고 망이 이어집니다. 공식 OTBR 이미지는 USB 시리얼 라디오를 전제로 해서, OpenThread 가 자식 프로세스를 시리얼처럼 쓰는 `forkpty` 방식으로 socat 을 띄워 TCP 를 연결합니다.
+[Thread](/posts/77/) 기기(Matter over Thread)를 LAN 과 잇는 **[OpenThread Border Router](/posts/83/)**(OTBR)를 엣지 클러스터의 파드로 띄웁니다. 라디오는 SLZB-MR3U 의 EFR32MG24 로, 기기 안에서 OTBR 을 돌리는 대신 라디오(RCP)로만 쓰고 TCP 포트로 파드와 연결합니다. 이렇게 하면 Thread 망의 데이터셋(네트워크 키, 채널 등)이 기기가 아니라 클러스터 볼륨에 남아서, SLZB 를 바꾸더라도 새 기기를 같은 주소에 두기만 하면 기기를 다시 등록하지 않고 망이 이어집니다. 공식 OTBR 이미지는 USB 시리얼 라디오를 전제로 해서, OpenThread 가 자식 프로세스를 시리얼처럼 쓰는 `forkpty` 방식으로 socat 을 띄워 TCP 를 연결합니다.
 
 1. 라디오 모드와 포트 확인
 2. OTBR 이미지 만들기

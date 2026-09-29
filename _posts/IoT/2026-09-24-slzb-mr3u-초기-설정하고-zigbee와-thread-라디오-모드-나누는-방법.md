@@ -7,7 +7,7 @@ tags: [iot, slzb-06, smlight, zigbee, thread, matter, coordinator]
 permalink: /posts/45/
 ---
 
-SMLIGHT **SLZB-MR3U** 는 Zigbee 용 CC2674P10 과 Thread 용 EFR32MG24 두 라디오를 가진 이더넷(PoE) 코디네이터입니다. 라디오마다 TCP 포트를 하나씩 열어 주므로 Zigbee2MQTT 와 OpenThread Border Router 가 서로 다른 서버(파드)에서 각자 라디오에 붙을 수 있고, USB 패스스루가 필요 없습니다. 이 글은 기기를 LAN 에 붙이고 웹 UI 에서 라디오별 모드와 포트를 정하는 데까지만 다룹니다. Zigbee2MQTT 와 OTBR 연결은 다음 글들에서 합니다.
+SMLIGHT **SLZB-MR3U** 는 [Zigbee](/posts/77/) 용 CC2674P10 과 Thread 용 EFR32MG24 두 라디오를 가진 이더넷(PoE) 코디네이터입니다. 라디오마다 TCP 포트를 하나씩 열어 주므로 Zigbee2MQTT 와 OpenThread Border Router 가 서로 다른 서버(파드)에서 각자 라디오에 붙을 수 있고, USB 패스스루가 필요 없습니다. 이 글은 기기를 LAN 에 붙이고 웹 UI 에서 라디오별 모드와 포트를 정하는 데까지만 다룹니다. Zigbee2MQTT 와 OTBR 연결은 다음 글들에서 합니다.
 
 1. 연결과 웹 UI 접속
 2. 고정 IP
@@ -66,7 +66,7 @@ curl -s http://[SLZB_IP]/ha_info | python3 -m json.tool | grep -E '"(model|sw_ve
 **Mode** 페이지의 **Radiomodule mode** 에서 라디오마다 역할을 고릅니다. 선택지는 **Zigbee Coordinator**, **Zigbee Router**, **Matter-over-Thread**(그 아래 **Thread to remote OTBR** 과 **Thread+OTBR**), **MultiPAN (Zigbee+Thread)** 입니다.
 
 - 라디오 2(CC2674P10): **Zigbee Coordinator**. Z-Stack 펌웨어라 Zigbee2MQTT 의 `zstack` 어댑터로 붙습니다.
-- 라디오 1(EFR32MG24): **Thread to remote OTBR**. 라디오는 RCP(Radio Co-Processor)로만 동작하고 Thread 스택과 데이터셋은 서버 쪽 OTBR 이 가집니다. 기기가 고장 나도 서버의 데이터셋으로 같은 Thread 망을 이어 갈 수 있습니다.
+- 라디오 1(EFR32MG24): **Thread to remote OTBR**. 라디오는 [RCP(Radio Co-Processor)](/posts/83/)로만 동작하고 Thread 스택과 데이터셋은 서버 쪽 OTBR 이 가집니다. 기기가 고장 나도 서버의 데이터셋으로 같은 Thread 망을 이어 갈 수 있습니다.
 - **Connection mode** 는 **Ethernet connection** 으로 둡니다.
 
 **Save** 를 누르면 기기가 해당 라디오의 펌웨어를 내려받아 다시 씁니다. SLZB-OS 가 알아서 하는 과정이라 펌웨어 파일을 구해 올리는 일은 없지만, 이 동안 인터넷이 필요하고 몇 분 걸립니다.

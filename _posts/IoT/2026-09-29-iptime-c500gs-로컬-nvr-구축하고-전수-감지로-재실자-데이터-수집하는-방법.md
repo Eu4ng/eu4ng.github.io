@@ -7,7 +7,7 @@ tags: [iot, nvr, kubernetes, computer-vision, home-assistant, mqtt, timescaledb,
 permalink: /posts/76/
 ---
 
-ipTIME C500GS IP 카메라를 공유기 방화벽으로 외부 인터넷과 완전히 차단한 상태에서 로컬 NVR을 구축하고, 영상에서 재실자 수·위치·속도를 뽑아 호스트 센서와 같은 방식의 MQTT 센서로 Home Assistant 와 TimescaleDB 에 넣습니다. 움직임이 있을 때만 동작하는 모션 기반 감지기(Frigate 등)와 달리 초당 10프레임을 움직임과 무관하게 추적하므로, 잠든 사람처럼 오래 움직이지 않는 재실자도 놓치지 않습니다. 추적 결과는 초록 박스를 그린 검수 영상으로도 남겨 알고리즘이 제대로 동작하는지 눈으로 확인합니다.
+ipTIME C500GS IP 카메라를 공유기 방화벽으로 외부 인터넷과 완전히 차단한 상태에서 로컬 [NVR](/posts/79/)을 구축하고, 영상에서 재실자 수·위치·속도를 뽑아 호스트 센서와 같은 방식의 MQTT 센서로 Home Assistant 와 TimescaleDB 에 넣습니다. 움직임이 있을 때만 동작하는 모션 기반 감지기(Frigate 등)와 달리 초당 10프레임을 움직임과 무관하게 추적하므로, 잠든 사람처럼 오래 움직이지 않는 재실자도 놓치지 않습니다. 추적 결과는 초록 박스를 그린 검수 영상으로도 남겨 알고리즘이 제대로 동작하는지 눈으로 확인합니다.
 
 1. 카메라 네트워크 차단 및 RTSP 설정
 2. 워커 노드 NVR 전용 디스크 마운트
@@ -111,7 +111,7 @@ ssh ubuntu@kubectl-hub.eu4ng.com "kubectl --kubeconfig ~/k8s-daejeon.yaml -n nvr
 ```
 {: file="iot/edge/nvr/room-geometry.json" }
 
-수집기는 기준점으로 최소제곱 호모그래피를 구하고 로그에 기준점별 재투영 오차(m)를 남깁니다. 기준점이 4개보다 적으면 계산값을 내지 않습니다.
+수집기는 기준점으로 최소제곱 [호모그래피](/posts/81/)를 구하고 로그에 기준점별 재투영 오차(m)를 남깁니다. 기준점이 4개보다 적으면 계산값을 내지 않습니다.
 
 > 발 위치가 바닥에 있다고 보는 계산이라 침대에 누워 있거나 의자에 앉은 사람은 실제 위치와 어긋납니다. 카메라 가까이 서서 박스 아래가 화면 끝에 닿으면 발이 보이지 않으므로 계산값을 내지 않습니다.
 {: .prompt-warning }
@@ -216,7 +216,7 @@ ssh ubuntu@kubectl-hub.eu4ng.com "kubectl --kubeconfig ~/k8s-daejeon.yaml -n nvr
 NVR 파드는 한 파드 안에 세 가지 컨테이너가 협력하는 구조입니다:
 1. **`go2rtc`**: 카메라에 RTSP 세션을 딱 1개만 맺고, 로컬 `:8554`로 스트림을 분배합니다. 저가형 IP 카메라의 동시 연결 수 한계 문제를 원천 차단합니다.
 2. **`recorder`**: `ffmpeg`를 사용해 `rtsp://localhost:8554/main` 스트림을 재인코딩 없이 10분 단위 조각으로 저장합니다 (`/mnt/nvr/rec/%Y-%m-%d/%H-%M-%S.mp4`).
-3. **`occupancy`**: 주 스트림(5MP 20fps)을 PyAV 로 디코딩해 초당 10프레임을 1280x720 으로 받아 YOLOv8n + ByteTrack 으로 추적합니다.
+3. **`occupancy`**: 주 스트림(5MP 20fps)을 PyAV 로 디코딩해 초당 10프레임을 1280x720 으로 받아 YOLOv8n + ByteTrack 으로 [추적](/posts/84/)합니다.
    - 사람마다 칸(`occupant1`, `occupant2` …)을 배정하고 1초마다 `nvr/bedroom2-camera`(감지 결과)와 `nvr/bedroom2-camera/derived`(방 좌표로 바꾼 값)에 `{"fields": {...}, "timestamp": <ms>}` 를 발행합니다. Home Assistant 발견 설정도 함께 내므로 HA 에 기기 `bedroom2-camera` 와 센서가 자동으로 생기고, 엣지 Telegraf 가 같은 토픽을 받아 `readings` 에 넣습니다.
    - 연결 상태는 `nvr/bedroom2-camera/availability` 에 유지 메시지(`{"state": "online"}`)로 냅니다. 발행을 시작하면 `online`, 카메라 프레임이 60초 동안 없거나 수집기가 멈추면 `offline` 이고, 수집기가 끊기면 브로커가 Last Will 로 `offline` 을 냅니다. HA 센서는 이 토픽을 따라 `사용할 수 없음` 이 되고, DB 에는 속성 `availability` 행으로 남습니다.
    - 칸은 동시에 감지된 최대 인원만큼 생기고, 사람이 없는 칸의 **감지** 센서는 `감지되지 않음` 이 됩니다.

@@ -7,7 +7,7 @@ tags: [proxmox, ansible, telegraf, mqtt, home-assistant, timescaledb, iot, homel
 permalink: /posts/74/
 ---
 
-Proxmox 호스트에 **Telegraf** 를 설치해 호스트 전체(VM·CT 를 합한 값)의 CPU·메모리·디스크·네트워크·온도·전력·iGPU 값을 10초마다 JSON 메시지 하나로 엣지 브로커의 `hosts/[기기 이름]` 에 발행합니다. 같은 호스트가 필드마다 **MQTT 발견 설정**을 내므로 Home Assistant 에 센서가 자동으로 생기고, 엣지 Telegraf 가 같은 토픽을 받아 `readings` 테이블에 넣습니다. 기기 이름의 기준 칸을 그 서버가 꽂힌 전력 플러그와 같은 제품 키로 두어, DB 에서 "CPU 사용률이 얼마일 때 벽 전력이 얼마인지" 를 `anchor` 하나로 맞춰 봅니다. 설치는 [내부망 DNS 글](/posts/41/)에서 만든 Ansible 저장소에 플레이북 하나를 더해 모든 Proxmox 노드에 똑같이 합니다.
+Proxmox 호스트에 **[Telegraf](/posts/82/)** 를 설치해 호스트 전체(VM·CT 를 합한 값)의 CPU·메모리·디스크·네트워크·온도·전력·iGPU 값을 10초마다 JSON 메시지 하나로 엣지 브로커의 `hosts/[기기 이름]` 에 발행합니다. 같은 호스트가 필드마다 **[MQTT 발견 설정](/posts/78/)**을 내므로 Home Assistant 에 센서가 자동으로 생기고, 엣지 Telegraf 가 같은 토픽을 받아 `readings` 테이블에 넣습니다. 기기 이름의 기준 칸을 그 서버가 꽂힌 전력 플러그와 같은 제품 키로 두어, DB 에서 "CPU 사용률이 얼마일 때 벽 전력이 얼마인지" 를 `anchor` 하나로 맞춰 봅니다. 설치는 [내부망 DNS 글](/posts/41/)에서 만든 Ansible 저장소에 플레이북 하나를 더해 모든 Proxmox 노드에 똑같이 합니다.
 
 1. 기기 이름 정하기
 2. 변수와 인벤토리

@@ -7,7 +7,7 @@ tags: [iot, home-assistant, kubernetes, argo-cd, gitops, edge]
 permalink: /posts/49/
 ---
 
-지역마다 엣지 클러스터의 Home Assistant(HA)가 기기와 자동화를 맡고, 허브에는 기기를 붙이지 않은 **중앙 HA** 를 하나 둡니다. 중앙 HA 는 **Remote Home Assistant** 통합으로 각 지역 HA 의 WebSocket API 에 붙어 엔티티를 가져오고, 중앙에서 누른 스위치는 원래 지역 HA 로 전달됩니다. 지역 HA 는 `ha-[SITE_CODE].[DOMAIN]`, 중앙 HA 는 `ha.[DOMAIN]` 으로 엽니다. 이 통합은 보통 HACS 로 설치하지만, 여기서는 initContainer 가 릴리스 버전을 고정해 설치하고 연결 설정도 API 스크립트로 넣습니다.
+지역마다 엣지 클러스터의 Home Assistant(HA)가 기기와 자동화를 맡고, 허브에는 기기를 붙이지 않은 **중앙 HA** 를 하나 둡니다. 중앙 HA 는 **Remote Home Assistant** 통합으로 각 지역 HA 의 WebSocket API 에 붙어 [엔티티](/posts/78/)를 가져오고, 중앙에서 누른 스위치는 원래 지역 HA 로 전달됩니다. 지역 HA 는 `ha-[SITE_CODE].[DOMAIN]`, 중앙 HA 는 `ha.[DOMAIN]` 으로 엽니다. 이 통합은 보통 HACS 로 설치하지만, 여기서는 initContainer 가 릴리스 버전을 고정해 설치하고 연결 설정도 API 스크립트로 넣습니다.
 
 1. 지역 HA 에 Remote Home Assistant 설치
 2. 중앙 HA 배포
