@@ -1,6 +1,8 @@
 # 모델 서버(Ollama) LXC. group_vars 의 ollama_backends 마다 CT 하나를 만들고 Ollama 를 설치해 모델을 받아 둡니다.
 # gpu: true 인 CT 는 그 Proxmox 호스트의 iGPU(/dev/dri/renderD128)를 넘겨 Vulkan 으로 추론합니다(AMD iGPU 는 ROCm 지원 밖).
 # 클러스터에서는 k8s-gitops services/ollama 의 HAProxy 가 이 CT 들을 <이름>.<도메인> 으로 불러 빠른 순서로 나눕니다.
+# 모델 저장소는 같은 호스트의 CT 끼리 공유합니다(호스트의 thin LV 를 ollama_models_dir 에 붙이고 CT 마다 바인드 마운트). 모델은 호스트마다
+# 한 번만 받고, 공유 폴더에서 다른 CT 의 받는 중인 파일을 지우지 않게 OLLAMA_NOPRUNE=1 로 돕니다(group_vars 의 설명 참고).
 #   ansible-playbook playbooks/ollama.yml                          (PROXMOX_* 환경변수 필요, README 참고)
 #   ansible-playbook playbooks/ollama.yml -e ollama_pull_models=false   (모델을 받지 않음. 다른 곳의 모델 파일을 옮겨 넣을 때)
 ---
@@ -43,6 +45,59 @@
       register: dri
       changed_when: "'CHANGED' in dri.stdout"
       loop: "{{ ollama_backends | selectattr('pve', 'eq', inventory_hostname) | selectattr('gpu') }}"
+      loop_control: { label: "{{ item.name }}" }
+
+- name: 모델 저장소 (호스트마다 하나, 그 호스트의 CT 가 함께 씀)
+  hosts: proxmox
+  gather_facts: false
+  vars:
+    backends_here: "{{ ollama_backends | selectattr('pve', 'eq', inventory_hostname) | list }}"
+  tasks:
+    - name: thin LV (pve/ollama-models)
+      community.general.lvol:
+        vg: pve
+        lv: ollama-models
+        thinpool: data
+        size: "{{ ollama_models_lv_size }}"
+        shrink: false          # 손으로 늘린 뒤 다시 실행해도 줄이지 않습니다
+      when: backends_here | length > 0
+    - name: ext4 (처음 한 번)
+      community.general.filesystem:
+        fstype: ext4
+        dev: /dev/pve/ollama-models
+      when: backends_here | length > 0 and not ansible_check_mode   # check 모드에서는 LV 가 아직 없다
+    # nofail 을 쓰지 않습니다. 마운트가 안 되면 아래 store 폴더가 없어 CT 가 시작하지 못하고(라우터가 건너뜀),
+    # 호스트 루트에 모델을 받는 일이 없습니다
+    - name: 마운트 (fstab)
+      ansible.posix.mount:
+        path: "{{ ollama_models_dir }}"
+        src: /dev/pve/ollama-models
+        fstype: ext4
+        opts: defaults
+        state: mounted
+      register: models_mount
+      when: backends_here | length > 0
+    - name: systemd 가 바뀐 fstab 을 읽게
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: models_mount is changed
+    - name: store 폴더 (CT 의 root 가 쓰도록 비특권 CT 의 uid 100000 소유)
+      ansible.builtin.file:
+        path: "{{ ollama_models_dir }}/store"
+        state: directory
+        owner: "100000"
+        group: "100000"
+        mode: "0755"
+      when: backends_here | length > 0
+    # 새 경로에 붙이므로(옛 /var/lib/ollama/models 를 가리지 않음) 실행 중인 CT 에도 재부팅 없이 바로 붙습니다
+    - name: CT 에 바인드 마운트
+      ansible.builtin.shell: |
+        pct config {{ item.vmid }} | grep -q '^mp0: {{ ollama_models_dir }}/store,' && exit 0
+        pct set {{ item.vmid }} --mp0 {{ ollama_models_dir }}/store,mp={{ ollama_models_dir }}
+        echo CHANGED
+      register: bind
+      changed_when: "'CHANGED' in bind.stdout"
+      loop: "{{ backends_here }}"
       loop_control: { label: "{{ item.name }}" }
 
 - name: Ollama CT 시작
@@ -106,7 +161,8 @@
           User=root
           Group=root
           Environment=OLLAMA_HOST=0.0.0.0:11434
-          Environment=OLLAMA_MODELS=/var/lib/ollama/models
+          Environment=OLLAMA_MODELS={{ ollama_models_dir }}
+          Environment=OLLAMA_NOPRUNE=1
           Environment=OLLAMA_KEEP_ALIVE=30m
           Environment=OLLAMA_MAX_LOADED_MODELS=1
           Environment=OLLAMA_NUM_PARALLEL=1
@@ -119,9 +175,9 @@
           Environment=OLLAMA_FLASH_ATTENTION=0
           {% endif %}
       register: override
-    - name: 모델 폴더
+    - name: 모델 폴더 (호스트 저장소의 바인드 마운트)
       ansible.builtin.file:
-        path: /var/lib/ollama/models
+        path: "{{ ollama_models_dir }}"
         state: directory
         mode: "0755"
     - name: 서비스 다시 읽기·시작
@@ -139,12 +195,13 @@
       delay: 2
     - name: 모델 받기 (없는 것만)
       ansible.builtin.shell: |
-        ollama list | awk 'NR>1{print $1}' | grep -qx "{{ item }}" && exit 0
+        ollama list | awk 'NR>1{print $1}' | grep -qxF -e "{{ item }}" -e "{{ item }}:latest" && exit 0   # 태그 없이 적은 모델은 :latest 로 나온다
         ollama pull {{ item }} >/dev/null && echo CHANGED
       register: pull
       changed_when: "'CHANGED' in pull.stdout"
       loop: "{{ ollama_models }}"
       when: ollama_pull_models | bool
+      throttle: 1              # 저장소를 함께 쓰는 CT 가 동시에 받지 않게 차례로. 뒤의 CT 는 이미 있어 건너뜁니다
     - name: 확인 (GPU CT 는 Vulkan 장치를 찾았는지)
       ansible.builtin.shell: |
         ollama list | awk 'NR>1{print $1}' | tr '\n' ' '
