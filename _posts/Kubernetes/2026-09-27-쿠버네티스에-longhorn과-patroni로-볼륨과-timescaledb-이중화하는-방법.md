@@ -45,15 +45,15 @@ local-path 볼륨은 한 노드의 디스크에만 있어서 그 서버가 죽�
 
 ## 1. worker 에 Longhorn 디스크 준비
 
-Longhorn 복제본은 OS 디스크와 나눈 전용 디스크(`scsi1`)의 `/var/lib/longhorn` 에 둡니다. 클러스터 변수의 worker 항목에 `longhorn_disk`(GB)를 붙이면, 플레이북이 VM 에 디스크를 핫플러그하고 Longhorn 이 쓰는 iSCSI(`open-iscsi`, `iscsi_tcp`)를 준비한 뒤 디스크를 포맷해 마운트합니다. Ubuntu 의 multipathd 가 Longhorn 장치를 가로채지 않게 `sd` 장치를 multipath 에서 뺍니다.
+Longhorn 복제본은 OS 디스크와 나눈 전용 디스크(`scsi1`)의 `/var/lib/longhorn` 에 둡니다. 클러스터 변수의 worker 항목에 `longhorn_disk`(GB)를 붙이면, 플레이북이 VM 에 디스크를 핫플러그하고 Longhorn 이 쓰는 iSCSI(`open-iscsi`, `iscsi_tcp`)를 준비한 뒤 디스크를 포맷해 마운트합니다. 나중에 `longhorn_disk` 값을 키우고 다시 실행하면 VM 을 켠 채로 디스크와 파일시스템을 그 크기로 늘립니다(줄이지는 못합니다). Ubuntu 의 multipathd 가 Longhorn 장치를 가로채지 않게 `sd` 장치를 multipath 에서 뺍니다.
 
 ```yaml
 k8s_clusters:
   hub:
     nodes:
       # ... control plane 항목
-      - { name: k8s-hub-worker-1, pve: pve01, role: worker, vmid: 123, ip: [WORKER1_IP], cores: 24, memory: 40960, disk: 100G, longhorn_disk: 20 }
-      - { name: k8s-hub-worker-2, pve: pve02, role: worker, vmid: 124, ip: [WORKER2_IP], cores: 8,  memory: 5120,  disk: 60G,  longhorn_disk: 20 }
+      - { name: k8s-hub-worker-1, pve: pve01, role: worker, vmid: 123, ip: [WORKER1_IP], cores: 12, memory: 24576, disk: 100G, longhorn_disk: 20 }
+      - { name: k8s-hub-worker-2, pve: pve02, role: worker, vmid: 124, ip: [WORKER2_IP], cores: 8,  memory: 16384, disk: 60G,  longhorn_disk: 20 }
 ```
 {: file="group_vars/all.yml" }
 
@@ -77,6 +77,14 @@ ansible-playbook playbooks/k8s-cluster.yml -e k8s_cluster=hub
         discard: "on"
         ssd: true
         state: present
+      loop: "{{ active | selectattr('longhorn_disk', 'defined') }}"
+      loop_control: { label: "{{ item.name }}" }
+    - name: Longhorn 디스크 늘리기 (longhorn_disk 를 키웠을 때. 켠 채로 늘리고, 줄이지는 못함)
+      community.proxmox.proxmox_disk:
+        vmid: "{{ item.vmid }}"
+        disk: scsi1
+        size: "{{ item.longhorn_disk }}G"
+        state: resized
       loop: "{{ active | selectattr('longhorn_disk', 'defined') }}"
       loop_control: { label: "{{ item.name }}" }
 ```
@@ -130,6 +138,14 @@ ansible-playbook playbooks/k8s-cluster.yml -e k8s_cluster=hub
       community.general.filesystem:
         dev: "{{ longhorn_dev }}"
         fstype: ext4
+    - name: 늘어난 디스크 크기 다시 읽기
+      ansible.builtin.shell: echo 1 > /sys/class/block/$(basename $(readlink -f {{ longhorn_dev }}))/device/rescan
+      changed_when: false
+    - name: 파일시스템을 디스크 크기에 맞춤 (디스크를 늘렸을 때)
+      community.general.filesystem:
+        dev: "{{ longhorn_dev }}"
+        fstype: ext4
+        resizefs: true
     - name: /var/lib/longhorn 에 마운트
       ansible.posix.mount:
         path: /var/lib/longhorn

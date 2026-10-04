@@ -107,13 +107,22 @@
         state: present
       loop: "{{ active | selectattr('longhorn_disk', 'defined') }}"
       loop_control: { label: "{{ item.name }}" }
-    - name: VM 설정 맞추기 (코어·메모리·IP·DNS·자동 시작. 모듈 특성상 매번 changed 로 보고됨)
+    - name: Longhorn 디스크 늘리기 (longhorn_disk 를 키웠을 때. 켠 채로 늘리고, 줄이지는 못함)
+      community.proxmox.proxmox_disk:
+        vmid: "{{ item.vmid }}"
+        disk: scsi1
+        size: "{{ item.longhorn_disk }}G"
+        state: resized
+      loop: "{{ active | selectattr('longhorn_disk', 'defined') }}"
+      loop_control: { label: "{{ item.name }}" }
+    - name: VM 설정 맞추기 (코어·메모리·CPU 우선순위·IP·DNS·자동 시작. 모듈 특성상 매번 changed 로 보고됨. 코어·메모리는 VM 을 껐다 켜야 적용)
       community.proxmox.proxmox_kvm:
         node: "{{ item.pve | default(proxmox_node) }}"
         vmid: "{{ item.vmid }}"
         name: "{{ item.name }}"
         cores: "{{ item.cores }}"
         memory: "{{ item.memory }}"
+        cpuunits: "{{ k8s_vm_cpuunits }}"
         onboot: true
         ipconfig: { ipconfig0: "ip={{ item.ip }}/24,gw={{ ct_gateway }}" }
         nameservers: "{{ k8s_nameservers }}"
@@ -484,6 +493,14 @@
       community.general.filesystem:
         dev: "{{ longhorn_dev }}"
         fstype: ext4
+    - name: 늘어난 디스크 크기 다시 읽기
+      ansible.builtin.shell: echo 1 > /sys/class/block/$(basename $(readlink -f {{ longhorn_dev }}))/device/rescan
+      changed_when: false
+    - name: 파일시스템을 디스크 크기에 맞춤 (디스크를 늘렸을 때)
+      community.general.filesystem:
+        dev: "{{ longhorn_dev }}"
+        fstype: ext4
+        resizefs: true
     - name: /var/lib/longhorn 에 마운트
       ansible.posix.mount:
         path: /var/lib/longhorn
@@ -493,6 +510,52 @@
         state: mounted
 
 # 옛 노드 빼기 (목록에서 retire: true). 한 대씩, 기준 control plane 의 kubectl 로 비우고 지웁니다
+- name: etcd 리더 감시 (control plane. 원격 투표자가 리더가 되면 이 노드로 되돌림)
+  hosts: k8s_control_planes
+  become: true
+  gather_facts: false
+  tasks:
+    - name: 패키지
+      ansible.builtin.apt:
+        name: [curl, jq]
+    - name: 감시 스크립트
+      ansible.builtin.copy:
+        src: ../scripts/etcd-leader-guard.sh
+        dest: /usr/local/sbin/etcd-leader-guard
+        mode: "0755"
+      notify: etcd-leader-guard 재시작
+    - name: 서비스 유닛
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/etcd-leader-guard.service
+        mode: "0644"
+        content: |
+          # proxmox-ansible 의 playbooks/k8s-cluster.yml 이 만듭니다. 직접 고치지 마세요.
+          [Unit]
+          Description=etcd 리더가 원격 투표자(etcd-witness)로 넘어가면 이 노드로 되돌림
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          ExecStart=/usr/local/sbin/etcd-leader-guard
+          Restart=always
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: etcd-leader-guard 재시작
+    - name: 서비스 켜기
+      ansible.builtin.systemd:
+        name: etcd-leader-guard
+        enabled: true
+        state: started
+        daemon_reload: true
+  handlers:
+    - name: etcd-leader-guard 재시작
+      ansible.builtin.systemd:
+        name: etcd-leader-guard
+        state: restarted
+        daemon_reload: true
+
 - name: 옛 노드 빼기
   hosts: k8s_retire
   become: true
