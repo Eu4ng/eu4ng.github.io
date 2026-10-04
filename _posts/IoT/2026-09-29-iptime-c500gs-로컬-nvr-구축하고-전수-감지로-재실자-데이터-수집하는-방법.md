@@ -239,15 +239,15 @@ ssh ubuntu@kubectl-hub.eu4ng.com "kubectl --kubeconfig ~/k8s-daejeon.yaml -n nvr
 
 로컬의 "당일" 은 그날 쓰는 폴더만 남긴다는 뜻입니다. 전날 폴더는 자정 뒤 NAS 로 보낸 다음 지웁니다.
 
-NVR 파드는 한 파드 안에 네 가지 컨테이너가 협력하는 구조입니다:
-1. **`go2rtc`**: 카메라에 RTSP 세션을 맺고(주 스트림 `main`, 보조 스트림 `sub`), 로컬 `:8554`로 스트림을 분배합니다. 저가형 IP 카메라의 동시 연결 수 한계 문제를 원천 차단합니다.
-2. **`recorder`**: `ffmpeg`를 사용해 `rtsp://localhost:8554/main` 주 스트림을 재인코딩 없이 날짜마다 MKV 하나로 저장합니다 (`/mnt/nvr/%Y%m%d/%Y%m%d_main_%H%M%S.mkv`). `-segment_atclocktime` 이 컨테이너 로컬 시각(`TZ=Asia/Seoul`) 자정에 새 파일을 엽니다.
-3. **`recorder-sub`**: `ffmpeg`를 사용해 `rtsp://localhost:8554/sub` 보조 스트림을 재인코딩 없이 날짜마다 MKV 하나로 저장합니다 (`/mnt/nvr/%Y%m%d/%Y%m%d_sub_%H%M%S.mkv`). 주 스트림과 함께 NAS 에 백업되어 나중에 모델·설정을 바꿔 재분석할 수 있습니다.
-4. **`occupancy`**: 보조 스트림(640x368 20fps)을 PyAV 로 디코딩해 초당 5프레임(`track_fps: 5`)을 YOLOv8n + ByteTrack 으로 [추적](/posts/84/)합니다.
+NVR 은 상시 무중단 녹화를 담당하는 **녹화 파드(`nvr`)**와, 알고리즘 개선 및 모델 재배포가 잦은 **영상 분석 파드(`nvr-occupancy`)**로 역할을 분리하여 협력하는 구조입니다:
+1. **`go2rtc`** (녹화 파드): 카메라에 RTSP 세션을 맺고(주 스트림 `main`, 보조 스트림 `sub`), Service `nvr:8554` 로 스트림을 분배합니다. 저가형 IP 카메라의 동시 연결 수 한계 문제를 원천 차단합니다.
+2. **`recorder`** (녹화 파드): `RECORD_STREAMS` 환경 변수(기본 `main sub`, 환경에 따라 `main`, `sub` 가능)에 설정된 스트림을 `ffmpeg` 로 재인코딩 없이 날짜마다 MKV 로 저장합니다 (`/mnt/nvr/%Y%m%d/%Y%m%d_<스트림>_%H%M%S.mkv`). 분석 파드를 재배포해도 녹화 파드는 멈추지 않아 24시간 무중단 녹화가 유지됩니다.
+3. **`occupancy`** (영상 분석 파드): `rtsp://nvr.nvr.svc.cluster.local:8554/sub` 로 보조 스트림(640x368 20fps)을 받아 초당 5프레임(`track_fps: 5`)을 YOLOv8n + ByteTrack 으로 [추적](/posts/84/)합니다.
    - 1초 동안 축적된 5개 샘플의 중앙값(median)을 계산하여 순간 노이즈를 필터링하고, 중앙값 인원수와 일치하는 최신 대표 프레임의 좌표/속도를 1초마다 `nvr/bedroom2-camera`(감지 결과)와 `nvr/bedroom2-camera/derived`(방 좌표로 바꾼 값)에 `{"fields": {...}, "timestamp": <ms>}` 로 발행합니다. Home Assistant 발견 설정도 함께 내므로 HA 에 기기 `bedroom2-camera` 와 센서가 자동으로 생기고, 엣지 Telegraf 가 같은 토픽을 받아 `readings` 에 넣습니다.
    - 연결 상태는 `nvr/bedroom2-camera/availability` 에 유지 메시지(`{"state": "online"}`)로 냅니다. 발행을 시작하면 `online`, 카메라 프레임이 60초 동안 없거나 수집기가 멈추면 `offline` 이고, 수집기가 끊기면 브로커가 Last Will 로 `offline` 을 냅니다. HA 센서는 이 토픽을 따라 `사용할 수 없음` 이 되고, DB 에는 속성 `availability` 행으로 남습니다.
    - 칸은 동시에 감지된 최대 인원만큼 생기고, 사람이 없는 칸의 **감지** 센서는 `감지되지 않음` 이 됩니다.
-   - 추적한 프레임마다 초록 박스와 칸·추적 ID·신뢰도·좌표·시각을 그린 **실시간 측정 영상**(`_live`)을 날짜마다 MKV 로 씁니다. 보조 스트림 해상도를 그대로 쓰므로 별도의 소프트웨어 트랜스코딩 없이 초당 2ms 내외로 가볍게 저장됩니다.
+   - 실시간 감지 당시의 판단 결과(박스, 인원수)를 사후에 직접 눈으로 비교·검증할 수 있도록, 추적한 프레임마다 초록 박스를 그린 **실시간 측정 영상**(`_live`)을 날짜마다 MKV 로 씁니다. 보조 스트림 해상도를 그대로 쓰므로 초당 2ms 내외로 가볍게 저장됩니다.
+   - `podAffinity` 로 녹화 파드와 동일한 워커 노드에 배치되어 `/mnt/nvr` 볼륨을 공유하며, 두 파드 모두 `priorityClassName: essential` 과 30초 축출 toleration 이 적용되어 pve01 다운 시 pve02 로 함께 자동 이전됩니다.
 
 GitOps 저장소(`k8s-gitops`)의 `iot/edge/nvr/`에 베이스 매니페스트와 스크립트를 두고, `iot/clusters/daejeon/nvr/`에 오버레이를 둡니다.
 
