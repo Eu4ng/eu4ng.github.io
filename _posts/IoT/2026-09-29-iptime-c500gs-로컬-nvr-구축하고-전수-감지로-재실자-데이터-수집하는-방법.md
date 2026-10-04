@@ -232,21 +232,22 @@ ssh ubuntu@kubectl-hub.eu4ng.com "kubectl --kubeconfig ~/k8s-daejeon.yaml -n nvr
 
 | 파일 | 내용 | 로컬 | 서울 NAS |
 | :--- | :--- | :--- | :--- |
-| `<날짜>_rec.mkv` | 5MP H.265 원본(무인코딩) | 당일 | 보내지 않음 |
-| `<날짜>_rec720.mkv` | 720p 10fps 사본 | 당일 | 365일 |
-| `<날짜>_live.mkv` | 실시간 측정 영상(초록 박스) | 당일 | 365일 |
+| `<날짜>_main.mkv` | 5MP H.265 주 스트림 원본(무인코딩) | 당일 | 365일 |
+| `<날짜>_sub.mkv` | 640x368 H.265 보조 스트림 원본(무인코딩) | 당일 | 365일 |
+| `<날짜>_live.mkv` | 실시간 측정 영상(보조 스트림 기반 초록 박스) | 당일 | 365일 |
 | `<날짜>_review.json`, `<날짜>_review_<시작>-<끝>.mkv` | 사후 검수 결과와 불일치 구간 클립 | 당일 | 365일 |
 
 로컬의 "당일" 은 그날 쓰는 폴더만 남긴다는 뜻입니다. 전날 폴더는 자정 뒤 NAS 로 보낸 다음 지웁니다.
 
-NVR 파드는 한 파드 안에 세 가지 컨테이너가 협력하는 구조입니다:
-1. **`go2rtc`**: 카메라에 RTSP 세션을 딱 1개만 맺고, 로컬 `:8554`로 스트림을 분배합니다. 저가형 IP 카메라의 동시 연결 수 한계 문제를 원천 차단합니다.
-2. **`recorder`**: `ffmpeg`를 사용해 `rtsp://localhost:8554/main` 스트림을 재인코딩 없이 날짜마다 MKV 하나로 저장합니다 (`/mnt/nvr/%Y%m%d/%Y%m%d_rec_%H%M%S.mkv`). `-segment_atclocktime` 이 컨테이너 로컬 시각(`TZ=Asia/Seoul`) 자정에 새 파일을 엽니다.
-3. **`occupancy`**: 주 스트림(5MP 20fps)을 PyAV 로 디코딩해 초당 10프레임을 1280x720 으로 받아 YOLOv8n + ByteTrack 으로 [추적](/posts/84/)합니다.
-   - 사람마다 칸(`occupant1`, `occupant2` …)을 배정하고 1초마다 `nvr/bedroom2-camera`(감지 결과)와 `nvr/bedroom2-camera/derived`(방 좌표로 바꾼 값)에 `{"fields": {...}, "timestamp": <ms>}` 를 발행합니다. Home Assistant 발견 설정도 함께 내므로 HA 에 기기 `bedroom2-camera` 와 센서가 자동으로 생기고, 엣지 Telegraf 가 같은 토픽을 받아 `readings` 에 넣습니다.
+NVR 파드는 한 파드 안에 네 가지 컨테이너가 협력하는 구조입니다:
+1. **`go2rtc`**: 카메라에 RTSP 세션을 맺고(주 스트림 `main`, 보조 스트림 `sub`), 로컬 `:8554`로 스트림을 분배합니다. 저가형 IP 카메라의 동시 연결 수 한계 문제를 원천 차단합니다.
+2. **`recorder`**: `ffmpeg`를 사용해 `rtsp://localhost:8554/main` 주 스트림을 재인코딩 없이 날짜마다 MKV 하나로 저장합니다 (`/mnt/nvr/%Y%m%d/%Y%m%d_main_%H%M%S.mkv`). `-segment_atclocktime` 이 컨테이너 로컬 시각(`TZ=Asia/Seoul`) 자정에 새 파일을 엽니다.
+3. **`recorder-sub`**: `ffmpeg`를 사용해 `rtsp://localhost:8554/sub` 보조 스트림을 재인코딩 없이 날짜마다 MKV 하나로 저장합니다 (`/mnt/nvr/%Y%m%d/%Y%m%d_sub_%H%M%S.mkv`). 주 스트림과 함께 NAS 에 백업되어 나중에 모델·설정을 바꿔 재분석할 수 있습니다.
+4. **`occupancy`**: 보조 스트림(640x368 20fps)을 PyAV 로 디코딩해 초당 5프레임(`track_fps: 5`)을 YOLOv8n + ByteTrack 으로 [추적](/posts/84/)합니다.
+   - 1초 동안 축적된 5개 샘플의 중앙값(median)을 계산하여 순간 노이즈를 필터링하고, 중앙값 인원수와 일치하는 최신 대표 프레임의 좌표/속도를 1초마다 `nvr/bedroom2-camera`(감지 결과)와 `nvr/bedroom2-camera/derived`(방 좌표로 바꾼 값)에 `{"fields": {...}, "timestamp": <ms>}` 로 발행합니다. Home Assistant 발견 설정도 함께 내므로 HA 에 기기 `bedroom2-camera` 와 센서가 자동으로 생기고, 엣지 Telegraf 가 같은 토픽을 받아 `readings` 에 넣습니다.
    - 연결 상태는 `nvr/bedroom2-camera/availability` 에 유지 메시지(`{"state": "online"}`)로 냅니다. 발행을 시작하면 `online`, 카메라 프레임이 60초 동안 없거나 수집기가 멈추면 `offline` 이고, 수집기가 끊기면 브로커가 Last Will 로 `offline` 을 냅니다. HA 센서는 이 토픽을 따라 `사용할 수 없음` 이 되고, DB 에는 속성 `availability` 행으로 남습니다.
    - 칸은 동시에 감지된 최대 인원만큼 생기고, 사람이 없는 칸의 **감지** 센서는 `감지되지 않음` 이 됩니다.
-   - 추적한 프레임마다 초록 박스와 칸·추적 ID·신뢰도·좌표·시각을 그린 **실시간 측정 영상**(`_live`)과, 같은 프레임을 그리기 전 그대로 담은 720p 사본(`_rec720`)을 날짜마다 MKV 로 씁니다. 카메라 주 스트림 해상도는 ONVIF 로 바꿀 수 없어 720p 는 수집기가 만듭니다.
+   - 추적한 프레임마다 초록 박스와 칸·추적 ID·신뢰도·좌표·시각을 그린 **실시간 측정 영상**(`_live`)을 날짜마다 MKV 로 씁니다. 보조 스트림 해상도를 그대로 쓰므로 별도의 소프트웨어 트랜스코딩 없이 초당 2ms 내외로 가볍게 저장됩니다.
 
 GitOps 저장소(`k8s-gitops`)의 `iot/edge/nvr/`에 베이스 매니페스트와 스크립트를 두고, `iot/clusters/daejeon/nvr/`에 오버레이를 둡니다.
 
@@ -310,6 +311,8 @@ rtsp:
 streams:
   main:
     - "rtsp://admin:${RTSP_PASSWORD}@192.168.0.40:554/onvif1"
+  sub:
+    - "rtsp://admin:${RTSP_PASSWORD}@192.168.0.40:554/onvif2"
 ```
 {: file="iot/edge/nvr/go2rtc.yaml" }
 {% endraw %}
@@ -321,12 +324,12 @@ streams:
   "publish_interval_s": 1.0,
   "slot_release_s": 10,
   "speed_window_s": 2.0,
-  "track_fps": 10
+  "track_fps": 5
 }
 ```
 {: file="iot/edge/nvr/collector-settings.json" }
 
-매일 00:05 에 실행되는 `nvr-daily-archive` CronJob 은 전날 파일이 닫히기를 기다린 뒤 종류마다 재인코딩 없이 하나로 합칩니다. 재시작 때문에 파일이 나뉜 날은 녹화가 이어진 구간마다 `<날짜>_<종류>_<시작>-<끝>.mkv` 로 합치므로 이름의 시각 사이가 녹화가 끊긴 구간입니다. 이어서 720p 사본과 실시간 측정 영상을 Tailscale 경유 서울 NAS(`/volume3/backup/nvr/daejeon/<날짜>/`)로 SFTP 로 보내고, 다 보낸 전날 폴더는 로컬에서 바로 지웁니다(`LOCAL_DAYS` 기본 0). NAS 에서는 365일이 지난 날짜 폴더를 지웁니다. 정리가 하루 한 번만 돌기 때문에 전날 영상을 남겨 두면 18Gi 볼륨이 다음 날 가득 차므로 로컬에는 당일치만 둡니다. 정리한 뒤에도 여유가 60%(`MIN_FREE_PCT`)보다 적으면 남은 지난 폴더의 5MP 원본부터 더 지웁니다. NAS 로 보내지 못한 파일이 있는 폴더는 지우지 않고 다음 실행에 다시 보냅니다. NAS 계정은 볼륨 최상위에 폴더를 만들 수 없으므로 기존 공유 폴더 아래에 두고, 시놀로지는 rsync 서비스를 켜지 않으면 rsync-over-ssh 를 거부하므로 SFTP 를 씁니다. SFTP 경로는 공유 폴더 기준(`/backup/nvr/daejeon`)입니다.
+매일 00:05 에 실행되는 `nvr-daily-archive` CronJob 은 전날 파일이 닫히기를 기다린 뒤 종류마다 재인코딩 없이 하나로 합칩니다. 재시작 때문에 파일이 나뉜 날은 녹화가 이어진 구간마다 `<날짜>_<종류>_<시작>-<끝>.mkv` 로 합치므로 이름의 시각 사이가 녹화가 끊긴 구간입니다. 이어서 주 스트림(`_main`), 보조 스트림(`_sub`), 실시간 측정 영상(`_live`)을 Tailscale 경유 서울 NAS(`/volume3/backup/nvr/daejeon/<날짜>/`)로 SFTP 로 보내고, 다 보낸 전날 폴더는 로컬에서 바로 지웁니다(`LOCAL_DAYS` 기본 0). NAS 에서는 365일이 지난 날짜 폴더를 지웁니다. 정리가 하루 한 번만 돌기 때문에 전날 영상을 남겨 두면 18Gi 볼륨이 다음 날 가득 차므로 로컬에는 당일치만 둡니다. 정리한 뒤에도 여유가 60%(`MIN_FREE_PCT`)보다 적으면 남은 지난 폴더의 영상부터 더 지웁니다. NAS 로 보내지 못한 파일이 있는 폴더는 지우지 않고 다음 실행에 다시 보냅니다. NAS 계정은 볼륨 최상위에 폴더를 만들 수 없으므로 기존 공유 폴더 아래에 두고, 시놀로지는 rsync 서비스를 켜지 않으면 rsync-over-ssh 를 거부하므로 SFTP 를 씁니다. SFTP 경로는 공유 폴더 기준(`/backup/nvr/daejeon`)입니다.
 
 `nvr-review` CronJob(매일 00:30)은 사후 검수입니다. 실시간 측정은 움직이는 사람은 잘 잡지만 오래 가만히 있는 사람에게 약하므로, 합친 5MP 원본의 **모든 프레임**을 더 큰 모델로 다시 추적해 초마다 인원을 내고 DB `readings` 의 실시간 `occupant_count` 와 비교합니다. 값이 다른 구간만 왼쪽에 실시간 측정 영상, 오른쪽에 검수 결과를 붙인 2560x720 클립으로 남기고, 일치율과 불일치 구간 목록을 `<날짜>_review.json` 에 씁니다. 마감 시간 없이 검수 안 된 가장 최근 날짜부터 처리하고, CPU 가 모자랄 때 실시간 수집이 먼저 받도록 검수 CronJob 의 CPU request 를 낮게 둡니다. 모델과 비교 기준은 `review-settings.json` 에서 바꿉니다.
 
@@ -366,13 +369,13 @@ ssh ubuntu@kubectl-hub.eu4ng.com "kubectl --kubeconfig ~/k8s-daejeon.yaml -n nvr
 
 - **확인:** `STATUS` 가 `Bound`, `CAPACITY` 가 `18Gi`, `STORAGECLASS` 가 `longhorn` 입니다.
 
-영상 볼륨(`/mnt/nvr/`) 아래에 오늘 날짜 폴더가 생기고 원본·720p 사본·실시간 측정 영상 MKV 가 커지는지 봅니다.
+영상 볼륨(`/mnt/nvr/`) 아래에 오늘 날짜 폴더가 생기고 주 스트림(`main`)·보조 스트림(`sub`)·실시간 측정 영상(`live`) MKV 가 커지는지 봅니다.
 
 ```bash
 ssh ubuntu@kubectl-hub.eu4ng.com "kubectl --kubeconfig ~/k8s-daejeon.yaml -n nvr exec deploy/nvr -c recorder -- ls -lh /mnt/nvr/$(date +%Y%m%d)"
 ```
 
-- **확인:** `<날짜>_rec_<시작>.mkv`, `<날짜>_rec720_<시작>.mkv`, `<날짜>_live_<시작>.mkv` 가 보이고 크기가 계속 늘어납니다. 쓰는 중인 원본을 `ffprobe` 로 열면 원본 해상도(2880x1620, hevc)가 그대로입니다.
+- **확인:** `<날짜>_main_<시작>.mkv`, `<날짜>_sub_<시작>.mkv`, `<날짜>_live_<시작>.mkv` 가 보이고 크기가 계속 늘어납니다. 쓰는 중인 주 스트림을 `ffprobe` 로 열면 원본 해상도(2880x1620, hevc)가 그대로입니다.
 
 수집기 로그의 1분 통계에서 추적 프레임 수가 목표를 따라가는지 봅니다.
 
@@ -380,7 +383,7 @@ ssh ubuntu@kubectl-hub.eu4ng.com "kubectl --kubeconfig ~/k8s-daejeon.yaml -n nvr
 ssh ubuntu@kubectl-hub.eu4ng.com "kubectl --kubeconfig ~/k8s-daejeon.yaml -n nvr logs deploy/nvr -c occupancy | grep '1분:'"
 ```
 
-- **확인:** `추적 600프레임(목표 10fps …)`, `밀려 버린 프레임 0` 처럼 나옵니다. `영상 쓰기` 는 측정 영상과 720p 사본을 쓰는 시간입니다. 밀려 버린 프레임이 많으면 `track_fps` 를 낮춥니다.
+- **확인:** `추적 300프레임(목표 5fps …)`, `밀려 버린 프레임 0` 처럼 나옵니다. `영상 쓰기` 는 측정 영상을 쓰는 시간(약 2ms)입니다. 밀려 버린 프레임이 많으면 `track_fps` 를 낮춥니다.
 
 재실자 값이 Telegraf 를 거쳐 `readings` 에 들어오는지 쿼리합니다.
 
