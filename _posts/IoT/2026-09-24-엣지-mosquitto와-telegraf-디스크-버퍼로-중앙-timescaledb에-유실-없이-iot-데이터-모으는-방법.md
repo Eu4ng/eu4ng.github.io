@@ -590,7 +590,7 @@ def remember_devices(metric):
 # 필드 이름 끝으로 정합니다. 필드 이름은 <부품>_<값> 규칙이고, 값은 proxmox-ansible scripts/host-metrics-discovery.py 의 SENSORS 표와 같아야 합니다.
 # _percent 를 _used 보다 먼저 봅니다(mem_used_percent 가 B 로 잡히지 않게). 여기 없는 끝(_load, _cores, _threads, _ok)은 단위가 없습니다
 HOST_UNITS = [("_percent", "%"), ("_usage", "%"), ("_temp", "°C"), ("_power", "W"), ("_clock", "MHz"),
-              ("_used", "B"), ("_total", "B"), ("_uptime", "s")]
+              ("_used", "B"), ("_total", "B"), ("_uptime", "s"), ("_rate", "Mbit/s"), ("_loss", "%"), ("_latency", "ms")]
 
 def host_unit(field):
     for end, unit in HOST_UNITS:

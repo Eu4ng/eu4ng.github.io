@@ -67,6 +67,13 @@ host_metrics_mqtt_user: devices               # LAN 기기용 브로커 계정. 
 host_metrics_mounts: [/]                      # 용량을 잴 마운트(호스트 루트). 호스트마다 다르면 inventory 에서 덮어씁니다
 host_metrics_disks: [nvme0n1]                 # IO·온도·수명을 잴 물리 디스크(VM 디스크인 dm-* 는 뺌). 여럿이면 가장 높은 값으로 묶습니다
 host_metrics_drm_card: card0                  # iGPU 의 /sys/class/drm/<카드>
+host_metrics_nic: nic0                         # 송수신량을 잴 물리 NIC(vmbr0 의 포트). 호스트와 그 위 VM·CT 의 합
+host_metrics_ping:                            # 구간 이름 → ping 대상. 손실이 어느 구간에서 생기는지 가립니다(net_<구간>_loss)
+  router: "{{ ct_gateway }}"                  # 공유기
+  isp: [ISP_FIRST_HOP_IP]                     # 통신사 첫 구간(traceroute 의 두 번째 홉). 회선을 바꾸면 다시 확인
+  internet: 1.1.1.1
+  nas: "{{ pve_qdevice_host }}"               # 서울 NAS(Tailscale). etcd 투표자·QDevice·DB 복제가 이 경로를 씁니다
+host_metrics_ping_latency: [internet, nas]    # 응답 시간(net_<구간>_latency)도 낼 구간
 ```
 {: file="group_vars/all.yml (추가 부분)" }
 {% endraw %}
@@ -93,14 +100,14 @@ host_metrics_drm_card: card0                  # iGPU 의 /sys/class/drm/<카드>
 
 | 파일 | 하는 일 |
 | :--- | :--- |
-| `templates/host-metrics/telegraf.conf.j2` | 입력(cpu, system, mem, swap, disk, diskio, temp, smart, exec) → starlark 로 부품별 대표 필드 → merge 로 10초에 메시지 하나 → MQTT |
+| `templates/host-metrics/telegraf.conf.j2` | 입력(cpu, system, mem, swap, disk, diskio, temp, smart, net, ping, exec) → starlark 로 부품별 대표 필드 → merge 로 10초에 메시지 하나 → MQTT |
 | `templates/host-metrics/host-sysfs.sh.j2` | 기본 입력이 못 읽는 값: 코어 클럭 평균, RAPL 누적 에너지, iGPU 사용률·메모리(VRAM+GTT) |
 | `scripts/host-metrics-discovery.py` | 실제 메시지를 받아 필드마다 Home Assistant 발견 설정을 맞추고, 없어진 필드의 센서는 지웁니다 |
 | `scripts/host-availability.py` | 호스트 연결 상태를 `hosts/[기기 이름]/availability` 에 `online`·`offline` 으로 알리는 상주 스크립트 |
 | `templates/host-metrics/host-availability.service.j2` | 위 스크립트를 Telegraf 와 함께 켜고 함께 멈추는 systemd 서비스 |
 | `playbooks/host-metrics.yml` | 설치, 권한, 설정 배포, 연결 상태 서비스, 발견 설정 |
 
-필드 이름은 `<부품>_<값>` 이고 뜻마다 이름 하나만 씁니다. 값은 `usage`(활동률 %), `used_percent`(용량 사용률 %), `used`·`total`(사용량·용량 B), `power`(W), `clock`(MHz), `temp`(°C), `load`(1분 부하 평균, 단위 없음) 입니다. `cpu_load` 를 `cpu_cores` 로 나누면 CPU 사용률이 100% 에 닿은 뒤에도 코어 수 대비 몇 배로 밀렸는지 봅니다.
+필드 이름은 `<부품>_<값>` 이고 뜻마다 이름 하나만 씁니다. 값은 `usage`(활동률 %), `used_percent`(용량 사용률 %), `used`·`total`(사용량·용량 B), `power`(W), `clock`(MHz), `temp`(°C), `load`(1분 부하 평균, 단위 없음), `rate`(초당 전송량 Mbit/s), `loss`(ping 손실률 %), `latency`(ping 응답 시간 ms) 입니다. `cpu_load` 를 `cpu_cores` 로 나누면 CPU 사용률이 100% 에 닿은 뒤에도 코어 수 대비 몇 배로 밀렸는지 봅니다.
 목적이 발열·소비전력이라 부품마다 대표값 하나씩만 보내고, 같은 것을 여러 번 재는 값은 뺍니다. 예를 들어 Ryzen 은 k10temp 가 칩 전체의 제어 온도(Tctl)와 코어 다이별 온도(Tccd1·Tccd2)를 따로 알려 주는데, 팬·부스트가 기준으로 삼는 Tctl 만 씁니다. NVMe 도 센서가 세 개지만 대표값(Composite)만 씁니다.
 메모리 모듈이나 디스크처럼 장치가 여럿인 값은 가장 높은 값 하나로 묶어 호스트끼리 같은 이름으로 비교합니다.
 
@@ -110,7 +117,11 @@ host_metrics_drm_card: card0                  # iGPU 의 /sys/class/drm/<카드>
 | GPU | `gpu_usage`, `gpu_temp`, `gpu_mem_used` | 사용률, amdgpu edge 온도, VRAM+GTT 사용량(B) |
 | 메모리 | `mem_used_percent`, `mem_temp`, `swap_used_percent` | 사용률, DIMM 온도(최대), 스왑 사용률 |
 | 디스크 | `disk_used_percent`, `disk_usage`, `disk_temp` | 호스트 `/` 사용률, IO 사용 시간(최대), NVMe 온도(최대) |
+| 네트워크 | `net_rx_rate`, `net_tx_rate` | 물리 NIC 의 수신·송신량(호스트와 그 위 VM·CT 의 합) |
+| 네트워크 | `net_router_loss`, `net_isp_loss`, `net_internet_loss`, `net_nas_loss`, `net_internet_latency`, `net_nas_latency` | 구간별 ping 손실(10초에 5번): 공유기, 통신사 첫 구간, 1.1.1.1, 원격 NAS(Tailscale). 집 밖 두 구간은 응답 시간도 |
 | 시스템 | `system_uptime` | 가동 시간(초). 값이 줄면 재부팅입니다 |
+
+네트워크 필드는 인터넷 구간 손실로 원격 etcd 투표자가 흔들렸을 때 손실이 어느 구간에서 생겼는지, 우리 쪽 전송이 회선을 채웠는지를 가릴 기록이 없어서 넣었습니다.
 
 거의 바뀌지 않는 값은 바뀔 때와 1시간마다 한 번만 보냅니다. 용량 부족 시기를 예측하고 장애 원인을 찾을 때 쓰는 값입니다.
 
@@ -132,6 +143,7 @@ GPU 전력은 수집하지 않습니다. amdgpu 가 알리는 값을 610M 에 �
 # 호스트 전체(VM·CT 합)의 대표값을 10초마다 모아 JSON 메시지 하나로 hosts/{{ host_metrics_name }} 에 발행합니다.
 #   {"name": "host", "fields": {"cpu_usage": 3.9, "cpu_load": 2.4, "cpu_power": 29.9, "cpu_temp": 55.9, ...}, "tags": {}, "timestamp": <ms>}
 # 목적은 발열·소비전력 분석과 서버 상태 파악이라 부품마다 대표값 하나씩만 냅니다(필드 이름 <부품>_<값>).
+# 네트워크는 송수신량과 구간별 ping 손실을 냅니다(인터넷 구간 손실로 원격 etcd 투표자가 흔들린 적이 있어 어느 구간인지 남깁니다).
 # 같은 것을 여러 번 재는 값(코어 다이별 온도, NVMe 보조 센서, 코어 전력 등)은 내지 않고, 장치가 여럿인 값(DIMM 온도, 디스크)은 가장 높은 값으로 묶습니다.
 # 거의 바뀌지 않는 값(사양·수명)은 바뀔 때와 1시간마다 한 번만 냅니다.
 # Home Assistant 센서는 host-metrics-discovery.py 가 이 필드들로 만들고, 엣지 Telegraf 가 같은 토픽을 받아 DB readings 에 넣습니다.
@@ -171,6 +183,16 @@ GPU 전력은 수집하지 않습니다. amdgpu 가 알리는 값을 610M 에 �
   interval = "1m"                     # 수명·상태는 느리게 바뀝니다. 아래 starlark 가 바뀔 때와 1시간마다 한 번만 내보냅니다
   use_sudo = true
 
+[[inputs.net]]                        # 물리 NIC 의 누적 송수신량. 아래 starlark 가 초당 Mbit 로 바꿉니다(호스트와 그 위 VM·CT 의 합)
+  interfaces = {{ [host_metrics_nic] | to_json }}
+
+[[inputs.ping]]                       # 구간별 손실: 공유기 → 통신사 첫 구간 → 인터넷 → 서울 NAS(Tailscale). 어디서 끊기는지 가립니다
+  urls = {{ host_metrics_ping.values() | list | to_json }}
+  count = 5
+  ping_interval = 1.0
+  timeout = 1.0
+  deadline = 8
+
 [[inputs.exec]]
   commands = [["/usr/local/lib/telegraf-host-sysfs.sh"]]   # CPU 클럭, RAPL 전력, iGPU 사용률·메모리 (templates/host-metrics/host-sysfs.sh.j2)
   data_format = "influx"
@@ -183,6 +205,9 @@ BUCKET = 10 * 1000 * 1000 * 1000
 SLOW_PERIOD = 3600 * 1000 * 1000 * 1000   # 사양·수명은 바뀔 때와 이 간격마다 한 번만 냅니다
 # hwmon 센서 이름 → 필드. CPU 는 칩 전체의 제어 온도(Tctl)만, 디스크는 대표값(composite)만 씁니다
 TEMPS = {"k10temp_tctl": "cpu_temp", "amdgpu_edge": "gpu_temp", "spd5118": "mem_temp", "nvme_composite": "disk_temp"}
+# ping 대상 주소 → 구간 이름. 필드는 net_<구간>_loss(%), 집 밖 구간은 net_<구간>_latency(ms)도 냅니다
+PINGS = {{ dict(host_metrics_ping.values() | zip(host_metrics_ping.keys())) | to_json }}
+PING_LATENCY = {{ host_metrics_ping_latency | to_json }}
 MAX_FIELDS = ["mem_temp", "disk_temp", "disk_usage", "disk_wear_percent"]   # 장치가 여럿이면 가장 높은 값
 MIN_FIELDS = ["disk_health_ok"]                                            # 하나라도 이상하면 0
 SLOW_FIELDS = ["cpu_cores", "cpu_threads", "mem_total", "disk_total", "disk_wear_percent", "disk_health_ok"]
@@ -254,6 +279,16 @@ def fields_of(metric):
         ok = f.get("health_ok")
         if ok != None:
             out["disk_health_ok"] = 1.0 if ok else 0.0
+    elif n == "net":
+        for k, src in (("net_rx_rate", "bytes_recv"), ("net_tx_rate", "bytes_sent")):
+            r = rate(k, f[src], t)                                    # B/s → Mbit/s
+            out[k] = r * 8 / 1e6 if r != None else None
+    elif n == "ping":
+        hop = PINGS.get(tags.get("url", ""))
+        if hop != None:
+            out["net_" + hop + "_loss"] = f.get("percent_packet_loss")
+            if hop in PING_LATENCY:
+                out["net_" + hop + "_latency"] = f.get("average_response_ms")   # 전부 잃으면 값이 없습니다
     elif n == "sysfs":
         for k in ("cpu_clock", "gpu_usage", "gpu_mem_used"):
             out[k] = f.get(k)
@@ -412,6 +447,12 @@ CELSIUS = {
     "suggested_display_precision": 1,
 }
 MHZ = {"unit_of_measurement": "MHz", "device_class": "frequency"}
+MBPS = {
+    "unit_of_measurement": "Mbit/s",
+    "device_class": "data_rate",
+    "suggested_display_precision": 2,
+}
+MSEC = {"unit_of_measurement": "ms", "suggested_display_precision": 1}
 DIAG = {"entity_category": "diagnostic"}
 
 # 필드 → (이름, 속성). 필드 이름은 <부품>_<값> 이고 부품마다 대표값 하나씩이라 규칙 대신 표로 둔다.
@@ -431,6 +472,14 @@ SENSORS = {
     "disk_used_percent": ("디스크 사용률", PERCENT),
     "disk_usage": ("디스크 사용 시간", PERCENT),
     "disk_temp": ("디스크 온도", CELSIUS),
+    "net_rx_rate": ("네트워크 수신량", MBPS),
+    "net_tx_rate": ("네트워크 송신량", MBPS),
+    "net_router_loss": ("공유기 구간 손실", PERCENT),
+    "net_isp_loss": ("통신사 구간 손실", PERCENT),
+    "net_internet_loss": ("인터넷 구간 손실", PERCENT),
+    "net_internet_latency": ("인터넷 응답 시간", MSEC),
+    "net_nas_loss": ("서울 NAS 구간 손실", PERCENT),
+    "net_nas_latency": ("서울 NAS 응답 시간", MSEC),
     "system_uptime": (
         "가동 시간",
         {"unit_of_measurement": "s", "device_class": "duration"} | DIAG,
@@ -1054,7 +1103,7 @@ ansible-playbook playbooks/host-metrics.yml --limit pve01
 ansible-playbook playbooks/host-metrics.yml
 ```
 
-- **확인:** `PLAY RECAP` 에 `failed=0` 이고, 같은 명령을 한 번 더 실행하면 `changed=0` 입니다. 브로커에서 메시지를 하나 받아 보면 필드가 15개입니다(Telegraf 가 시작한 직후 한 번과 1시간마다는 사양·수명 6개가 더 붙습니다).
+- **확인:** `PLAY RECAP` 에 `failed=0` 이고, 같은 명령을 한 번 더 실행하면 `changed=0` 입니다. 브로커에서 메시지를 하나 받아 보면 필드가 23개입니다(Telegraf 가 시작한 직후 한 번과 1시간마다는 사양·수명 6개가 더 붙습니다). ping 을 전부 잃은 구간은 응답 시간 필드가 빠집니다. 아래 출력은 네트워크 필드 8개(`net_*`)를 넣기 전에 받은 것이라 15개만 보입니다.
 
 ```bash
 # 허브 control plane. E 는 엣지 kubeconfig, PW 는 telegraf 계정 비밀번호
