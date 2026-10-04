@@ -263,6 +263,10 @@ spec:
     metadata:
       labels: { app: cloudflared }
     spec:
+      priorityClassName: essential             # 서버 한 대가 죽어도 유지(iot/shared/priority-classes)
+      tolerations:                              # 노드가 죽으면 30초 뒤 다른 노드에서 다시 띄웁니다(기본 300초)
+        - { key: node.kubernetes.io/not-ready, operator: Exists, effect: NoExecute, tolerationSeconds: 30 }
+        - { key: node.kubernetes.io/unreachable, operator: Exists, effect: NoExecute, tolerationSeconds: 30 }
       affinity:
         podAntiAffinity:                           # 노드(서버)마다 하나씩. 한 대만 남으면 같은 노드에도 뜹니다
           preferredDuringSchedulingIgnoredDuringExecution:
@@ -308,6 +312,8 @@ spec:
     matchLabels: { app: cloudflared }
 ```
 {: file="services/cloudflared/deployment.yaml" }
+
+`priorityClassName: essential` 과 `tolerations` 는 서버 한 대가 죽었을 때를 위한 설정입니다. 남은 worker 에 자리가 모자라면 이 파드를 먼저 살리고, 죽은 노드를 기본 300초 대신 30초만 기다린 뒤 다른 노드에서 다시 띄웁니다. 등급은 [쿠버네티스에 Longhorn과 Patroni로 볼륨과 TimescaleDB 이중화하는 방법](/posts/54/)의 6단계에서 만들고, 등급이 없으면 파드가 만들어지지 않습니다.
 
 ```bash
 git add services/cloudflared

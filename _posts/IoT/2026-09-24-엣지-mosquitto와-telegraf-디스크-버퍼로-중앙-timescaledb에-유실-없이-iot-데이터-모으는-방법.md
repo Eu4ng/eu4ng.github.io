@@ -255,6 +255,10 @@ spec:
     metadata:
       labels: { app: mosquitto }
     spec:
+      priorityClassName: essential             # 서버 한 대가 죽어도 유지(iot/shared/priority-classes)
+      tolerations:                              # 노드가 죽으면 30초 뒤 다른 노드에서 다시 띄웁니다(기본 300초)
+        - { key: node.kubernetes.io/not-ready, operator: Exists, effect: NoExecute, tolerationSeconds: 30 }
+        - { key: node.kubernetes.io/unreachable, operator: Exists, effect: NoExecute, tolerationSeconds: 30 }
       securityContext:
         fsGroup: 1883        # 이미지의 mosquitto 계정(uid 1883)이 Secret 으로 마운트한 passwd 를 읽게 합니다
       containers:
@@ -280,6 +284,8 @@ spec:
           persistentVolumeClaim: { claimName: mosquitto-data }
 ```
 {: file="iot/edge/mosquitto/deployment.yaml" }
+
+`priorityClassName: essential` 과 `tolerations` 는 서버 한 대가 죽었을 때를 위한 설정입니다. 남은 worker 에 자리가 모자라면 이 파드를 먼저 살리고, 죽은 노드를 기본 300초 대신 30초만 기다린 뒤 다른 노드에서 다시 띄웁니다. 등급은 [쿠버네티스에 Longhorn과 Patroni로 볼륨과 TimescaleDB 이중화하는 방법](/posts/54/)의 6단계에서 만들고, 등급이 없으면 파드가 만들어지지 않습니다.
 
 ```yaml
 # LAN 의 기기(ESPHome, 서버의 Telegraf 등)와 디버깅용 mosquitto_sub 이 [엣지 VIP]:1883 표준 포트로 붙습니다. VIP 는 지역 오버레이가 kube-vip.io/loadbalancerIPs 로 줍니다.
@@ -911,6 +917,10 @@ spec:
     metadata:
       labels: { app: telegraf }
     spec:
+      priorityClassName: essential             # 서버 한 대가 죽어도 유지(iot/shared/priority-classes)
+      tolerations:                              # 노드가 죽으면 30초 뒤 다른 노드에서 다시 띄웁니다(기본 300초)
+        - { key: node.kubernetes.io/not-ready, operator: Exists, effect: NoExecute, tolerationSeconds: 30 }
+        - { key: node.kubernetes.io/unreachable, operator: Exists, effect: NoExecute, tolerationSeconds: 30 }
       securityContext:
         runAsUser: 999       # 이미지 엔트리포인트를 거치지 않고 telegraf 를 바로 실행하므로 root 로 뜨지 않게 계정을 지정합니다
         runAsGroup: 999

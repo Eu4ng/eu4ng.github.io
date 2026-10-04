@@ -459,6 +459,7 @@ spec:
     metadata:
       labels: { app: ollama-router }
     spec:
+      priorityClassName: optional             # 자리가 모자라면 먼저 내보냄(iot/shared/priority-classes)
       containers:
         - name: haproxy
           image: haproxy:3.2.24-alpine
@@ -478,6 +479,8 @@ spec:
           configMap: { name: ollama-router }
 ```
 {: file="services/ollama/deployment.yaml" }
+
+`priorityClassName: optional` 은 서버 한 대가 죽어 남은 worker 에 자리가 모자랄 때 이 파드를 가장 먼저 내보내게 합니다. 등급은 [쿠버네티스에 Longhorn과 Patroni로 볼륨과 TimescaleDB 이중화하는 방법](/posts/54/)의 6단계에서 만들고, 등급이 없으면 파드가 만들어지지 않습니다.
 
 ```yaml
 apiVersion: v1

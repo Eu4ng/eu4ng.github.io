@@ -316,6 +316,10 @@ spec:
     metadata:
       labels: { app: home-assistant }
     spec:
+      priorityClassName: essential             # 서버 한 대가 죽어도 유지(iot/shared/priority-classes)
+      tolerations:                              # 노드가 죽으면 30초 뒤 다른 노드에서 다시 띄웁니다(기본 300초)
+        - { key: node.kubernetes.io/not-ready, operator: Exists, effect: NoExecute, tolerationSeconds: 30 }
+        - { key: node.kubernetes.io/unreachable, operator: Exists, effect: NoExecute, tolerationSeconds: 30 }
       hostNetwork: true                    # 기기 탐색(mDNS·SSDP)과 Matter 서버·OTBR 접근을 노드 네트워크에서 직접 합니다
       affinity:                            # Matter 서버·OTBR 에 127.0.0.1 로 붙으므로 그 파드들과 같은 노드에 둡니다(그쪽이 HA 를 따라옴)
         podAffinity:
@@ -374,6 +378,8 @@ spec:
 ```
 {: file="iot/edge/home-assistant/deployment.yaml" }
 
+`priorityClassName: essential` 과 `tolerations` 는 서버 한 대가 죽었을 때를 위한 설정입니다. 남은 worker 에 자리가 모자라면 이 파드를 먼저 살리고, 죽은 노드를 기본 300초 대신 30초만 기다린 뒤 다른 노드에서 다시 띄웁니다. 등급은 [쿠버네티스에 Longhorn과 Patroni로 볼륨과 TimescaleDB 이중화하는 방법](/posts/54/)의 6단계에서 만들고, 등급이 없으면 파드가 만들어지지 않습니다.
+
 ```yaml
 # HA 는 hostNetwork 라 노드 IP:8123 에 뜹니다. 어느 노드에 떠도 같은 주소로 붙도록 LoadBalancer VIP(kube-vip)로 엽니다.
 # VIP 주소는 지역 오버레이가 annotation kube-vip.io/loadbalancerIPs 로 줍니다(같은 VIP 를 Mosquitto·Z2M·Matter 가 함께 씀).
@@ -431,6 +437,10 @@ spec:
     metadata:
       labels: { app: matter-server }
     spec:
+      priorityClassName: essential             # 서버 한 대가 죽어도 유지(iot/shared/priority-classes)
+      tolerations:                              # 노드가 죽으면 30초 뒤 다른 노드에서 다시 띄웁니다(기본 300초)
+        - { key: node.kubernetes.io/not-ready, operator: Exists, effect: NoExecute, tolerationSeconds: 30 }
+        - { key: node.kubernetes.io/unreachable, operator: Exists, effect: NoExecute, tolerationSeconds: 30 }
       hostNetwork: true                    # Matter 기기 탐색(mDNS)과 IPv6 통신은 노드의 네트워크에서 직접 해야 합니다 (파드 네트워크는 IPv4 뿐)
       affinity:                            # HA 와 같은 노드에 둡니다(HA 가 ws://127.0.0.1:5580 으로 붙습니다)
         podAffinity:

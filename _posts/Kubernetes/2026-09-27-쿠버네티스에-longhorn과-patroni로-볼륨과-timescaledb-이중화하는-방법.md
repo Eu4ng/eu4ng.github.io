@@ -552,7 +552,51 @@ EOSQL
 ```
 {: file="iot/hub/timescaledb/patroni/post-bootstrap.sh" }
 
-StatefulSet 에는 복원하는 동안만 `IOT_LOGIN=NOLOGIN` 을 넣습니다.
+StatefulSet 에는 복원하는 동안만 `IOT_LOGIN=NOLOGIN` 을 넣습니다. `priorityClassName: essential` 과 `tolerations` 는 서버 한 대가 죽었을 때를 위한 설정입니다. 남은 worker 에 자리가 모자라면 등급이 높은 파드가 낮은 파드를 내보내고 뜨고, 죽은 노드를 기본 300초 대신 30초만 기다린 뒤 다른 노드에서 다시 띄웁니다. 등급은 아래 파일로 먼저 만듭니다. 등급이 없으면 그 이름을 쓰는 파드가 만들어지지 않습니다. 허브는 `services/priority-classes/`, 지역 엣지는 `iot/clusters/[SITE]/priority-classes/` 폴더가 같은 정의를 참조합니다.
+
+```yaml
+# 서버 한 대가 죽어 남은 워커에 자리가 모자랄 때 누구를 먼저 살릴지 정합니다. 허브(services/priority-classes)와
+# 지역(iot/clusters/<지역>/priority-classes)이 같은 파일을 씁니다.
+#   essential: IoT 수집·제어·기록과 거기에 들어가는 길(접속, 인증). 자리가 없으면 아래 등급의 파드를 내보내고 뜹니다.
+#   (없음, 0): 그 밖의 서비스.
+#   optional:  없어도 IoT 가 도는 무거운 서비스(MinerU, 모델 서버 라우터). 가장 먼저 자리를 내줍니다.
+# 스케줄러는 메모리·CPU 요청(requests)으로 자리를 계산하므로 essential 워크로드에는 요청을 꼭 적습니다.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: essential
+value: 1000000                    # Longhorn(longhorn-critical 10억)·시스템 파드보다는 낮습니다
+description: 서버 한 대가 죽어도 유지해야 하는 IoT 서비스
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: optional
+value: -1000
+description: 자리가 모자라면 가장 먼저 내보내는 서비스
+```
+{: file="iot/shared/priority-classes/priorityclass.yaml" }
+
+```yaml
+# 허브와 지역 오버레이가 폴더째 참조합니다(kustomize 는 폴더 밖의 파일을 직접 읽지 못합니다).
+resources:
+  - priorityclass.yaml
+```
+{: file="iot/shared/priority-classes/kustomization.yaml" }
+
+```yaml
+# 허브의 파드 우선순위 등급(essential, optional). 정의는 지역과 같이 씁니다.
+resources:
+  - ../../iot/shared/priority-classes
+```
+{: file="services/priority-classes/kustomization.yaml" }
+
+```yaml
+# 대전 엣지의 파드 우선순위 등급(essential, optional). 정의는 허브와 같이 씁니다.
+resources:
+  - ../../../shared/priority-classes
+```
+{: file="iot/clusters/[SITE]/priority-classes/kustomization.yaml" }
 
 ```yaml
 # TimescaleDB 허브 멤버 두 개(worker 마다 하나). 서울 NAS 의 세 번째 멤버(stacks/seoul/timescaledb)와 함께 Patroni 가 주 DB 하나를 고르고
@@ -572,6 +616,10 @@ spec:
     metadata:
       labels: { application: patroni, cluster-name: timescaledb }
     spec:
+      priorityClassName: essential             # 서버 한 대가 죽어도 유지(iot/shared/priority-classes)
+      tolerations:                              # 노드가 죽으면 30초 뒤 다른 노드에서 다시 띄웁니다(기본 300초)
+        - { key: node.kubernetes.io/not-ready, operator: Exists, effect: NoExecute, tolerationSeconds: 30 }
+        - { key: node.kubernetes.io/unreachable, operator: Exists, effect: NoExecute, tolerationSeconds: 30 }
       serviceAccountName: patroni
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
