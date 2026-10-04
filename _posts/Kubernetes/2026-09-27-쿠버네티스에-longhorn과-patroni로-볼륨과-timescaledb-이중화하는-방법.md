@@ -45,15 +45,15 @@ local-path 볼륨은 한 노드의 디스크에만 있어서 그 서버가 죽�
 
 ## 1. worker 에 Longhorn 디스크 준비
 
-Longhorn 복제본은 OS 디스크와 나눈 전용 디스크(`scsi1`)의 `/var/lib/longhorn` 에 둡니다. 클러스터 변수의 worker 항목에 `longhorn_disk`(GB)를 붙이면, 플레이북이 VM 에 디스크를 핫플러그하고 Longhorn 이 쓰는 iSCSI(`open-iscsi`, `iscsi_tcp`)를 준비한 뒤 디스크를 포맷해 마운트합니다. Ubuntu 의 multipathd 가 Longhorn 장치를 가로채지 않게 `sd` 장치를 multipath 에서 뺍니다.
+Longhorn 복제본은 OS 디스크와 나눈 전용 디스크(`scsi1`)의 `/var/lib/longhorn` 에 둡니다. 클러스터 변수의 worker 항목에 `longhorn_disk`(GB)를 붙이면, 플레이북이 VM 에 디스크를 핫플러그하고 Longhorn 이 쓰는 iSCSI(`open-iscsi`, `iscsi_tcp`)를 준비한 뒤 디스크를 포맷해 마운트합니다. 나중에 `longhorn_disk` 값을 키우고 다시 실행하면 VM 을 켠 채로 디스크와 파일시스템을 그 크기로 늘립니다(줄이지는 못합니다). Ubuntu 의 multipathd 가 Longhorn 장치를 가로채지 않게 `sd` 장치를 multipath 에서 뺍니다.
 
 ```yaml
 k8s_clusters:
   hub:
     nodes:
       # ... control plane 항목
-      - { name: k8s-hub-worker-1, pve: pve01, role: worker, vmid: 123, ip: [WORKER1_IP], cores: 24, memory: 40960, disk: 100G, longhorn_disk: 20 }
-      - { name: k8s-hub-worker-2, pve: pve02, role: worker, vmid: 124, ip: [WORKER2_IP], cores: 8,  memory: 5120,  disk: 60G,  longhorn_disk: 20 }
+      - { name: k8s-hub-worker-1, pve: pve01, role: worker, vmid: 123, ip: [WORKER1_IP], cores: 12, memory: 24576, disk: 100G, longhorn_disk: 20 }
+      - { name: k8s-hub-worker-2, pve: pve02, role: worker, vmid: 124, ip: [WORKER2_IP], cores: 8,  memory: 16384, disk: 60G,  longhorn_disk: 20 }
 ```
 {: file="group_vars/all.yml" }
 
@@ -77,6 +77,14 @@ ansible-playbook playbooks/k8s-cluster.yml -e k8s_cluster=hub
         discard: "on"
         ssd: true
         state: present
+      loop: "{{ active | selectattr('longhorn_disk', 'defined') }}"
+      loop_control: { label: "{{ item.name }}" }
+    - name: Longhorn 디스크 늘리기 (longhorn_disk 를 키웠을 때. 켠 채로 늘리고, 줄이지는 못함)
+      community.proxmox.proxmox_disk:
+        vmid: "{{ item.vmid }}"
+        disk: scsi1
+        size: "{{ item.longhorn_disk }}G"
+        state: resized
       loop: "{{ active | selectattr('longhorn_disk', 'defined') }}"
       loop_control: { label: "{{ item.name }}" }
 ```
@@ -130,6 +138,14 @@ ansible-playbook playbooks/k8s-cluster.yml -e k8s_cluster=hub
       community.general.filesystem:
         dev: "{{ longhorn_dev }}"
         fstype: ext4
+    - name: 늘어난 디스크 크기 다시 읽기
+      ansible.builtin.shell: echo 1 > /sys/class/block/$(basename $(readlink -f {{ longhorn_dev }}))/device/rescan
+      changed_when: false
+    - name: 파일시스템을 디스크 크기에 맞춤 (디스크를 늘렸을 때)
+      community.general.filesystem:
+        dev: "{{ longhorn_dev }}"
+        fstype: ext4
+        resizefs: true
     - name: /var/lib/longhorn 에 마운트
       ansible.posix.mount:
         path: /var/lib/longhorn
@@ -472,6 +488,7 @@ Patroni 설정의 요점은 아래와 같습니다.
 - `scope` 가 곧 Service·Endpoints 이름이고, `kubernetes.ports` 의 이름이 Service 포트 이름과 같아야 합니다.
 - `synchronous_mode` 와 `synchronous_node_count: 1` 로 쓰기는 대기 복제본 하나가 받아야 완료됩니다. `sync_priority` 가 높은 worker 멤버를 먼저 고르고, 없으면 NAS 멤버가 동기 복제본이 됩니다. `synchronous_mode_strict: false` 라 둘 다 없으면 쓰기를 멈추지 않고 비동기로 씁니다.
 - `failover_priority` 로 주 DB 가 죽으면 worker 멤버(2)를 NAS 멤버(1)보다 먼저 올립니다.
+- `authentication` 에 `rewind` 계정은 적지 않습니다. 이름만 적고 비밀번호를 주지 않았더니 타임라인이 갈라진 복제본이 `pg_rewind` 로 주 DB 에 붙을 때 `no password supplied` 로 실패해 스스로 따라붙지 못했습니다. 적지 않으면 superuser 계정으로 `pg_rewind` 합니다. NAS 멤버의 스택 파일(8단계)도 같습니다.
 - `post_bootstrap` 스크립트는 클러스터를 처음 만들 때 한 번 실행되어 role 과 DB 를 만듭니다. 복원 전에 Telegraf 가 먼저 붙어 테이블을 만들지 않게, `IOT_LOGIN=NOLOGIN` 을 주면 `iot` role 을 로그인할 수 없게 만듭니다.
 
 ```yaml
@@ -521,8 +538,7 @@ postgresql:
   pgpass: /tmp/pgpass
   authentication:                 # 비밀번호는 PATRONI_SUPERUSER_PASSWORD, PATRONI_REPLICATION_PASSWORD
     superuser: { username: postgres }
-    replication: { username: replicator }
-    rewind: { username: postgres }
+    replication: { username: replicator }       # rewind 계정은 따로 적지 않습니다. 적으면 비밀번호도 따로 줘야 하고, 없으면 superuser 로 pg_rewind 합니다
   pg_hba:
     - local all all trust
     - host replication replicator 0.0.0.0/0 scram-sha-256
@@ -552,7 +568,51 @@ EOSQL
 ```
 {: file="iot/hub/timescaledb/patroni/post-bootstrap.sh" }
 
-StatefulSet 에는 복원하는 동안만 `IOT_LOGIN=NOLOGIN` 을 넣습니다.
+StatefulSet 에는 복원하는 동안만 `IOT_LOGIN=NOLOGIN` 을 넣습니다. `priorityClassName: essential` 과 `tolerations` 는 서버 한 대가 죽었을 때를 위한 설정입니다. 남은 worker 에 자리가 모자라면 등급이 높은 파드가 낮은 파드를 내보내고 뜨고, 죽은 노드를 기본 300초 대신 30초만 기다린 뒤 다른 노드에서 다시 띄웁니다. 등급은 아래 파일로 먼저 만듭니다. 등급이 없으면 그 이름을 쓰는 파드가 만들어지지 않습니다. 허브는 `services/priority-classes/`, 지역 엣지는 `iot/clusters/[SITE]/priority-classes/` 폴더가 같은 정의를 참조합니다.
+
+```yaml
+# 서버 한 대가 죽어 남은 워커에 자리가 모자랄 때 누구를 먼저 살릴지 정합니다. 허브(services/priority-classes)와
+# 지역(iot/clusters/<지역>/priority-classes)이 같은 파일을 씁니다.
+#   essential: IoT 수집·제어·기록과 거기에 들어가는 길(접속, 인증). 자리가 없으면 아래 등급의 파드를 내보내고 뜹니다.
+#   (없음, 0): 그 밖의 서비스.
+#   optional:  없어도 IoT 가 도는 무거운 서비스(MinerU, 모델 서버 라우터). 가장 먼저 자리를 내줍니다.
+# 스케줄러는 메모리·CPU 요청(requests)으로 자리를 계산하므로 essential 워크로드에는 요청을 꼭 적습니다.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: essential
+value: 1000000                    # Longhorn(longhorn-critical 10억)·시스템 파드보다는 낮습니다
+description: 서버 한 대가 죽어도 유지해야 하는 IoT 서비스
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: optional
+value: -1000
+description: 자리가 모자라면 가장 먼저 내보내는 서비스
+```
+{: file="iot/shared/priority-classes/priorityclass.yaml" }
+
+```yaml
+# 허브와 지역 오버레이가 폴더째 참조합니다(kustomize 는 폴더 밖의 파일을 직접 읽지 못합니다).
+resources:
+  - priorityclass.yaml
+```
+{: file="iot/shared/priority-classes/kustomization.yaml" }
+
+```yaml
+# 허브의 파드 우선순위 등급(essential, optional). 정의는 지역과 같이 씁니다.
+resources:
+  - ../../iot/shared/priority-classes
+```
+{: file="services/priority-classes/kustomization.yaml" }
+
+```yaml
+# 대전 엣지의 파드 우선순위 등급(essential, optional). 정의는 허브와 같이 씁니다.
+resources:
+  - ../../../shared/priority-classes
+```
+{: file="iot/clusters/[SITE]/priority-classes/kustomization.yaml" }
 
 ```yaml
 # TimescaleDB 허브 멤버 두 개(worker 마다 하나). 서울 NAS 의 세 번째 멤버(stacks/seoul/timescaledb)와 함께 Patroni 가 주 DB 하나를 고르고
@@ -572,6 +632,10 @@ spec:
     metadata:
       labels: { application: patroni, cluster-name: timescaledb }
     spec:
+      priorityClassName: essential             # 서버 한 대가 죽어도 유지(iot/shared/priority-classes)
+      tolerations:                              # 노드가 죽으면 30초 뒤 다른 노드에서 다시 띄웁니다(기본 300초)
+        - { key: node.kubernetes.io/not-ready, operator: Exists, effect: NoExecute, tolerationSeconds: 30 }
+        - { key: node.kubernetes.io/unreachable, operator: Exists, effect: NoExecute, tolerationSeconds: 30 }
       serviceAccountName: patroni
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
@@ -745,7 +809,6 @@ services:
           authentication:
             superuser: { username: postgres }
             replication: { username: replicator }
-            rewind: { username: postgres }
           pg_hba:
             - local all all trust
             - host replication replicator 0.0.0.0/0 scram-sha-256

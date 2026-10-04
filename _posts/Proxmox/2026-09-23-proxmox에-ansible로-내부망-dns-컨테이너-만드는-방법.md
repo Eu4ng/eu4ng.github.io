@@ -157,13 +157,14 @@ dnsmasq 설정 템플릿이 답하는 이름은 다음과 같습니다. 그 밖�
 | `kubectl-<dns_name>`(`kubectl-hub` 등) | 그 클러스터의 첫 control plane(`retire` 가 붙은 노드 제외) |
 | `iot-<dns_name>`(`iot-dj` 등) | 그 클러스터의 LoadBalancer 서비스 VIP |
 
-이름마다 `local=` 로 dnsmasq 가 직접 답하게 하고 `address=` 로 주소를 줍니다. `local=` 이 없으면 AAAA 처럼 `address=` 에 없는 질의를 상위로 넘겨 Cloudflare 의 IPv6 주소가 새어 나갑니다. `listen-address` 는 각 컨테이너의 주소라, 두 컨테이너가 같은 템플릿으로 같은 답을 줍니다.
+이름마다 `local=` 로 dnsmasq 가 직접 답하게 하고 `address=` 로 주소를 줍니다. `local=` 이 없으면 AAAA 처럼 `address=` 에 없는 질의를 상위로 넘겨 Cloudflare 의 IPv6 주소가 새어 나갑니다. `listen-address` 는 각 컨테이너의 주소라, 두 컨테이너가 같은 템플릿으로 같은 답을 줍니다. 그 주소에만 열 때 `bind-interfaces` 대신 `bind-dynamic` 을 씁니다. `bind-interfaces` 는 시작할 때 주소가 아직 붙어 있지 않으면 죽는데, 호스트를 재부팅한 뒤 컨테이너의 dnsmasq 가 주소가 붙기 전에 시작해 `Cannot assign requested address` 로 죽은 적이 있습니다.
 
 {% raw %}
 ```text
 # proxmox-ansible 의 playbooks/lan-dns.yml 이 만듭니다. 직접 고치지 마세요.
 listen-address={{ ansible_host }}
-bind-interfaces
+{# bind-dynamic: 주소가 아직 붙지 않았어도 시작하고, 붙으면 그때 엽니다(bind-interfaces 는 주소가 없으면 죽습니다) #}
+bind-dynamic
 no-resolv
 no-hosts
 cache-size=1000
@@ -216,6 +217,8 @@ address=/{{ name }}.{{ lan_dns_domain }}/{{ ip }}
 
 플레이북은 다섯 플레이입니다. 모든 노드에 CT 템플릿 내려받기, 노드마다 CT 만들고 켜기, CT 안에 dnsmasq 설정, 호스트에 남은 옛 dnsmasq 제거와 DNS CT 마다 조회 검사, inventory 밖의 CT(`lan_dns_client_pct_vmids`)가 두 DNS 를 쓰도록 `pct set --nameserver` 로 지정하기입니다. 여러 번 실행해도 결과가 같습니다.
 
+CT 에는 `features: [nesting=1]` 을 줍니다. Debian 13(systemd 257) 컨테이너는 nesting 이 없으면 `tmp.mount`, `run-lock.mount`, `dev-mqueue.mount` 가 실패합니다. dnsmasq 유닛에는 드롭인(`dnsmasq.service.d/restart.conf`)을 두어 네트워크가 준비된 뒤(`network-online.target`) 시작하고, 죽으면 5초 뒤 다시 시작하게(`Restart=on-failure`) 합니다. 기본 유닛은 한 번 죽으면 다시 뜨지 않아 재부팅 뒤 그 컨테이너의 DNS 가 멈춘 채로 남았습니다.
+
 ```bash
 # 플레이북과 템플릿 내려받기
 curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/lan-dns.yml -o playbooks/lan-dns.yml
@@ -255,6 +258,7 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/dnsmasq-lan.conf.j2 -o
         disk: "{{ ct_disk_storage }}:2"
         netif: { net0: "name=eth0,bridge={{ ct_bridge }},ip={{ item.ip }}/24,gw={{ ct_gateway }}" }
         nameserver: "{{ lan_dns_upstream[0] }}"
+        features: [nesting=1]         # Debian 13(systemd 257)은 nesting 없이는 tmp·run-lock 마운트가 실패합니다. 바꾸면 CT 를 다시 시작해야 적용
         onboot: true
         unprivileged: true
         pubkey: "{{ ct_ssh_pubkey }}"
@@ -300,16 +304,38 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/dnsmasq-lan.conf.j2 -o
         mode: "0644"
         validate: dnsmasq --test --conf-file=%s
       notify: dnsmasq 재시작
+    - name: 유닛 덮어쓰기 폴더
+      ansible.builtin.file:
+        path: /etc/systemd/system/dnsmasq.service.d
+        state: directory
+        mode: "0755"
+    - name: 유닛 덮어쓰기 (네트워크가 준비된 뒤 시작하고, 죽으면 다시 시작)
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/dnsmasq.service.d/restart.conf
+        mode: "0644"
+        content: |
+          # proxmox-ansible 의 playbooks/lan-dns.yml 이 만듭니다. 직접 고치지 마세요.
+          # 호스트 재부팅 직후 주소가 붙기 전에 시작해 "Cannot assign requested address" 로 죽고 다시 뜨지 않던 것을 막습니다.
+          [Unit]
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Restart=on-failure
+          RestartSec=5
+      notify: dnsmasq 재시작
     - name: dnsmasq 켜기
-      ansible.builtin.service:
+      ansible.builtin.systemd:
         name: dnsmasq
         enabled: true
         state: started
+        daemon_reload: true
   handlers:
     - name: dnsmasq 재시작
-      ansible.builtin.service:
+      ansible.builtin.systemd:
         name: dnsmasq
         state: restarted
+        daemon_reload: true
 
 - name: 호스트 정리와 확인
   hosts: proxmox_primary
@@ -452,6 +478,14 @@ fatal: [localhost]: FAILED! => msg: 'An error occurred: ''name'''
 
 - **원인:** `template` 의 `validate` 에 `--conf-dir=/dev/null` 같은 옵션을 섞어 검증 명령 자체가 잘못됐습니다.
 - **해결:** `validate: dnsmasq --test --conf-file=%s` 로 단순하게 바꿨습니다.
+
+</details>
+
+<details markdown="1">
+<summary>호스트 재부팅 뒤 dnsmasq 가 <code>failed to create listening socket</code>, <code>Cannot assign requested address</code> 로 죽고 다시 뜨지 않음</summary>
+
+- **원인:** `bind-interfaces` 는 시작할 때 `listen-address` 의 주소가 인터페이스에 붙어 있어야 합니다. 호스트 재부팅 직후 컨테이너에 주소가 붙기 전에 dnsmasq 가 시작해 죽었고, 유닛에 재시작 설정이 없어 그대로 남았습니다. 같은 컨테이너에서 nesting 이 없어 `tmp.mount`, `run-lock.mount`, `dev-mqueue.mount` 도 실패했습니다(Debian 13, systemd 257).
+- **해결:** 템플릿을 `bind-dynamic` 으로 바꾸고, 유닛 드롭인으로 `After=network-online.target` 과 `Restart=on-failure` 를 주고, CT 에 `features: [nesting=1]` 을 넣었습니다. nesting 은 CT 를 다시 시작해야 적용됩니다.
 
 </details>
 

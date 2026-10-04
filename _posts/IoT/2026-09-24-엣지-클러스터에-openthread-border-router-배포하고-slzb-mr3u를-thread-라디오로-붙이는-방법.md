@@ -150,6 +150,10 @@ spec:
     metadata:
       labels: { app: otbr }
     spec:
+      priorityClassName: essential             # 서버 한 대가 죽어도 유지(iot/shared/priority-classes)
+      tolerations:                              # 노드가 죽으면 30초 뒤 다른 노드에서 다시 띄웁니다(기본 300초)
+        - { key: node.kubernetes.io/not-ready, operator: Exists, effect: NoExecute, tolerationSeconds: 30 }
+        - { key: node.kubernetes.io/unreachable, operator: Exists, effect: NoExecute, tolerationSeconds: 30 }
       hostNetwork: true                    # wpan0 인터페이스를 노드에 만들고 eth0 로 RA 를 보내 LAN 이 Thread 망 경로를 배우게 합니다
       affinity:                            # HA 와 같은 노드에 둡니다(HA 의 OTBR 통합이 http://127.0.0.1:8081 로 붙습니다)
         podAffinity:
@@ -196,6 +200,8 @@ spec:
           hostPath: { path: /dev/net/tun, type: CharDevice }
 ```
 {: file="iot/edge/otbr/deployment.yaml" }
+
+`priorityClassName: essential` 과 `tolerations` 는 서버 한 대가 죽었을 때를 위한 설정입니다. 남은 worker 에 자리가 모자라면 이 파드를 먼저 살리고, 죽은 노드를 기본 300초 대신 30초만 기다린 뒤 다른 노드에서 다시 띄웁니다. 등급은 [쿠버네티스에 Longhorn과 Patroni로 볼륨과 TimescaleDB 이중화하는 방법](/posts/54/)의 6단계에서 만들고, 등급이 없으면 파드가 만들어지지 않습니다.
 
 ```yaml
 apiVersion: v1

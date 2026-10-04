@@ -58,16 +58,20 @@ tailscale_cidr: 100.64.0.0/10                 # tailnet 주소 대역. 쿠버네
 # playbooks/k8s-cluster.yml -e k8s_cluster=<이름> 으로 k8s_clusters 의 한 클러스터를 만듭니다(기본 hub).
 # 노드마다 pve(VM 을 둘 Proxmox 노드), role(control-plane|worker)을 둡니다. role 이 control-plane 인 첫 항목에서 클러스터를 만들고
 # 나머지 control-plane 은 합류합니다. 두 Proxmox 노드에 나눠 한 대가 죽어도 버티고, etcd 세 번째 멤버는 원격 NAS 컨테이너가 맡습니다.
-# longhorn_disk(GB): Longhorn 이 복제 볼륨을 두는 전용 디스크(scsi1, /var/lib/longhorn).
+# 크기 기준: 허브는 코어 1 : 메모리 2GiB. 엣지는 IoT 전용이라 IoT 서비스가 도는 만큼만 주고 나머지는 허브에 둡니다.
+#   엣지 worker-1 은 NVR(재실 감지)이 CPU 를 다 써서 6코어, worker-2 는 NVR 이 넘어올 수 있는 최소인 4코어.
+#   control plane 은 etcd 가 밀리지 않게 2코어를 유지합니다(엣지는 2GiB 로 충분).
+# longhorn_disk(GB): Longhorn 이 복제 볼륨을 두는 전용 디스크(scsi1, /var/lib/longhorn). 키우면 켠 채로 늘립니다(줄이지는 못함).
+#   엣지는 NVR 영상 버퍼(18Gi, 2벌)까지 담으려고 40.
 k8s_cluster_name: "{{ k8s_cluster | default('hub') }}"
 kc: "{{ k8s_clusters[k8s_cluster_name] }}"   # 지금 다루는 클러스터
 k8s_clusters:
   hub:                                        # 중앙 허브
     nodes:
       - { name: k8s-hub-cp-1, pve: pve01, role: control-plane, vmid: 121, ip: [HUB_CP_1_IP], cores: 2,  memory: 4096,  disk: 32G }
-      - { name: k8s-hub-cp-2, pve: pve02, role: control-plane, vmid: 122, ip: [HUB_CP_2_IP], cores: 2,  memory: 2560,  disk: 32G }
-      - { name: k8s-hub-worker-1, pve: pve01, role: worker,    vmid: 123, ip: [HUB_WORKER_1_IP], cores: 24, memory: 24576, disk: 100G, longhorn_disk: 20 }
-      - { name: k8s-hub-worker-2, pve: pve02, role: worker,    vmid: 124, ip: [HUB_WORKER_2_IP], cores: 8,  memory: 5120,  disk: 60G,  longhorn_disk: 20 }
+      - { name: k8s-hub-cp-2, pve: pve02, role: control-plane, vmid: 122, ip: [HUB_CP_2_IP], cores: 2,  memory: 4096,  disk: 32G }
+      - { name: k8s-hub-worker-1, pve: pve01, role: worker,    vmid: 123, ip: [HUB_WORKER_1_IP], cores: 12, memory: 24576, disk: 100G, longhorn_disk: 20 }
+      - { name: k8s-hub-worker-2, pve: pve02, role: worker,    vmid: 124, ip: [HUB_WORKER_2_IP], cores: 8,  memory: 16384, disk: 60G,  longhorn_disk: 20 }
     dns_name: hub                             # 내부망 DNS 역할 이름 k8s-hub(VIP), kubectl-hub(kubectl 을 돌릴 control plane). templates/dnsmasq-lan.conf.j2
     vip: [HUB_VIP]                            # API 엔드포인트(kube-vip, ARP). control plane 중 한 대가 가짐
     control_plane_workloads: false            # control plane 에 일반 파드를 두지 않음(taint 유지)
@@ -75,10 +79,10 @@ k8s_clusters:
     kubeconfig: "{{ lookup('env', 'HOME') }}/.kube/k8s-hub.yaml"   # 실행 PC 에 저장할 kubeconfig
   daejeon:                                    # 지역 엣지. 허브 없이 혼자 돕니다
     nodes:
-      - { name: k8s-dj-cp-1,     pve: pve01, role: control-plane, vmid: 131, ip: [EDGE_CP_1_IP], cores: 2, memory: 2560, disk: 32G }
+      - { name: k8s-dj-cp-1,     pve: pve01, role: control-plane, vmid: 131, ip: [EDGE_CP_1_IP], cores: 2, memory: 2048, disk: 32G }
       - { name: k8s-dj-cp-2,     pve: pve02, role: control-plane, vmid: 132, ip: [EDGE_CP_2_IP], cores: 2, memory: 2048, disk: 32G }
-      - { name: k8s-dj-worker-1, pve: pve01, role: worker,        vmid: 133, ip: [EDGE_WORKER_1_IP], cores: 4, memory: 4096, disk: 40G, longhorn_disk: 20 }
-      - { name: k8s-dj-worker-2, pve: pve02, role: worker,        vmid: 134, ip: [EDGE_WORKER_2_IP], cores: 2, memory: 3584, disk: 40G, longhorn_disk: 20 }
+      - { name: k8s-dj-worker-1, pve: pve01, role: worker,        vmid: 133, ip: [EDGE_WORKER_1_IP], cores: 6, memory: 8192, disk: 40G, longhorn_disk: 40 }
+      - { name: k8s-dj-worker-2, pve: pve02, role: worker,        vmid: 134, ip: [EDGE_WORKER_2_IP], cores: 4, memory: 8192, disk: 40G, longhorn_disk: 40 }
     dns_name: dj                              # 내부망 DNS 역할 이름 k8s-dj, kubectl-dj, iot-dj(서비스 VIP)
     vip: [EDGE_VIP]
     service_vip: [EDGE_SERVICE_VIP]           # LoadBalancer 서비스 VIP. 서비스의 kube-vip.io/loadbalancerIPs 와 같아야 함
@@ -88,6 +92,7 @@ k8s_clusters:
     otbr_host: true                           # OpenThread Border Router(hostNetwork)용 커널 설정
     kubeconfig: "{{ lookup('env', 'HOME') }}/.kube/k8s-daejeon.yaml"
 k8s_etcd_peer_sans: [[PVE01_TAILSCALE_IP], [PVE02_TAILSCALE_IP]]   # 원격 etcd 멤버(NAS)가 보는 우리 쪽 주소: Proxmox 노드의 Tailscale IP(마스커레이드)
+k8s_vm_cpuunits: 1000                         # 호스트 CPU 가 모자랄 때의 몫(기본 100). 같은 호스트의 다른 CT·VM 이 CPU 를 다 써도 etcd·kubelet 이 밀리지 않게 높게 둠
 k8s_vip_interface: eth0
 k8s_kube_vip_version: v1.2.4                  # https://github.com/kube-vip/kube-vip/releases
 k8s_nameservers: [[LAN_DNS_IP], [LAN_DNS_2_IP]]
@@ -216,13 +221,14 @@ ansible-playbook playbooks/vm-template.yml
 
 클러스터 플레이북은 아래 순서로 진행합니다.
 
-- VM 만들기: 노드 목록을 인벤토리 그룹으로, 노드마다 정한 Proxmox 노드의 템플릿 복제, 디스크 늘리기(복제 직후 한 번), Longhorn 디스크(`scsi1`) 추가, 코어·메모리·IP·DNS 설정, 시작
+- VM 만들기: 노드 목록을 인벤토리 그룹으로, 노드마다 정한 Proxmox 노드의 템플릿 복제, 디스크 늘리기(복제 직후 한 번), Longhorn 디스크(`scsi1`) 추가와 늘리기(`longhorn_disk` 를 키웠을 때), 코어·메모리·CPU 우선순위(`cpuunits`)·IP·DNS 설정, 시작
 - 노드 공통: 시간대, swap 끄기, 커널 모듈·설정, tailnet 경로, 엣지의 OpenThread Border Router 커널 설정, containerd 와 `k8s_package_version` 으로 고정한 kubelet·kubeadm·kubectl
 - control plane 기준 노드 고르기: `admin.conf` 가 있는 control plane 을 기준으로 삼고, 클러스터가 없는데 VIP 가 이미 응답하면 멈춤
 - control plane: kube-vip, `kubeadm init --control-plane-endpoint=<VIP>:6443 --kubernetes-version=...`(처음 한 번), Flannel, etcd peer 인증서 SAN, join 명령, kubeconfig 를 실행 PC 로
 - control plane 합류: 한 대씩 `kubeadm join --control-plane`, kube-vip
 - worker 합류: `kubeadm join`, kubelet 이 VIP 로 붙게
-- Longhorn 준비: `open-iscsi`·`nfs-common`, `iscsi_tcp` 모듈, multipath 에서 `sd` 장치 제외, 전용 디스크를 ext4 로 `/var/lib/longhorn` 에 마운트
+- Longhorn 준비: `open-iscsi`·`nfs-common`, `iscsi_tcp` 모듈, multipath 에서 `sd` 장치 제외, 전용 디스크를 ext4 로 `/var/lib/longhorn` 에 마운트, 디스크를 늘렸으면 파일시스템도 그 크기로
+- etcd 리더 감시: control plane 마다 `etcd-leader-guard` 서비스. 원격 투표자가 etcd 리더가 되면 자기 노드로 리더를 되돌림
 - 옛 노드 빼기: `retire: true` 가 붙은 노드(5단계)
 - 확인: 모든 노드 Ready, 노드 수
 - 내부망 DNS: `lan-dns.yml` 을 다시 실행해 노드·역할 이름을 새로 만듦
@@ -231,10 +237,13 @@ kube-vip 은 control plane 마다 static pod 로 뜨고, 리더로 뽑힌 한 �
 
 tailnet 경로는 원격 NAS 에 둔 etcd 세 번째 투표자와 DB 복제본에 닿기 위한 것입니다. VM 은 tailnet 대역(`100.64.0.0/10`)을 자기 Proxmox 노드로 보내고, 그 노드가 Tailscale IP 로 바꿔 내보냅니다. 원격 etcd 멤버는 우리 쪽 연결을 이 주소로 보므로 `k8s_etcd_peer_sans` 를 etcd peer 인증서 SAN 에 넣습니다.
 
+etcd 리더 감시는 플레이북이 `scripts/etcd-leader-guard.sh` 를 control plane 에 복사해 systemd 서비스로 띄우는 것이라, 스크립트도 함께 내려받습니다. 리더가 `etcd-witness` 로 시작하는 이름의 멤버일 때만 움직이므로 원격 투표자가 없는 클러스터에서는 아무 일도 하지 않습니다. 스크립트의 내용과 필요한 이유는 [쿠버네티스 etcd 세 번째 투표자를 원격 NAS 컨테이너로 붙이는 방법](/posts/55/)에 정리했습니다.
+
 ```bash
 # 플레이북 내려받기 (lan-dns.yml 과 dnsmasq 템플릿은 내부망 DNS 글에서 받은 것을 씁니다)
-mkdir -p playbooks/tasks
+mkdir -p playbooks/tasks scripts
 curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/k8s-cluster.yml -o playbooks/k8s-cluster.yml
+curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/etcd-leader-guard.sh -o scripts/etcd-leader-guard.sh
 curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/tasks/kube-vip.yml -o playbooks/tasks/kube-vip.yml
 ```
 
@@ -352,13 +361,22 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/tasks/kube-vip.yml -o 
         state: present
       loop: "{{ active | selectattr('longhorn_disk', 'defined') }}"
       loop_control: { label: "{{ item.name }}" }
-    - name: VM 설정 맞추기 (코어·메모리·IP·DNS·자동 시작. 모듈 특성상 매번 changed 로 보고됨)
+    - name: Longhorn 디스크 늘리기 (longhorn_disk 를 키웠을 때. 켠 채로 늘리고, 줄이지는 못함)
+      community.proxmox.proxmox_disk:
+        vmid: "{{ item.vmid }}"
+        disk: scsi1
+        size: "{{ item.longhorn_disk }}G"
+        state: resized
+      loop: "{{ active | selectattr('longhorn_disk', 'defined') }}"
+      loop_control: { label: "{{ item.name }}" }
+    - name: VM 설정 맞추기 (코어·메모리·CPU 우선순위·IP·DNS·자동 시작. 모듈 특성상 매번 changed 로 보고됨. 코어·메모리는 VM 을 껐다 켜야 적용)
       community.proxmox.proxmox_kvm:
         node: "{{ item.pve | default(proxmox_node) }}"
         vmid: "{{ item.vmid }}"
         name: "{{ item.name }}"
         cores: "{{ item.cores }}"
         memory: "{{ item.memory }}"
+        cpuunits: "{{ k8s_vm_cpuunits }}"
         onboot: true
         ipconfig: { ipconfig0: "ip={{ item.ip }}/24,gw={{ ct_gateway }}" }
         nameservers: "{{ k8s_nameservers }}"
@@ -729,6 +747,14 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/tasks/kube-vip.yml -o 
       community.general.filesystem:
         dev: "{{ longhorn_dev }}"
         fstype: ext4
+    - name: 늘어난 디스크 크기 다시 읽기
+      ansible.builtin.shell: echo 1 > /sys/class/block/$(basename $(readlink -f {{ longhorn_dev }}))/device/rescan
+      changed_when: false
+    - name: 파일시스템을 디스크 크기에 맞춤 (디스크를 늘렸을 때)
+      community.general.filesystem:
+        dev: "{{ longhorn_dev }}"
+        fstype: ext4
+        resizefs: true
     - name: /var/lib/longhorn 에 마운트
       ansible.posix.mount:
         path: /var/lib/longhorn
@@ -738,6 +764,52 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/tasks/kube-vip.yml -o 
         state: mounted
 
 # 옛 노드 빼기 (목록에서 retire: true). 한 대씩, 기준 control plane 의 kubectl 로 비우고 지웁니다
+- name: etcd 리더 감시 (control plane. 원격 투표자가 리더가 되면 이 노드로 되돌림)
+  hosts: k8s_control_planes
+  become: true
+  gather_facts: false
+  tasks:
+    - name: 패키지
+      ansible.builtin.apt:
+        name: [curl, jq]
+    - name: 감시 스크립트
+      ansible.builtin.copy:
+        src: ../scripts/etcd-leader-guard.sh
+        dest: /usr/local/sbin/etcd-leader-guard
+        mode: "0755"
+      notify: etcd-leader-guard 재시작
+    - name: 서비스 유닛
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/etcd-leader-guard.service
+        mode: "0644"
+        content: |
+          # proxmox-ansible 의 playbooks/k8s-cluster.yml 이 만듭니다. 직접 고치지 마세요.
+          [Unit]
+          Description=etcd 리더가 원격 투표자(etcd-witness)로 넘어가면 이 노드로 되돌림
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          ExecStart=/usr/local/sbin/etcd-leader-guard
+          Restart=always
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: etcd-leader-guard 재시작
+    - name: 서비스 켜기
+      ansible.builtin.systemd:
+        name: etcd-leader-guard
+        enabled: true
+        state: started
+        daemon_reload: true
+  handlers:
+    - name: etcd-leader-guard 재시작
+      ansible.builtin.systemd:
+        name: etcd-leader-guard
+        state: restarted
+        daemon_reload: true
+
 - name: 옛 노드 빼기
   hosts: k8s_retire
   become: true
@@ -893,7 +965,7 @@ ansible-playbook playbooks/k8s-cluster.yml -e k8s_cluster=hub
 ansible-playbook playbooks/k8s-cluster.yml -e k8s_cluster=daejeon
 ```
 
-> `VM 설정 맞추기` 태스크는 `proxmox_kvm` 모듈이 변경 여부를 비교하지 않아 실행할 때마다 `changed` 로 표시됩니다. 값이 같으면 VM 에는 아무 일도 일어나지 않습니다.
+> `VM 설정 맞추기` 태스크는 `proxmox_kvm` 모듈이 변경 여부를 비교하지 않아 실행할 때마다 `changed` 로 표시됩니다. 값이 같으면 VM 에는 아무 일도 일어나지 않습니다. 코어와 메모리를 바꾼 값은 VM 을 껐다 켜야 적용됩니다.
 {: .prompt-info }
 
 - **확인:** `결과` 태스크에 목록의 노드가 모두 `Ready` 로 보이고, `노드 수가 맞는지` 가 통과하며, `PLAY RECAP` 에 `failed=0` 입니다. 실행 PC 에 `~/.kube/k8s-hub.yaml`(엣지는 `k8s-daejeon.yaml`)이 생깁니다.

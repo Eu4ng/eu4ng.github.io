@@ -51,10 +51,10 @@ k8s_clusters:
     # ... (허브 클러스터 값)
   [SITE]:                                     # 지역 엣지. 허브 없이 혼자 돕니다(k8s-gitops iot/clusters/[SITE]/)
     nodes:
-      - { name: k8s-[SITE_SHORT]-cp-1,     pve: pve01, role: control-plane, vmid: 131, ip: [EDGE_CP1_IP], cores: 2, memory: 2560, disk: 32G }
+      - { name: k8s-[SITE_SHORT]-cp-1,     pve: pve01, role: control-plane, vmid: 131, ip: [EDGE_CP1_IP], cores: 2, memory: 2048, disk: 32G }
       - { name: k8s-[SITE_SHORT]-cp-2,     pve: pve02, role: control-plane, vmid: 132, ip: [EDGE_CP2_IP], cores: 2, memory: 2048, disk: 32G }
-      - { name: k8s-[SITE_SHORT]-worker-1, pve: pve01, role: worker,        vmid: 133, ip: [EDGE_WORKER1_IP], cores: 4, memory: 4096, disk: 40G, longhorn_disk: 20 }
-      - { name: k8s-[SITE_SHORT]-worker-2, pve: pve02, role: worker,        vmid: 134, ip: [EDGE_WORKER2_IP], cores: 2, memory: 3584, disk: 40G, longhorn_disk: 20 }
+      - { name: k8s-[SITE_SHORT]-worker-1, pve: pve01, role: worker,        vmid: 133, ip: [EDGE_WORKER1_IP], cores: 6, memory: 8192, disk: 40G, longhorn_disk: 40 }
+      - { name: k8s-[SITE_SHORT]-worker-2, pve: pve02, role: worker,        vmid: 134, ip: [EDGE_WORKER2_IP], cores: 4, memory: 8192, disk: 40G, longhorn_disk: 40 }
     dns_name: [SITE_SHORT]                    # 내부망 DNS 역할 이름 k8s-[SITE_SHORT](API VIP), kubectl-[SITE_SHORT], iot-[SITE_SHORT](서비스 VIP)
     vip: [EDGE_API_VIP]                       # API 엔드포인트(kube-vip, ARP). control plane 중 한 대가 가짐
     service_vip: [EDGE_SERVICE_VIP]           # LoadBalancer 서비스 VIP. k8s-gitops iot/clusters/[SITE] 의 kube-vip.io/loadbalancerIPs 와 같아야 함
@@ -68,7 +68,8 @@ k8s_clusters:
 {% endraw %}
 
 - `pve`: VM 을 둘 Proxmox 노드입니다. control plane 과 worker 를 한 대씩 두 노드에 나눠, 어느 서버가 죽어도 control plane 과 worker 가 하나씩 남게 합니다.
-- `longhorn_disk`: worker 에 붙는 Longhorn 전용 디스크(GB, `scsi1`, `/var/lib/longhorn`)입니다. 6단계의 Longhorn 이 이 디스크에 볼륨을 두 벌씩 둡니다.
+- `cores`, `memory`: 엣지는 IoT 전용이라 IoT 서비스가 도는 만큼만 줍니다. worker-1 은 NVR 재실 감지가 CPU 를 다 써서 6코어, worker-2 는 NVR 이 넘어올 수 있는 최소인 4코어입니다.
+- `longhorn_disk`: worker 에 붙는 Longhorn 전용 디스크(GB, `scsi1`, `/var/lib/longhorn`)입니다. 6단계의 Longhorn 이 이 디스크에 볼륨을 두 벌씩 둡니다. NVR 영상 버퍼(18Gi, 2벌)까지 담으려고 허브(20)보다 큰 40 으로 둡니다.
 - `service_vip`: 지역의 LoadBalancer Service(Home Assistant, Zigbee2MQTT, Mosquitto, Grafana 등)가 포트만 달리해 함께 쓰는 주소입니다. 각 서비스는 GitOps 저장소의 지역 오버레이에서 `kube-vip.io/loadbalancerIPs` 주석으로 이 주소를 받습니다.
 - `lan_dns_names`: 내부망 DNS 가 이 지역의 서비스 VIP 로 답할 이름입니다. 그 이름을 받는 지역 인그레스는 [지역 엣지에 TimescaleDB와 Grafana를 두어 인터넷 없이도 기록하고 보는 방법](/posts/56/)에서 만듭니다.
 

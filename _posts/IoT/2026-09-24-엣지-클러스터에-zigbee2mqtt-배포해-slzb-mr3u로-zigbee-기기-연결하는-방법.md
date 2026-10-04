@@ -107,6 +107,10 @@ spec:
     metadata:
       labels: { app: zigbee2mqtt }
     spec:
+      priorityClassName: essential             # 서버 한 대가 죽어도 유지(iot/shared/priority-classes)
+      tolerations:                              # 노드가 죽으면 30초 뒤 다른 노드에서 다시 띄웁니다(기본 300초)
+        - { key: node.kubernetes.io/not-ready, operator: Exists, effect: NoExecute, tolerationSeconds: 30 }
+        - { key: node.kubernetes.io/unreachable, operator: Exists, effect: NoExecute, tolerationSeconds: 30 }
       # 설정 파일이 없을 때만 시드를 복사합니다. 있으면 Zigbee2MQTT 가 써 둔 네트워크 키·기기 목록을 그대로 씁니다.
       initContainers:
         - name: seed-config
@@ -163,6 +167,8 @@ spec:
           configMap: { name: zigbee2mqtt-seed }
 ```
 {: file="iot/edge/zigbee2mqtt/deployment.yaml" }
+
+`priorityClassName: essential` 과 `tolerations` 는 서버 한 대가 죽었을 때를 위한 설정입니다. 남은 worker 에 자리가 모자라면 이 파드를 먼저 살리고, 죽은 노드를 기본 300초 대신 30초만 기다린 뒤 다른 노드에서 다시 띄웁니다. 등급은 [쿠버네티스에 Longhorn과 Patroni로 볼륨과 TimescaleDB 이중화하는 방법](/posts/54/)의 6단계에서 만들고, 등급이 없으면 파드가 만들어지지 않습니다.
 
 ```yaml
 # 프런트엔드. LAN 에서 http://[엣지 VIP]:30083 으로 열고 auth_token 으로 들어갑니다. VIP 는 지역 오버레이가 kube-vip.io/loadbalancerIPs 로 줍니다.
