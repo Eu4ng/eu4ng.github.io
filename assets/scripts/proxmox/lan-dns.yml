@@ -26,6 +26,7 @@
         disk: "{{ ct_disk_storage }}:2"
         netif: { net0: "name=eth0,bridge={{ ct_bridge }},ip={{ item.ip }}/24,gw={{ ct_gateway }}" }
         nameserver: "{{ lan_dns_upstream[0] }}"
+        features: [nesting=1]         # Debian 13(systemd 257)은 nesting 없이는 tmp·run-lock 마운트가 실패합니다. 바꾸면 CT 를 다시 시작해야 적용
         onboot: true
         unprivileged: true
         pubkey: "{{ ct_ssh_pubkey }}"
@@ -71,16 +72,38 @@
         mode: "0644"
         validate: dnsmasq --test --conf-file=%s
       notify: dnsmasq 재시작
+    - name: 유닛 덮어쓰기 폴더
+      ansible.builtin.file:
+        path: /etc/systemd/system/dnsmasq.service.d
+        state: directory
+        mode: "0755"
+    - name: 유닛 덮어쓰기 (네트워크가 준비된 뒤 시작하고, 죽으면 다시 시작)
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/dnsmasq.service.d/restart.conf
+        mode: "0644"
+        content: |
+          # proxmox-ansible 의 playbooks/lan-dns.yml 이 만듭니다. 직접 고치지 마세요.
+          # 호스트 재부팅 직후 주소가 붙기 전에 시작해 "Cannot assign requested address" 로 죽고 다시 뜨지 않던 것을 막습니다.
+          [Unit]
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Restart=on-failure
+          RestartSec=5
+      notify: dnsmasq 재시작
     - name: dnsmasq 켜기
-      ansible.builtin.service:
+      ansible.builtin.systemd:
         name: dnsmasq
         enabled: true
         state: started
+        daemon_reload: true
   handlers:
     - name: dnsmasq 재시작
-      ansible.builtin.service:
+      ansible.builtin.systemd:
         name: dnsmasq
         state: restarted
+        daemon_reload: true
 
 - name: 호스트 정리와 확인
   hosts: proxmox_primary
