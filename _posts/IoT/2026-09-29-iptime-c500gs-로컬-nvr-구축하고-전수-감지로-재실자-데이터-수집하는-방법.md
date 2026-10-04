@@ -7,10 +7,10 @@ tags: [iot, nvr, kubernetes, computer-vision, home-assistant, mqtt, timescaledb,
 permalink: /posts/76/
 ---
 
-ipTIME C500GS IP 카메라를 공유기 방화벽으로 외부 인터넷과 완전히 차단한 상태에서 로컬 [NVR](/posts/79/)을 구축하고, 영상에서 재실자 수·위치·속도를 뽑아 호스트 센서와 같은 방식의 MQTT 센서로 Home Assistant 와 TimescaleDB 에 넣습니다. 움직임이 있을 때만 동작하는 모션 기반 감지기(Frigate 등)와 달리 초당 10프레임을 움직임과 무관하게 추적하므로, 잠든 사람처럼 오래 움직이지 않는 재실자도 놓치지 않습니다. 추적 결과는 초록 박스를 그린 실시간 측정 영상으로 남기고, 자정 뒤에는 하루치 원본의 모든 프레임을 더 큰 모델로 다시 추적해 실시간 값과 다른 구간만 검수 클립으로 남깁니다.
+ipTIME C500GS IP 카메라를 공유기 방화벽으로 외부 인터넷과 완전히 차단한 상태에서 로컬 [NVR](/posts/79/)을 구축하고, 영상에서 재실자 수·위치·속도를 뽑아 호스트 센서와 같은 방식의 MQTT 센서로 Home Assistant 와 TimescaleDB 에 넣습니다. 움직임이 있을 때만 동작하는 모션 기반 감지기(Frigate 등)와 달리 초당 10프레임을 움직임과 무관하게 추적하므로, 잠든 사람처럼 오래 움직이지 않는 재실자도 놓치지 않습니다. 추적 결과는 초록 박스를 그린 실시간 측정 영상으로 남기고, 영상은 Longhorn 복제 볼륨에 당일치만 두고 자정 뒤 원격 NAS 로 보내므로, 서버 한 대가 죽어도 다른 워커에서 녹화와 감지가 이어집니다. 하루치 원본의 모든 프레임을 더 큰 모델로 다시 추적해 실시간 값과 다른 구간만 검수 클립으로 남기는 사후 검수도 함께 배포하지만, 정지 상태로 둡니다.
 
 1. 카메라 네트워크 차단 및 RTSP 설정
-2. 워커 노드 NVR 전용 디스크 마운트
+2. 영상 버퍼용 Longhorn 디스크 늘리기
 3. 방 기하 설정
 4. NVR Secret 생성
 5. NVR 서비스 및 수집기 GitOps 배포
@@ -26,17 +26,18 @@ ipTIME C500GS IP 카메라를 공유기 방화벽으로 외부 인터넷과 완�
 | 항목 | 버전 / 사양 |
 | :--- | :--- |
 | IP 카메라 | ipTIME C500GS (5MP, H.265, Wi-Fi) |
-| 엣지 Kubernetes | `v1.37` (kubeadm, k8s-dj-worker-1: 6 vCPU / 8GiB) |
+| 엣지 Kubernetes | `v1.37` (kubeadm, k8s-dj-worker-1: 6 vCPU / 8GiB, k8s-dj-worker-2: 4 vCPU / 8GiB) |
 | 스트리밍 중계기 | `alexxit/go2rtc:latest` |
 | 수집기 / 딥러닝 | `ultralytics/ultralytics:latest-cpu` (YOLOv8n + ByteTrack, PyAV) |
 | 시계열 DB | TimescaleDB `2.30.1-pg17` |
-| 녹화 저장소 | Proxmox SCSI passthrough 디스크 500GB (`/mnt/nvr`) |
+| 녹화 저장소 | Longhorn 볼륨 `nvr-storage` 18Gi (2벌 복제, 파드 안 `/mnt/nvr`) |
 | 작성 기준일 | `2026-09-29` |
 
 다음 항목이 준비되어 있어야 합니다.
 
 - 공유기(ipTIME 등)에서 카메라 IP를 고정 할당하고 외부 인터넷 트래픽을 차단할 수 있는 환경
 - 대전 엣지 클러스터, TimescaleDB, Home Assistant(MQTT 통합) ([지역 엣지에 TimescaleDB와 Grafana를 두어 인터넷 없이도 기록하고 보는 방법](/posts/56/))
+- 엣지 클러스터의 Longhorn. 기본 StorageClass 이고 복제본 2벌 ([Proxmox에 Ansible로 kubeadm 엣지 클러스터 만들고 Argo CD 원격 클러스터로 등록하는 방법](/posts/42/))
 - 엣지 Mosquitto 브로커와 Telegraf 파이프라인 ([엣지 Mosquitto와 Telegraf 디스크 버퍼로 중앙 TimescaleDB에 유실 없이 IoT 데이터 모으는 방법](/posts/43/))
 - 서울 원격 NAS 와 연결된 Tailscale 사설망
 
@@ -60,30 +61,30 @@ ipTIME C500GS IP 카메라를 공유기 방화벽으로 외부 인터넷과 완�
 nc -zv 192.168.0.40 554
 ```
 
-## 2. 워커 노드 NVR 전용 디스크 마운트
+## 2. 영상 버퍼용 Longhorn 디스크 늘리기
 
-영상 녹화 데이터가 시스템 디스크나 Longhorn 분산 스토리지에 부담을 주지 않도록, Proxmox VM에 500GB SCSI 디스크를 추가하고 `/mnt/nvr`에 마운트합니다.
+영상은 워커 한 대의 전용 디스크가 아니라 Longhorn 볼륨에 둡니다. 처음에는 워커 한 대에 500GB 디스크를 붙여 `hostPath` 로 썼는데, 디스크가 한 노드에만 있어 그 서버가 죽으면 재실 감지가 멈췄습니다. 영상은 NAS 로 보내기 전까지 머무는 버퍼라 길게 둘 필요가 없으므로, 18Gi 볼륨에 당일치만 두고 Longhorn 이 두 워커에 복제하게 합니다.
 
-Ansible 인벤토리 `proxmox-ansible`의 `group_vars/all.yml`에서 워커 노드 사양을 증설하고 전용 디스크를 정의합니다:
+볼륨이 들어갈 자리를 만들기 위해 `proxmox-ansible` 의 `group_vars/all.yml` 에서 두 워커의 `longhorn_disk` 를 40 으로 키우고 [클러스터 플레이북](/posts/46/)을 다시 실행합니다. 플레이북이 VM 을 켠 채로 디스크(`scsi1`)와 파일시스템을 늘립니다.
 
-{% raw %}
 ```yaml
-# group_vars/all.yml
-- { name: k8s-dj-worker-1, pve: pve01, role: worker, vmid: 133, ip: 192.168.0.133, cores: 6, memory: 8192, disk: 40G, longhorn_disk: 20, nvr_disk: 500 }
+      - { name: k8s-dj-worker-1, pve: pve01, role: worker,        vmid: 133, ip: [EDGE_WORKER_1_IP], cores: 6, memory: 8192, disk: 40G, longhorn_disk: 40 }
+      - { name: k8s-dj-worker-2, pve: pve02, role: worker,        vmid: 134, ip: [EDGE_WORKER_2_IP], cores: 4, memory: 8192, disk: 40G, longhorn_disk: 40 }
 ```
 {: file="group_vars/all.yml" }
-{% endraw %}
 
-`playbooks/k8s-cluster.yml`의 NVR 디스크 생성 및 포맷·마운트 태스크를 거쳐 실행합니다:
+worker-1 은 재실 감지가 CPU 를 다 써서 6코어, worker-2 는 NVR 이 넘어올 수 있는 최소인 4코어입니다.
 
 ```bash
+# proxmox-ansible 저장소 루트에서
 ansible-playbook playbooks/k8s-cluster.yml -e k8s_cluster=daejeon
 ```
 
-- **확인:** 워커 노드에서 `/mnt/nvr` 마운트와 용량을 확인합니다.
+- **확인:** 두 워커에서 `/var/lib/longhorn` 의 크기가 약 40G 로 보입니다.
 
 ```bash
-ssh ubuntu@192.168.0.133 "df -h /mnt/nvr"
+ssh ubuntu@k8s-dj-worker-1.eu4ng.com "df -h /var/lib/longhorn"
+ssh ubuntu@k8s-dj-worker-2.eu4ng.com "df -h /var/lib/longhorn"
 ```
 
 ## 3. 방 기하 설정
@@ -227,14 +228,16 @@ ssh ubuntu@kubectl-hub.eu4ng.com "kubectl --kubeconfig ~/k8s-daejeon.yaml -n nvr
 
 ## 5. NVR 서비스 및 수집기 GitOps 배포
 
-영상은 모두 날짜 폴더 `/mnt/nvr/<YYYYMMDD>/` 에 종류마다 MKV 로 둡니다. MKV 는 앞에서부터 차례로 쓰므로 쓰는 중인 파일도 VLC 로 볼 수 있고, 쓰던 프로그램이 죽어도 그때까지 쓴 부분이 남습니다.
+영상은 모두 볼륨 `nvr-storage`(파드 안 `/mnt/nvr`)의 날짜 폴더 `/mnt/nvr/<YYYYMMDD>/` 에 종류마다 MKV 로 둡니다. MKV 는 앞에서부터 차례로 쓰므로 쓰는 중인 파일도 VLC 로 볼 수 있고, 쓰던 프로그램이 죽어도 그때까지 쓴 부분이 남습니다.
 
 | 파일 | 내용 | 로컬 | 서울 NAS |
 | :--- | :--- | :--- | :--- |
-| `<날짜>_rec.mkv` | 5MP H.265 원본(무인코딩) | 7일 | 보내지 않음 |
-| `<날짜>_rec720.mkv` | 720p 10fps 사본 | 7일 | 365일 |
-| `<날짜>_live.mkv` | 실시간 측정 영상(초록 박스) | 7일 | 365일 |
-| `<날짜>_review.json`, `<날짜>_review_<시작>-<끝>.mkv` | 사후 검수 결과와 불일치 구간 클립 | 7일 | 365일 |
+| `<날짜>_rec.mkv` | 5MP H.265 원본(무인코딩) | 당일 | 보내지 않음 |
+| `<날짜>_rec720.mkv` | 720p 10fps 사본 | 당일 | 365일 |
+| `<날짜>_live.mkv` | 실시간 측정 영상(초록 박스) | 당일 | 365일 |
+| `<날짜>_review.json`, `<날짜>_review_<시작>-<끝>.mkv` | 사후 검수 결과와 불일치 구간 클립 | 당일 | 365일 |
+
+로컬의 "당일" 은 그날 쓰는 폴더만 남긴다는 뜻입니다. 전날 폴더는 자정 뒤 NAS 로 보낸 다음 지웁니다.
 
 NVR 파드는 한 파드 안에 세 가지 컨테이너가 협력하는 구조입니다:
 1. **`go2rtc`**: 카메라에 RTSP 세션을 딱 1개만 맺고, 로컬 `:8554`로 스트림을 분배합니다. 저가형 IP 카메라의 동시 연결 수 한계 문제를 원천 차단합니다.
@@ -246,6 +249,52 @@ NVR 파드는 한 파드 안에 세 가지 컨테이너가 협력하는 구조�
    - 추적한 프레임마다 초록 박스와 칸·추적 ID·신뢰도·좌표·시각을 그린 **실시간 측정 영상**(`_live`)과, 같은 프레임을 그리기 전 그대로 담은 720p 사본(`_rec720`)을 날짜마다 MKV 로 씁니다. 카메라 주 스트림 해상도는 ONVIF 로 바꿀 수 없어 720p 는 수집기가 만듭니다.
 
 GitOps 저장소(`k8s-gitops`)의 `iot/edge/nvr/`에 베이스 매니페스트와 스크립트를 두고, `iot/clusters/daejeon/nvr/`에 오버레이를 둡니다.
+
+영상 볼륨은 StorageClass 를 적지 않은 PVC 로 받습니다. 엣지의 기본 StorageClass 가 Longhorn 이라 두 워커에 한 벌씩 복제됩니다.
+
+```yaml
+# NVR 영상 버퍼. Longhorn 이 두 worker 에 복제하므로(기본 StorageClass, 2벌) 서버 한 대가 죽으면 NVR 이 다른 worker 에서 같은 볼륨으로
+# 다시 뜹니다. 영상은 NAS 로 보내기 전까지 머무는 버퍼라 당일치만 둡니다(하루 약 10GB. 전날 것은 자정 뒤 NAS 로 보내고 지움, scripts/daily-archive.sh).
+# 크기는 worker 의 Longhorn 디스크(proxmox-ansible longhorn_disk 40)에서 다른 볼륨을 빼고 남는 만큼입니다.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nvr-storage
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 18Gi
+```
+{: file="iot/edge/nvr/pvc.yaml" }
+
+Deployment 는 이 PVC 를 `/mnt/nvr` 에 붙입니다. 특정 워커에 고정하는 `nodeSelector` 를 두지 않고, 노드가 죽으면 기본 300초 대신 30초 뒤에 파드를 내보내도록 toleration 을 줍니다.
+
+```yaml
+      priorityClassName: essential             # 서버 한 대가 죽어도 유지(iot/shared/priority-classes). 영상 볼륨(pvc.yaml)이 두 worker 에 복제돼 함께 넘어갑니다
+      tolerations:                              # 노드가 죽으면 30초 뒤 다른 노드에서 다시 띄웁니다(기본 300초)
+        - { key: node.kubernetes.io/not-ready, operator: Exists, effect: NoExecute, tolerationSeconds: 30 }
+        - { key: node.kubernetes.io/unreachable, operator: Exists, effect: NoExecute, tolerationSeconds: 30 }
+      # ... (containers: go2rtc, recorder, occupancy)
+      volumes:
+        - name: nvr-storage
+          persistentVolumeClaim:
+            claimName: nvr-storage
+```
+{: file="iot/edge/nvr/deployment.yaml (발췌)" }
+
+볼륨이 `ReadWriteOnce` 라 한 노드에서만 붙으므로, 같은 볼륨을 쓰는 CronJob 두 개(`nvr-daily-archive`, `nvr-review`)는 `podAffinity` 로 NVR 파드와 같은 노드에 뜨게 합니다.
+
+```yaml
+          affinity:                             # 영상 볼륨이 ReadWriteOnce 라 NVR 파드와 같은 노드에 떠야 함께 마운트됩니다
+            podAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector: { matchLabels: { app: nvr } }
+                  topologyKey: kubernetes.io/hostname
+```
+{: file="iot/edge/nvr/cronjob-daily-archive.yaml (발췌)" }
+
+시험에서 NVR 파드는 65초 만에 다른 워커로 넘어갔고, DB 에 남은 카메라 기록의 공백은 59초였습니다.
 
 {% raw %}
 ```yaml
@@ -277,7 +326,7 @@ streams:
 ```
 {: file="iot/edge/nvr/collector-settings.json" }
 
-매일 00:05 에 실행되는 `nvr-daily-archive` CronJob 은 전날 파일이 닫히기를 기다린 뒤 종류마다 재인코딩 없이 하나로 합칩니다. 재시작 때문에 파일이 나뉜 날은 녹화가 이어진 구간마다 `<날짜>_<종류>_<시작>-<끝>.mkv` 로 합치므로 이름의 시각 사이가 녹화가 끊긴 구간입니다. 이어서 720p 사본과 실시간 측정 영상을 Tailscale 경유 서울 NAS(`/volume3/backup/nvr/daejeon/<날짜>/`)로 SFTP 로 보내고 로컬 7일, NAS 365일이 지난 날짜 폴더를 지웁니다. NAS 계정은 볼륨 최상위에 폴더를 만들 수 없으므로 기존 공유 폴더 아래에 두고, 시놀로지는 rsync 서비스를 켜지 않으면 rsync-over-ssh 를 거부하므로 SFTP 를 씁니다. SFTP 경로는 공유 폴더 기준(`/backup/nvr/daejeon`)입니다.
+매일 00:05 에 실행되는 `nvr-daily-archive` CronJob 은 전날 파일이 닫히기를 기다린 뒤 종류마다 재인코딩 없이 하나로 합칩니다. 재시작 때문에 파일이 나뉜 날은 녹화가 이어진 구간마다 `<날짜>_<종류>_<시작>-<끝>.mkv` 로 합치므로 이름의 시각 사이가 녹화가 끊긴 구간입니다. 이어서 720p 사본과 실시간 측정 영상을 Tailscale 경유 서울 NAS(`/volume3/backup/nvr/daejeon/<날짜>/`)로 SFTP 로 보내고, 다 보낸 전날 폴더는 로컬에서 바로 지웁니다(`LOCAL_DAYS` 기본 0). NAS 에서는 365일이 지난 날짜 폴더를 지웁니다. 정리가 하루 한 번만 돌기 때문에 전날 영상을 남겨 두면 18Gi 볼륨이 다음 날 가득 차므로 로컬에는 당일치만 둡니다. 정리한 뒤에도 여유가 60%(`MIN_FREE_PCT`)보다 적으면 남은 지난 폴더의 5MP 원본부터 더 지웁니다. NAS 로 보내지 못한 파일이 있는 폴더는 지우지 않고 다음 실행에 다시 보냅니다. NAS 계정은 볼륨 최상위에 폴더를 만들 수 없으므로 기존 공유 폴더 아래에 두고, 시놀로지는 rsync 서비스를 켜지 않으면 rsync-over-ssh 를 거부하므로 SFTP 를 씁니다. SFTP 경로는 공유 폴더 기준(`/backup/nvr/daejeon`)입니다.
 
 `nvr-review` CronJob(매일 00:30)은 사후 검수입니다. 실시간 측정은 움직이는 사람은 잘 잡지만 오래 가만히 있는 사람에게 약하므로, 합친 5MP 원본의 **모든 프레임**을 더 큰 모델로 다시 추적해 초마다 인원을 내고 DB `readings` 의 실시간 `occupant_count` 와 비교합니다. 값이 다른 구간만 왼쪽에 실시간 측정 영상, 오른쪽에 검수 결과를 붙인 2560x720 클립으로 남기고, 일치율과 불일치 구간 목록을 `<날짜>_review.json` 에 씁니다. 마감 시간 없이 검수 안 된 가장 최근 날짜부터 처리하고, CPU 가 모자랄 때 실시간 수집이 먼저 받도록 검수 CronJob 의 CPU request 를 낮게 둡니다. 모델과 비교 기준은 `review-settings.json` 에서 바꿉니다.
 
@@ -295,7 +344,7 @@ streams:
 ```
 {: file="iot/edge/nvr/review-settings.json" }
 
-> 6 vCPU 워커의 CPU 로는 `yolov8s` 전 프레임 추적이 초당 약 5프레임이라 하루치(약 130만 프레임)에 사흘 넘게 걸립니다. 그래서 CronJob 을 `suspend: true` 로 배포하고, GPU 를 붙이거나 `frame_step`·모델을 정한 뒤 `false` 로 바꿔 켭니다.
+> 6 vCPU 워커의 CPU 로는 `yolov8s` 전 프레임 추적이 초당 약 5프레임이라 하루치(약 130만 프레임)에 사흘 넘게 걸립니다. 그래서 CronJob 을 `suspend: true` 로 배포합니다. 또 검수는 전날 5MP 원본이 로컬에 있어야 하는데 지금 구성은 전날 폴더를 이관 뒤 바로 지우므로, 이 구성 그대로는 켤 수 없습니다. 켜려면 GPU 를 붙이거나 `frame_step`·모델을 정하고, `LOCAL_DAYS` 와 볼륨 크기를 함께 늘립니다.
 {: .prompt-warning }
 
 GitOps 저장소에 커밋하고 push하면 Argo CD `iot-edge` ApplicationSet이 새 폴더를 감지해 자동으로 `daejeon-nvr` 애플리케이션을 생성하고 엣지 클러스터에 배포합니다.
@@ -309,9 +358,15 @@ ssh ubuntu@kubectl-hub.eu4ng.com "kubectl --kubeconfig ~/k8s-daejeon.yaml -n nvr
 
 ## 6. 배포와 수집 확인
 
-배포가 끝나면 녹화, MQTT 센서, 실시간 측정 영상, 일일 합치기, 사후 검수를 차례로 확인합니다.
+배포가 끝나면 볼륨, 녹화, MQTT 센서, 실시간 측정 영상, 일일 합치기, 사후 검수를 차례로 확인합니다.
 
-워커 노드의 `/mnt/nvr/` 아래에 오늘 날짜 폴더가 생기고 원본·720p 사본·실시간 측정 영상 MKV 가 커지는지 봅니다.
+```bash
+ssh ubuntu@kubectl-hub.eu4ng.com "kubectl --kubeconfig ~/k8s-daejeon.yaml -n nvr get pvc nvr-storage"
+```
+
+- **확인:** `STATUS` 가 `Bound`, `CAPACITY` 가 `18Gi`, `STORAGECLASS` 가 `longhorn` 입니다.
+
+영상 볼륨(`/mnt/nvr/`) 아래에 오늘 날짜 폴더가 생기고 원본·720p 사본·실시간 측정 영상 MKV 가 커지는지 봅니다.
 
 ```bash
 ssh ubuntu@kubectl-hub.eu4ng.com "kubectl --kubeconfig ~/k8s-daejeon.yaml -n nvr exec deploy/nvr -c recorder -- ls -lh /mnt/nvr/$(date +%Y%m%d)"
@@ -352,9 +407,9 @@ ssh ubuntu@kubectl-hub.eu4ng.com "kubectl --kubeconfig ~/k8s-daejeon.yaml -n nvr
 ssh ubuntu@kubectl-hub.eu4ng.com "kubectl --kubeconfig ~/k8s-daejeon.yaml -n nvr logs -l job-name --all-containers --prefix --tail=30"
 ```
 
-- **확인:** `rec: <날짜>_rec.mkv`, `live: <날짜>_live.mkv` 처럼 종류마다 합친 파일 이름이 나오고 `NAS 이관` 줄이 보입니다. 끊긴 날은 `<날짜>_<종류>_<시작>-<끝>.mkv` 로 여러 개입니다.
+- **확인:** `rec: <날짜>_rec.mkv`, `live: <날짜>_live.mkv` 처럼 종류마다 합친 파일 이름이 나오고 `NAS 이관` 줄에 이어 `로컬 보존 정리` 와 `<날짜>: 지움` 이 보입니다. 끊긴 날은 `<날짜>_<종류>_<시작>-<끝>.mkv` 로 여러 개입니다.
 
-사후 검수를 켰다면 검수가 끝난 뒤 결과 파일을 봅니다.
+사후 검수를 켰다면(전날 원본이 남도록 `LOCAL_DAYS` 와 볼륨을 늘린 경우) 검수가 끝난 뒤 결과 파일을 봅니다.
 
 ```bash
 ssh ubuntu@kubectl-hub.eu4ng.com "kubectl --kubeconfig ~/k8s-daejeon.yaml -n nvr exec deploy/nvr -c recorder -- sh -c 'cat /mnt/nvr/\$(date -d @\$((\$(date +%s) - 86400)) +%Y%m%d)/*_review.json'"
