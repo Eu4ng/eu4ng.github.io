@@ -472,6 +472,7 @@ Patroni 설정의 요점은 아래와 같습니다.
 - `scope` 가 곧 Service·Endpoints 이름이고, `kubernetes.ports` 의 이름이 Service 포트 이름과 같아야 합니다.
 - `synchronous_mode` 와 `synchronous_node_count: 1` 로 쓰기는 대기 복제본 하나가 받아야 완료됩니다. `sync_priority` 가 높은 worker 멤버를 먼저 고르고, 없으면 NAS 멤버가 동기 복제본이 됩니다. `synchronous_mode_strict: false` 라 둘 다 없으면 쓰기를 멈추지 않고 비동기로 씁니다.
 - `failover_priority` 로 주 DB 가 죽으면 worker 멤버(2)를 NAS 멤버(1)보다 먼저 올립니다.
+- `authentication` 에 `rewind` 계정은 적지 않습니다. 이름만 적고 비밀번호를 주지 않았더니 타임라인이 갈라진 복제본이 `pg_rewind` 로 주 DB 에 붙을 때 `no password supplied` 로 실패해 스스로 따라붙지 못했습니다. 적지 않으면 superuser 계정으로 `pg_rewind` 합니다. NAS 멤버의 스택 파일(8단계)도 같습니다.
 - `post_bootstrap` 스크립트는 클러스터를 처음 만들 때 한 번 실행되어 role 과 DB 를 만듭니다. 복원 전에 Telegraf 가 먼저 붙어 테이블을 만들지 않게, `IOT_LOGIN=NOLOGIN` 을 주면 `iot` role 을 로그인할 수 없게 만듭니다.
 
 ```yaml
@@ -521,8 +522,7 @@ postgresql:
   pgpass: /tmp/pgpass
   authentication:                 # 비밀번호는 PATRONI_SUPERUSER_PASSWORD, PATRONI_REPLICATION_PASSWORD
     superuser: { username: postgres }
-    replication: { username: replicator }
-    rewind: { username: postgres }
+    replication: { username: replicator }       # rewind 계정은 따로 적지 않습니다. 적으면 비밀번호도 따로 줘야 하고, 없으면 superuser 로 pg_rewind 합니다
   pg_hba:
     - local all all trust
     - host replication replicator 0.0.0.0/0 scram-sha-256
@@ -745,7 +745,6 @@ services:
           authentication:
             superuser: { username: postgres }
             replication: { username: replicator }
-            rewind: { username: postgres }
           pg_hba:
             - local all all trust
             - host replication replicator 0.0.0.0/0 scram-sha-256

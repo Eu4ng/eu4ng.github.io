@@ -168,6 +168,8 @@ spec:
 ```
 {: file="iot/edge/timescaledb/service.yaml" }
 
+데이터 볼륨이 Longhorn 이라 `fsGroupChangePolicy: OnRootMismatch` 와 initContainer `pgdata-permissions` 를 둡니다. Longhorn 볼륨은 다시 붙을 때 kubelet 이 `fsGroup` 에 맞춰 데이터 디렉터리 권한을 2770 으로 바꾸는데, PostgreSQL 은 0700·0750 이 아니면 `data directory has invalid permissions` 로 기동을 거부합니다. 서버를 재부팅한 뒤 두 멤버가 모두 이 오류로 뜨지 못한 적이 있어, 볼륨 루트가 이미 맞으면 권한 변경을 건너뛰게 하고 initContainer 가 기동 전에 0700 으로 되돌립니다.
+
 <details markdown="1">
 <summary>iot/edge/timescaledb/statefulset.yaml</summary>
 
@@ -188,14 +190,29 @@ spec:
     metadata:
       labels: { application: patroni, cluster-name: timescaledb }
     spec:
+      priorityClassName: essential             # 서버 한 대가 죽어도 유지(iot/shared/priority-classes)
+      tolerations:                              # 노드가 죽으면 30초 뒤 다른 노드에서 다시 띄웁니다(기본 300초)
+        - { key: node.kubernetes.io/not-ready, operator: Exists, effect: NoExecute, tolerationSeconds: 30 }
+        - { key: node.kubernetes.io/unreachable, operator: Exists, effect: NoExecute, tolerationSeconds: 30 }
       serviceAccountName: patroni
-      securityContext: { fsGroup: 1000 }
+      # Longhorn 볼륨은 붙을 때마다 kubelet 이 fsGroup 에 맞춰 권한을 재귀로 바꿉니다(0700 → 2770). PostgreSQL 은 0700·0750 이 아닌
+      # 데이터 디렉터리로는 뜨지 않으므로, 볼륨 루트가 이미 맞으면 건너뛰게 하고(OnRootMismatch) 아래 initContainer 가 0700 으로 되돌립니다.
+      securityContext: { fsGroup: 1000, fsGroupChangePolicy: OnRootMismatch }
       affinity:
         podAntiAffinity:                            # 서버마다 하나
           requiredDuringSchedulingIgnoredDuringExecution:
             - labelSelector: { matchLabels: { application: patroni, cluster-name: timescaledb } }
               topologyKey: kubernetes.io/hostname
       terminationGracePeriodSeconds: 30
+      initContainers:
+        - name: pgdata-permissions                  # 처음(디렉터리가 아직 없음)에는 아무것도 하지 않습니다
+          image: timescale/timescaledb-ha:pg17.11-ts2.30.1
+          command: [sh, -c, 'd=/home/postgres/pgdata/data; if [ -d "$d" ]; then chmod 0700 "$d"; fi']
+          volumeMounts:
+            - { name: pgdata, mountPath: /home/postgres/pgdata }
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits:   { cpu: 100m, memory: 64Mi }
       containers:
         - name: timescaledb
           image: timescale/timescaledb-ha:pg17.11-ts2.30.1   # 허브와 같은 이미지
@@ -246,6 +263,10 @@ spec:
 {: file="iot/edge/timescaledb/statefulset.yaml" }
 
 </details>
+
+`priorityClassName: essential` 과 `tolerations` 는 서버 한 대가 죽었을 때를 위한 설정입니다. 남은 worker 에 자리가 모자라면 이 파드를 먼저 살리고, 죽은 노드를 기본 300초 대신 30초만 기다린 뒤 다른 노드에서 다시 띄웁니다. 등급은 [쿠버네티스에 Longhorn과 Patroni로 볼륨과 TimescaleDB 이중화하는 방법](/posts/54/)의 6단계에서 만들고, 등급이 없으면 파드가 만들어지지 않습니다.
+
+Patroni 설정의 `authentication` 에는 `rewind` 계정을 적지 않습니다. 이름만 적고 비밀번호를 주지 않았더니 타임라인이 갈라진 복제본이 `pg_rewind` 로 주 DB 에 붙을 때 `no password supplied` 로 실패해 스스로 따라붙지 못했습니다. 적지 않으면 superuser 계정으로 `pg_rewind` 합니다.
 
 <details markdown="1">
 <summary>iot/edge/timescaledb/patroni/patroni.yml</summary>
@@ -298,8 +319,7 @@ postgresql:
   pgpass: /tmp/pgpass
   authentication:                 # 비밀번호는 PATRONI_SUPERUSER_PASSWORD, PATRONI_REPLICATION_PASSWORD
     superuser: { username: postgres }
-    replication: { username: replicator }
-    rewind: { username: postgres }
+    replication: { username: replicator }       # rewind 계정은 따로 적지 않습니다. 적으면 비밀번호도 따로 줘야 하고, 없으면 superuser 로 pg_rewind 합니다
   pg_hba:
     - local all all trust
     - host replication replicator 0.0.0.0/0 scram-sha-256
@@ -462,6 +482,10 @@ spec:
     metadata:
       labels: { app: grafana }
     spec:
+      priorityClassName: essential             # 서버 한 대가 죽어도 유지(iot/shared/priority-classes)
+      tolerations:                              # 노드가 죽으면 30초 뒤 다른 노드에서 다시 띄웁니다(기본 300초)
+        - { key: node.kubernetes.io/not-ready, operator: Exists, effect: NoExecute, tolerationSeconds: 30 }
+        - { key: node.kubernetes.io/unreachable, operator: Exists, effect: NoExecute, tolerationSeconds: 30 }
       securityContext:
         runAsUser: 472       # 이미지의 grafana 계정
         runAsGroup: 472
@@ -682,6 +706,7 @@ lanIPv4:
   - [LAN_CIDR]
 
 traefik:
+  priorityClassName: essential                    # 서버 한 대가 죽어도 유지(iot/shared/priority-classes)
   deployment:
     kind: DaemonSet                              # control plane 두 대에서 받습니다. 서비스 VIP 를 가진 쪽으로 요청이 옵니다
   nodeSelector: { node-role.kubernetes.io/control-plane: "" }
