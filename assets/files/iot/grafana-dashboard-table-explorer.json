@@ -6,7 +6,7 @@
     "timescaledb",
     "explorer"
   ],
-  "description": "선택한 DB 테이블을 스키마 그대로 미러링하며, 속성(칼럼)별로 개별 그래프 카드를 자동 생성하는 범용 탐색기 대시보드입니다.",
+  "description": "DB의 모든 테이블을 자동으로 감지하며 스키마를 미러링하고, 속성(칼럼)별로 개별 그래프 카드를 자동 생성하는 범용 탐색기 대시보드입니다.",
   "timezone": "Asia/Seoul",
   "editable": true,
   "graphTooltip": 1,
@@ -16,7 +16,7 @@
     "to": "now"
   },
   "schemaVersion": 39,
-  "version": 3,
+  "version": 4,
   "templating": {
     "list": [
       {
@@ -27,8 +27,8 @@
           "type": "grafana-postgresql-datasource",
           "uid": "timescaledb"
         },
-        "query": "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('personal_health', 'readings') ORDER BY (table_name != 'personal_health'), table_name",
-        "definition": "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('personal_health', 'readings') ORDER BY (table_name != 'personal_health'), table_name",
+        "query": "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE' ORDER BY (table_name != 'personal_health'), table_name",
+        "definition": "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE' ORDER BY (table_name != 'personal_health'), table_name",
         "refresh": 2,
         "sort": 1,
         "multi": false,
@@ -47,8 +47,8 @@
           "type": "grafana-postgresql-datasource",
           "uid": "timescaledb"
         },
-        "query": "SELECT DISTINCT property FROM ${table:raw} WHERE $__timeFilter(time) ORDER BY 1",
-        "definition": "SELECT DISTINCT property FROM ${table:raw} WHERE $__timeFilter(time) ORDER BY 1",
+        "query": "SELECT DISTINCT (to_jsonb(sub)->>'property') AS property FROM (SELECT * FROM ${table:raw} LIMIT 50000) sub WHERE (to_jsonb(sub)->>'property') IS NOT NULL ORDER BY 1",
+        "definition": "SELECT DISTINCT (to_jsonb(sub)->>'property') AS property FROM (SELECT * FROM ${table:raw} LIMIT 50000) sub WHERE (to_jsonb(sub)->>'property') IS NOT NULL ORDER BY 1",
         "refresh": 2,
         "sort": 1,
         "multi": true,
@@ -72,8 +72,8 @@
           "type": "grafana-postgresql-datasource",
           "uid": "timescaledb"
         },
-        "query": "SELECT DISTINCT property FROM ${table:raw} WHERE $__timeFilter(time) AND ('__all__' IN ($property) OR property IN ($property)) AND value IS NOT NULL AND property NOT IN ('sleep_stage') AND lower(coalesce(value_text, '')) NOT IN ('on', 'off', 'true', 'false', 'online', 'offline') ORDER BY 1",
-        "definition": "SELECT DISTINCT property FROM ${table:raw} WHERE $__timeFilter(time) AND ('__all__' IN ($property) OR property IN ($property)) AND value IS NOT NULL AND property NOT IN ('sleep_stage') AND lower(coalesce(value_text, '')) NOT IN ('on', 'off', 'true', 'false', 'online', 'offline') ORDER BY 1",
+        "query": "SELECT DISTINCT (to_jsonb(sub)->>'property') AS property FROM (SELECT * FROM ${table:raw} LIMIT 50000) sub WHERE (to_jsonb(sub)->>'property') IS NOT NULL AND ('__all__' IN ($property) OR (to_jsonb(sub)->>'property') IN ($property)) AND (to_jsonb(sub)->>'value') IS NOT NULL AND (to_jsonb(sub)->>'property') NOT IN ('sleep_stage') AND lower(coalesce(to_jsonb(sub)->>'value_text', '')) NOT IN ('on', 'off', 'true', 'false', 'online', 'offline') ORDER BY 1",
+        "definition": "SELECT DISTINCT (to_jsonb(sub)->>'property') AS property FROM (SELECT * FROM ${table:raw} LIMIT 50000) sub WHERE (to_jsonb(sub)->>'property') IS NOT NULL AND ('__all__' IN ($property) OR (to_jsonb(sub)->>'property') IN ($property)) AND (to_jsonb(sub)->>'value') IS NOT NULL AND (to_jsonb(sub)->>'property') NOT IN ('sleep_stage') AND lower(coalesce(to_jsonb(sub)->>'value_text', '')) NOT IN ('on', 'off', 'true', 'false', 'online', 'offline') ORDER BY 1",
         "refresh": 2,
         "sort": 1,
         "multi": true,
@@ -97,8 +97,8 @@
           "type": "grafana-postgresql-datasource",
           "uid": "timescaledb"
         },
-        "query": "SELECT property FROM ${table:raw} WHERE $__timeFilter(time) AND ('__all__' IN ($property) OR property IN ($property)) GROUP BY property HAVING count(value_text) > 0 AND (property IN ('sleep_stage') OR count(value) = 0 OR bool_and(lower(value_text) IN ('on', 'off', 'true', 'false', 'online', 'offline'))) ORDER BY 1",
-        "definition": "SELECT property FROM ${table:raw} WHERE $__timeFilter(time) AND ('__all__' IN ($property) OR property IN ($property)) GROUP BY property HAVING count(value_text) > 0 AND (property IN ('sleep_stage') OR count(value) = 0 OR bool_and(lower(value_text) IN ('on', 'off', 'true', 'false', 'online', 'offline'))) ORDER BY 1",
+        "query": "SELECT (to_jsonb(sub)->>'property') AS property FROM (SELECT * FROM ${table:raw} LIMIT 50000) sub WHERE (to_jsonb(sub)->>'property') IS NOT NULL AND ('__all__' IN ($property) OR (to_jsonb(sub)->>'property') IN ($property)) GROUP BY 1 HAVING count(to_jsonb(sub)->>'value_text') > 0 AND ((to_jsonb(sub)->>'property') IN ('sleep_stage') OR count(to_jsonb(sub)->>'value') = 0 OR bool_and(lower(to_jsonb(sub)->>'value_text') IN ('on', 'off', 'true', 'false', 'online', 'offline'))) ORDER BY 1",
+        "definition": "SELECT (to_jsonb(sub)->>'property') AS property FROM (SELECT * FROM ${table:raw} LIMIT 50000) sub WHERE (to_jsonb(sub)->>'property') IS NOT NULL AND ('__all__' IN ($property) OR (to_jsonb(sub)->>'property') IN ($property)) GROUP BY 1 HAVING count(to_jsonb(sub)->>'value_text') > 0 AND ((to_jsonb(sub)->>'property') IN ('sleep_stage') OR count(to_jsonb(sub)->>'value') = 0 OR bool_and(lower(to_jsonb(sub)->>'value_text') IN ('on', 'off', 'true', 'false', 'online', 'offline'))) ORDER BY 1",
         "refresh": 2,
         "sort": 1,
         "multi": true,
@@ -202,7 +202,7 @@
     {
       "type": "table",
       "title": "${table} 최근 데이터 표",
-      "description": "선택한 테이블의 모든 컬럼을 스키마 그대로 미러링하여 보여 줍니다.",
+      "description": "선택한 테이블의 모든 컬럼을 스키마 그대로 미러링하여 보여 줍니다. (시간 컬럼 유무 무관 안전 조회)",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "timescaledb"
@@ -224,7 +224,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT *\nFROM ${table:raw}\nWHERE $__timeFilter(time)\nORDER BY time DESC\nLIMIT 200"
+          "rawSql": "SELECT *\nFROM (\n  SELECT * FROM ${table:raw} LIMIT 500\n) sub\nORDER BY (to_jsonb(sub)->>'time') DESC NULLS LAST\nLIMIT 200"
         }
       ],
       "fieldConfig": {
