@@ -1,0 +1,553 @@
+{
+  "uid": "table-explorer",
+  "title": "테이블 탐색기",
+  "tags": [
+    "iot",
+    "timescaledb",
+    "explorer"
+  ],
+  "description": "DB의 모든 테이블을 자동으로 감지하며 스키마를 미러링하고, 속성(칼럼)별로 개별 그래프 카드를 자동 생성하는 범용 탐색기 대시보드입니다.",
+  "timezone": "Asia/Seoul",
+  "editable": true,
+  "graphTooltip": 1,
+  "refresh": "1m",
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "schemaVersion": 39,
+  "version": 11,
+  "templating": {
+    "list": [
+      {
+        "name": "table",
+        "label": "테이블",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "timescaledb"
+        },
+        "query": "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE' ORDER BY (table_name != 'personal_health'), table_name",
+        "definition": "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE' ORDER BY (table_name != 'personal_health'), table_name",
+        "refresh": 2,
+        "sort": 1,
+        "multi": false,
+        "includeAll": false,
+        "current": {
+          "selected": true,
+          "text": "personal_health",
+          "value": "personal_health"
+        }
+      },
+      {
+        "name": "timeseries_table",
+        "label": "시계열 대상 테이블",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "timescaledb"
+        },
+        "query": "SELECT CASE \n  WHEN EXISTS (\n    SELECT 1 FROM information_schema.columns \n    WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'time'\n  ) AND EXISTS (\n    SELECT 1 FROM information_schema.columns \n    WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'property'\n  ) THEN '${table:raw}'\n  ELSE 'readings'\nEND AS timeseries_table",
+        "definition": "",
+        "refresh": 1,
+        "sort": 1,
+        "multi": false,
+        "includeAll": false,
+        "hide": 2,
+        "current": {
+          "selected": false,
+          "value": ""
+        }
+      },
+      {
+        "name": "num_property",
+        "label": "수치 속성",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "timescaledb"
+        },
+        "query": "SELECT DISTINCT prop AS property\nFROM (\n    SELECT to_jsonb(t)->>'property' AS prop,\n           to_jsonb(t)->>'value' AS val,\n           to_jsonb(t)->>'value_text' AS val_txt\n    FROM ${table:raw} t\n    LIMIT 5000\n) sub\nWHERE prop IS NOT NULL \n  AND val IS NOT NULL \n  AND prop NOT IN ('sleep_stage') \n  AND lower(coalesce(val_txt, '')) NOT IN ('on', 'off', 'true', 'false', 'online', 'offline')\nUNION ALL\nSELECT '(해당 없음)' AS property\nWHERE NOT EXISTS (\n    SELECT 1 FROM information_schema.columns \n    WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'property'\n)\nORDER BY 1",
+        "definition": "",
+        "refresh": 1,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "hide": 2,
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      },
+      {
+        "name": "text_property",
+        "label": "상태 속성",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "timescaledb"
+        },
+        "query": "SELECT DISTINCT prop AS property\nFROM (\n    SELECT to_jsonb(t)->>'property' AS prop,\n           to_jsonb(t)->>'value' AS val,\n           to_jsonb(t)->>'value_text' AS val_txt\n    FROM ${table:raw} t\n    LIMIT 5000\n) sub\nWHERE prop IS NOT NULL \n  AND val_txt IS NOT NULL\n  AND (prop IN ('sleep_stage') OR lower(coalesce(val_txt, '')) IN ('on', 'off', 'true', 'false', 'online', 'offline'))\nUNION ALL\nSELECT '(해당 없음)' AS property\nWHERE NOT EXISTS (\n    SELECT 1 FROM information_schema.columns \n    WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'property'\n)\nORDER BY 1",
+        "definition": "",
+        "refresh": 1,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "hide": 2,
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      },
+      {
+        "name": "rel_column",
+        "label": "일반 컬럼",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "timescaledb"
+        },
+        "query": "WITH is_eav AS (\n    SELECT EXISTS (\n        SELECT 1 FROM information_schema.columns \n        WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'property'\n    ) AS val\n)\nSELECT column_name AS rel_column\nFROM information_schema.columns\nWHERE NOT (SELECT val FROM is_eav)\n  AND table_schema = 'public' \n  AND table_name = '${table:raw}'\n  AND column_name NOT IN ('id')\nUNION ALL\nSELECT '(해당 없음)' AS rel_column\nWHERE (SELECT val FROM is_eav)\nORDER BY 1",
+        "definition": "",
+        "refresh": 1,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "hide": 2,
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "table",
+      "title": "${table} 컬럼 구성",
+      "description": "선택한 테이블의 현재 컬럼 정의와 데이터 타입입니다.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "timescaledb"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "id": 1,
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT ordinal_position, column_name, data_type, is_nullable\nFROM information_schema.columns\nWHERE table_schema = 'public' AND table_name = '${table:raw}'\nORDER BY ordinal_position"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "filterable": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      }
+    },
+    {
+      "type": "table",
+      "title": "${table} 청크 구성 (하이퍼테이블인 경우)",
+      "description": "선택한 테이블이 하이퍼테이블일 경우의 청크 범위와 압축 상태입니다.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "timescaledb"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "id": 2,
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT chunk_name, range_start, range_end, is_compressed\nFROM timescaledb_information.chunks\nWHERE hypertable_name = '${table:raw}'\nORDER BY range_start DESC"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "filterable": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      }
+    },
+    {
+      "type": "table",
+      "title": "${table} 최근 데이터 표",
+      "description": "선택한 테이블의 모든 컬럼을 스키마 그대로 미러링하여 보여 줍니다. (시간 컬럼 유무 무관 안전 조회)",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "timescaledb"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 24,
+        "h": 10
+      },
+      "id": 3,
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT *\nFROM (\n  SELECT * FROM ${table:raw} LIMIT 500\n) sub\nORDER BY (to_jsonb(sub)->>'time') DESC NULLS LAST\nLIMIT 200"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "filterable": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      }
+    },
+    {
+      "type": "row",
+      "title": "${table} 수치 측정치 (칼럼/속성별 카드)",
+      "gridPos": {
+        "x": 0,
+        "y": 18,
+        "w": 24,
+        "h": 1
+      },
+      "id": 100,
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "title": "$num_property",
+      "description": "수치형 속성마다 개별 카드(3열 그리드)로 자동 생성됩니다.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "timescaledb"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 19,
+        "w": 8,
+        "h": 8
+      },
+      "id": 4,
+      "repeat": "num_property",
+      "repeatDirection": "h",
+      "maxPerRow": 3,
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT \n  time,\n  value,\n  coalesce(nullif(concat_ws(' ', nullif(concat_ws('-', to_jsonb(t)->>'room', to_jsonb(t)->>'device'), ''), unit), ''), property) AS metric\nFROM ${timeseries_table:raw} t\nWHERE property = ${num_property:sqlstring}\n  AND property != '(해당 없음)'\n  AND '${table:raw}' = '${timeseries_table:raw}'\n  AND value IS NOT NULL\n  AND $__timeFilter(time)\nORDER BY time"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "${table} 상태 타임라인 (칼럼/속성별 카드)",
+      "gridPos": {
+        "x": 0,
+        "y": 27,
+        "w": 24,
+        "h": 1
+      },
+      "id": 200,
+      "collapsed": false
+    },
+    {
+      "type": "state-timeline",
+      "title": "$text_property",
+      "description": "상태/단계형 속성마다 개별 타임라인 카드(2열 그리드)로 자동 생성됩니다.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "timescaledb"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 28,
+        "w": 12,
+        "h": 6
+      },
+      "id": 5,
+      "repeat": "text_property",
+      "repeatDirection": "h",
+      "maxPerRow": 2,
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT \n  time,\n  value_text AS state,\n  coalesce(nullif(concat_ws('-', to_jsonb(t)->>'room', to_jsonb(t)->>'device'), ''), ${text_property:sqlstring}) AS metric\nFROM ${timeseries_table:raw} t\nWHERE property = ${text_property:sqlstring}\n  AND property != '(해당 없음)'\n  AND '${table:raw}' = '${timeseries_table:raw}'\n  AND value_text IS NOT NULL\n  AND $__timeFilter(time)\nORDER BY time"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "awake": {
+                  "index": 0,
+                  "color": "#E07A5F",
+                  "text": "깨어남"
+                }
+              }
+            },
+            {
+              "type": "value",
+              "options": {
+                "light": {
+                  "index": 1,
+                  "color": "#3A86FF",
+                  "text": "얕은 수면"
+                }
+              }
+            },
+            {
+              "type": "value",
+              "options": {
+                "deep": {
+                  "index": 2,
+                  "color": "#023E8A",
+                  "text": "깊은 수면"
+                }
+              }
+            },
+            {
+              "type": "value",
+              "options": {
+                "rem": {
+                  "index": 3,
+                  "color": "#8338EC",
+                  "text": "렘 수면"
+                }
+              }
+            },
+            {
+              "type": "value",
+              "options": {
+                "true": {
+                  "index": 4,
+                  "color": "#F2C94C",
+                  "text": "켜짐/참"
+                }
+              }
+            },
+            {
+              "type": "value",
+              "options": {
+                "on": {
+                  "index": 5,
+                  "color": "#F2C94C",
+                  "text": "켜짐"
+                }
+              }
+            },
+            {
+              "type": "value",
+              "options": {
+                "online": {
+                  "index": 6,
+                  "color": "#F2C94C",
+                  "text": "온라인"
+                }
+              }
+            },
+            {
+              "type": "value",
+              "options": {
+                "false": {
+                  "index": 7,
+                  "color": "#5f6368",
+                  "text": "꺼짐/거짓"
+                }
+              }
+            },
+            {
+              "type": "value",
+              "options": {
+                "off": {
+                  "index": 8,
+                  "color": "#5f6368",
+                  "text": "꺼짐"
+                }
+              }
+            },
+            {
+              "type": "value",
+              "options": {
+                "offline": {
+                  "index": 9,
+                  "color": "#5f6368",
+                  "text": "오프라인"
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "showValue": "auto",
+        "rowHeight": 0.8,
+        "mergeValues": true
+      }
+    },
+    {
+      "type": "row",
+      "title": "${table} 컬럼별 데이터 분포 (일반 테이블 칼럼 카드)",
+      "gridPos": {
+        "x": 0,
+        "y": 35,
+        "w": 24,
+        "h": 1
+      },
+      "id": 300,
+      "collapsed": false
+    },
+    {
+      "type": "barchart",
+      "title": "$rel_column",
+      "description": "선택한 일반 테이블의 $rel_column 컬럼 데이터 값 분포 및 건수입니다.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "timescaledb"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 36,
+        "w": 8,
+        "h": 7
+      },
+      "id": 6,
+      "repeat": "rel_column",
+      "repeatDirection": "h",
+      "maxPerRow": 3,
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT \n  coalesce(nullif(to_jsonb(t)->>'${rel_column:raw}', ''), '(빈 값)') AS \"값\",\n  count(*)::bigint AS \"건수\"\nFROM ${table:raw} t\nWHERE '${rel_column:raw}' != '(해당 없음)'\nGROUP BY 1\nORDER BY \"건수\" DESC\nLIMIT 10"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "lineWidth": 1
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "showValue": "auto",
+        "groupWidth": 0.7,
+        "barWidth": 0.97,
+        "xTickLabelRotation": 0,
+        "legend": {
+          "displayMode": "hidden"
+        }
+      }
+    }
+  ]
+}
