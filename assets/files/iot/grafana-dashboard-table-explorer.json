@@ -16,7 +16,7 @@
     "to": "now"
   },
   "schemaVersion": 39,
-  "version": 7,
+  "version": 11,
   "templating": {
     "list": [
       {
@@ -40,28 +40,23 @@
         }
       },
       {
-        "name": "property",
-        "label": "속성 필터",
+        "name": "timeseries_table",
+        "label": "시계열 대상 테이블",
         "type": "query",
         "datasource": {
           "type": "grafana-postgresql-datasource",
           "uid": "timescaledb"
         },
-        "query": "WITH is_eav AS (\n    SELECT EXISTS (\n        SELECT 1 FROM information_schema.columns \n        WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'property'\n    ) AS val\n)\nSELECT DISTINCT (to_jsonb(sub)->>'property') AS property \nFROM (SELECT * FROM ${table:raw} LIMIT 50000) sub \nWHERE (SELECT val FROM is_eav) AND (to_jsonb(sub)->>'property') IS NOT NULL \nORDER BY 1",
-        "definition": "WITH is_eav AS (\n    SELECT EXISTS (\n        SELECT 1 FROM information_schema.columns \n        WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'property'\n    ) AS val\n)\nSELECT DISTINCT (to_jsonb(sub)->>'property') AS property \nFROM (SELECT * FROM ${table:raw} LIMIT 50000) sub \nWHERE (SELECT val FROM is_eav) AND (to_jsonb(sub)->>'property') IS NOT NULL \nORDER BY 1",
+        "query": "SELECT CASE \n  WHEN EXISTS (\n    SELECT 1 FROM information_schema.columns \n    WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'time'\n  ) AND EXISTS (\n    SELECT 1 FROM information_schema.columns \n    WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'property'\n  ) THEN '${table:raw}'\n  ELSE 'readings'\nEND AS timeseries_table",
+        "definition": "",
         "refresh": 1,
         "sort": 1,
-        "multi": true,
-        "includeAll": true,
-        "allValue": "'__all__'",
+        "multi": false,
+        "includeAll": false,
+        "hide": 2,
         "current": {
-          "selected": true,
-          "text": [
-            "All"
-          ],
-          "value": [
-            "$__all"
-          ]
+          "selected": false,
+          "value": ""
         }
       },
       {
@@ -72,8 +67,8 @@
           "type": "grafana-postgresql-datasource",
           "uid": "timescaledb"
         },
-        "query": "WITH is_eav AS (\n    SELECT EXISTS (\n        SELECT 1 FROM information_schema.columns \n        WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'property'\n    ) AS val\n)\nSELECT DISTINCT (to_jsonb(sub)->>'property') AS property \nFROM (SELECT * FROM ${table:raw} LIMIT 50000) sub \nWHERE (SELECT val FROM is_eav) \n  AND (to_jsonb(sub)->>'property') IS NOT NULL \n  AND ('__all__' IN ($property) OR (to_jsonb(sub)->>'property') IN ($property)) \n  AND (to_jsonb(sub)->>'value') IS NOT NULL \n  AND (to_jsonb(sub)->>'property') NOT IN ('sleep_stage') \n  AND lower(coalesce(to_jsonb(sub)->>'value_text', '')) NOT IN ('on', 'off', 'true', 'false', 'online', 'offline') \nORDER BY 1",
-        "definition": "WITH is_eav AS (\n    SELECT EXISTS (\n        SELECT 1 FROM information_schema.columns \n        WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'property'\n    ) AS val\n)\nSELECT DISTINCT (to_jsonb(sub)->>'property') AS property \nFROM (SELECT * FROM ${table:raw} LIMIT 50000) sub \nWHERE (SELECT val FROM is_eav) \n  AND (to_jsonb(sub)->>'property') IS NOT NULL \n  AND ('__all__' IN ($property) OR (to_jsonb(sub)->>'property') IN ($property)) \n  AND (to_jsonb(sub)->>'value') IS NOT NULL \n  AND (to_jsonb(sub)->>'property') NOT IN ('sleep_stage') \n  AND lower(coalesce(to_jsonb(sub)->>'value_text', '')) NOT IN ('on', 'off', 'true', 'false', 'online', 'offline') \nORDER BY 1",
+        "query": "SELECT DISTINCT prop AS property\nFROM (\n    SELECT to_jsonb(t)->>'property' AS prop,\n           to_jsonb(t)->>'value' AS val,\n           to_jsonb(t)->>'value_text' AS val_txt\n    FROM ${table:raw} t\n    LIMIT 5000\n) sub\nWHERE prop IS NOT NULL \n  AND val IS NOT NULL \n  AND prop NOT IN ('sleep_stage') \n  AND lower(coalesce(val_txt, '')) NOT IN ('on', 'off', 'true', 'false', 'online', 'offline')\nUNION ALL\nSELECT '(해당 없음)' AS property\nWHERE NOT EXISTS (\n    SELECT 1 FROM information_schema.columns \n    WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'property'\n)\nORDER BY 1",
+        "definition": "",
         "refresh": 1,
         "sort": 1,
         "multi": true,
@@ -97,8 +92,8 @@
           "type": "grafana-postgresql-datasource",
           "uid": "timescaledb"
         },
-        "query": "WITH is_eav AS (\n    SELECT EXISTS (\n        SELECT 1 FROM information_schema.columns \n        WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'property'\n    ) AS val\n)\nSELECT (to_jsonb(sub)->>'property') AS property \nFROM (SELECT * FROM ${table:raw} LIMIT 50000) sub \nWHERE (SELECT val FROM is_eav) \n  AND (to_jsonb(sub)->>'property') IS NOT NULL \n  AND ('__all__' IN ($property) OR (to_jsonb(sub)->>'property') IN ($property)) \nGROUP BY 1 \nHAVING count(to_jsonb(sub)->>'value_text') > 0 \n  AND ((to_jsonb(sub)->>'property') IN ('sleep_stage') OR count(to_jsonb(sub)->>'value') = 0 OR bool_and(lower(to_jsonb(sub)->>'value_text') IN ('on', 'off', 'true', 'false', 'online', 'offline'))) \nORDER BY 1",
-        "definition": "WITH is_eav AS (\n    SELECT EXISTS (\n        SELECT 1 FROM information_schema.columns \n        WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'property'\n    ) AS val\n)\nSELECT (to_jsonb(sub)->>'property') AS property \nFROM (SELECT * FROM ${table:raw} LIMIT 50000) sub \nWHERE (SELECT val FROM is_eav) \n  AND (to_jsonb(sub)->>'property') IS NOT NULL \n  AND ('__all__' IN ($property) OR (to_jsonb(sub)->>'property') IN ($property)) \nGROUP BY 1 \nHAVING count(to_jsonb(sub)->>'value_text') > 0 \n  AND ((to_jsonb(sub)->>'property') IN ('sleep_stage') OR count(to_jsonb(sub)->>'value') = 0 OR bool_and(lower(to_jsonb(sub)->>'value_text') IN ('on', 'off', 'true', 'false', 'online', 'offline'))) \nORDER BY 1",
+        "query": "SELECT DISTINCT prop AS property\nFROM (\n    SELECT to_jsonb(t)->>'property' AS prop,\n           to_jsonb(t)->>'value' AS val,\n           to_jsonb(t)->>'value_text' AS val_txt\n    FROM ${table:raw} t\n    LIMIT 5000\n) sub\nWHERE prop IS NOT NULL \n  AND val_txt IS NOT NULL\n  AND (prop IN ('sleep_stage') OR lower(coalesce(val_txt, '')) IN ('on', 'off', 'true', 'false', 'online', 'offline'))\nUNION ALL\nSELECT '(해당 없음)' AS property\nWHERE NOT EXISTS (\n    SELECT 1 FROM information_schema.columns \n    WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'property'\n)\nORDER BY 1",
+        "definition": "",
         "refresh": 1,
         "sort": 1,
         "multi": true,
@@ -122,8 +117,8 @@
           "type": "grafana-postgresql-datasource",
           "uid": "timescaledb"
         },
-        "query": "WITH is_eav AS (\n    SELECT EXISTS (\n        SELECT 1 FROM information_schema.columns \n        WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'property'\n    ) AS val\n)\nSELECT column_name AS rel_column\nFROM information_schema.columns\nWHERE NOT (SELECT val FROM is_eav)\n  AND table_schema = 'public' \n  AND table_name = '${table:raw}'\n  AND column_name NOT IN ('id')\nORDER BY ordinal_position",
-        "definition": "WITH is_eav AS (\n    SELECT EXISTS (\n        SELECT 1 FROM information_schema.columns \n        WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'property'\n    ) AS val\n)\nSELECT column_name AS rel_column\nFROM information_schema.columns\nWHERE NOT (SELECT val FROM is_eav)\n  AND table_schema = 'public' \n  AND table_name = '${table:raw}'\n  AND column_name NOT IN ('id')\nORDER BY ordinal_position",
+        "query": "WITH is_eav AS (\n    SELECT EXISTS (\n        SELECT 1 FROM information_schema.columns \n        WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'property'\n    ) AS val\n)\nSELECT column_name AS rel_column\nFROM information_schema.columns\nWHERE NOT (SELECT val FROM is_eav)\n  AND table_schema = 'public' \n  AND table_name = '${table:raw}'\n  AND column_name NOT IN ('id')\nUNION ALL\nSELECT '(해당 없음)' AS rel_column\nWHERE (SELECT val FROM is_eav)\nORDER BY 1",
+        "definition": "",
         "refresh": 1,
         "sort": 1,
         "multi": true,
@@ -305,7 +300,7 @@
           "editorMode": "code",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "WITH is_valid AS (\n    SELECT EXISTS (\n        SELECT 1 FROM information_schema.columns \n        WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'time'\n    ) AND EXISTS (\n        SELECT 1 FROM information_schema.columns \n        WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'property'\n    ) AS ok\n)\nSELECT \n  (to_jsonb(t)->>'time')::timestamptz AS time,\n  (to_jsonb(t)->>'value')::double precision AS value,\n  coalesce(nullif(concat_ws(' ', nullif(concat_ws('-', to_jsonb(t)->>'room', to_jsonb(t)->>'device'), ''), to_jsonb(t)->>'unit'), ''), to_jsonb(t)->>'property') AS metric\nFROM ${table:raw} t\nWHERE (SELECT ok FROM is_valid)\n  AND (to_jsonb(t)->>'property') = ${num_property:sqlstring}\n  AND (to_jsonb(t)->>'value') IS NOT NULL\n  AND (to_jsonb(t)->>'time') IS NOT NULL\n  AND (to_jsonb(t)->>'time')::timestamptz >= $__timeFrom()\n  AND (to_jsonb(t)->>'time')::timestamptz <= $__timeTo()\nORDER BY 1"
+          "rawSql": "SELECT \n  time,\n  value,\n  coalesce(nullif(concat_ws(' ', nullif(concat_ws('-', to_jsonb(t)->>'room', to_jsonb(t)->>'device'), ''), unit), ''), property) AS metric\nFROM ${timeseries_table:raw} t\nWHERE property = ${num_property:sqlstring}\n  AND property != '(해당 없음)'\n  AND '${table:raw}' = '${timeseries_table:raw}'\n  AND value IS NOT NULL\n  AND $__timeFilter(time)\nORDER BY time"
         }
       ],
       "fieldConfig": {
@@ -371,7 +366,7 @@
           "editorMode": "code",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "WITH is_valid AS (\n    SELECT EXISTS (\n        SELECT 1 FROM information_schema.columns \n        WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'time'\n    ) AND EXISTS (\n        SELECT 1 FROM information_schema.columns \n        WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'property'\n    ) AS ok\n)\nSELECT \n  (to_jsonb(t)->>'time')::timestamptz AS time,\n  (to_jsonb(t)->>'value_text') AS state,\n  coalesce(nullif(concat_ws('-', to_jsonb(t)->>'room', to_jsonb(t)->>'device'), ''), ${text_property:sqlstring}) AS metric\nFROM ${table:raw} t\nWHERE (SELECT ok FROM is_valid)\n  AND (to_jsonb(t)->>'property') = ${text_property:sqlstring}\n  AND (to_jsonb(t)->>'value_text') IS NOT NULL\n  AND (to_jsonb(t)->>'time') IS NOT NULL\n  AND (to_jsonb(t)->>'time')::timestamptz >= $__timeFrom()\n  AND (to_jsonb(t)->>'time')::timestamptz <= $__timeTo()\nORDER BY 1"
+          "rawSql": "SELECT \n  time,\n  value_text AS state,\n  coalesce(nullif(concat_ws('-', to_jsonb(t)->>'room', to_jsonb(t)->>'device'), ''), ${text_property:sqlstring}) AS metric\nFROM ${timeseries_table:raw} t\nWHERE property = ${text_property:sqlstring}\n  AND property != '(해당 없음)'\n  AND '${table:raw}' = '${timeseries_table:raw}'\n  AND value_text IS NOT NULL\n  AND $__timeFilter(time)\nORDER BY time"
         }
       ],
       "fieldConfig": {
@@ -527,7 +522,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT \n  coalesce(nullif(to_jsonb(t)->>'${rel_column:raw}', ''), '(빈 값)') AS \"값\",\n  count(*)::bigint AS \"건수\"\nFROM ${table:raw} t\nGROUP BY 1\nORDER BY \"건수\" DESC\nLIMIT 10"
+          "rawSql": "SELECT \n  coalesce(nullif(to_jsonb(t)->>'${rel_column:raw}', ''), '(빈 값)') AS \"값\",\n  count(*)::bigint AS \"건수\"\nFROM ${table:raw} t\nWHERE '${rel_column:raw}' != '(해당 없음)'\nGROUP BY 1\nORDER BY \"건수\" DESC\nLIMIT 10"
         }
       ],
       "fieldConfig": {
