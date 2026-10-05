@@ -6,7 +6,7 @@
     "timescaledb",
     "explorer"
   ],
-  "description": "선택한 DB 테이블을 스키마 그대로 미러링하여 보여주는 범용 탐색기 대시보드입니다. 상단에서 테이블을 변경하면 컬럼, 청크, 데이터 표, 시계열 그래프, 상태 타임라인이 자동으로 전환됩니다.",
+  "description": "선택한 DB 테이블을 스키마 그대로 미러링하며, 속성(칼럼)별로 개별 그래프 카드를 자동 생성하는 범용 탐색기 대시보드입니다.",
   "timezone": "Asia/Seoul",
   "editable": true,
   "graphTooltip": 1,
@@ -16,7 +16,7 @@
     "to": "now"
   },
   "schemaVersion": 39,
-  "version": 1,
+  "version": 3,
   "templating": {
     "list": [
       {
@@ -27,8 +27,8 @@
           "type": "grafana-postgresql-datasource",
           "uid": "timescaledb"
         },
-        "query": "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('personal_health', 'readings', 'events', 'appliances', 'appliance_specs', 'weather_missing') ORDER BY (table_name != 'personal_health'), table_name",
-        "definition": "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('personal_health', 'readings', 'events', 'appliances', 'appliance_specs', 'weather_missing') ORDER BY (table_name != 'personal_health'), table_name",
+        "query": "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('personal_health', 'readings') ORDER BY (table_name != 'personal_health'), table_name",
+        "definition": "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('personal_health', 'readings') ORDER BY (table_name != 'personal_health'), table_name",
         "refresh": 2,
         "sort": 1,
         "multi": false,
@@ -41,7 +41,7 @@
       },
       {
         "name": "property",
-        "label": "속성",
+        "label": "속성 필터",
         "type": "query",
         "datasource": {
           "type": "grafana-postgresql-datasource",
@@ -54,6 +54,56 @@
         "multi": true,
         "includeAll": true,
         "allValue": "'__all__'",
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      },
+      {
+        "name": "num_property",
+        "label": "수치 속성",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "timescaledb"
+        },
+        "query": "SELECT DISTINCT property FROM ${table:raw} WHERE $__timeFilter(time) AND ('__all__' IN ($property) OR property IN ($property)) AND value IS NOT NULL AND property NOT IN ('sleep_stage') AND lower(coalesce(value_text, '')) NOT IN ('on', 'off', 'true', 'false', 'online', 'offline') ORDER BY 1",
+        "definition": "SELECT DISTINCT property FROM ${table:raw} WHERE $__timeFilter(time) AND ('__all__' IN ($property) OR property IN ($property)) AND value IS NOT NULL AND property NOT IN ('sleep_stage') AND lower(coalesce(value_text, '')) NOT IN ('on', 'off', 'true', 'false', 'online', 'offline') ORDER BY 1",
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "hide": 2,
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      },
+      {
+        "name": "text_property",
+        "label": "상태 속성",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "timescaledb"
+        },
+        "query": "SELECT property FROM ${table:raw} WHERE $__timeFilter(time) AND ('__all__' IN ($property) OR property IN ($property)) GROUP BY property HAVING count(value_text) > 0 AND (property IN ('sleep_stage') OR count(value) = 0 OR bool_and(lower(value_text) IN ('on', 'off', 'true', 'false', 'online', 'offline'))) ORDER BY 1",
+        "definition": "SELECT property FROM ${table:raw} WHERE $__timeFilter(time) AND ('__all__' IN ($property) OR property IN ($property)) GROUP BY property HAVING count(value_text) > 0 AND (property IN ('sleep_stage') OR count(value) = 0 OR bool_and(lower(value_text) IN ('on', 'off', 'true', 'false', 'online', 'offline'))) ORDER BY 1",
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "hide": 2,
         "current": {
           "selected": true,
           "text": [
@@ -161,7 +211,7 @@
         "x": 0,
         "y": 8,
         "w": 24,
-        "h": 12
+        "h": 10
       },
       "id": 3,
       "targets": [
@@ -191,20 +241,35 @@
       }
     },
     {
+      "type": "row",
+      "title": "${table} 수치 측정치 (칼럼/속성별 카드)",
+      "gridPos": {
+        "x": 0,
+        "y": 18,
+        "w": 24,
+        "h": 1
+      },
+      "id": 100,
+      "collapsed": false
+    },
+    {
       "type": "timeseries",
-      "title": "${table} 시계열 수치 그래프",
-      "description": "선택한 테이블에서 value 수치가 있는 속성들의 시계열 변화를 그립니다.",
+      "title": "$num_property",
+      "description": "수치형 속성마다 개별 카드(3열 그리드)로 자동 생성됩니다.",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "timescaledb"
       },
       "gridPos": {
         "x": 0,
-        "y": 20,
-        "w": 24,
-        "h": 10
+        "y": 19,
+        "w": 8,
+        "h": 8
       },
       "id": 4,
+      "repeat": "num_property",
+      "repeatDirection": "h",
+      "maxPerRow": 3,
       "targets": [
         {
           "refId": "A",
@@ -215,7 +280,7 @@
           "editorMode": "code",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT \n  time,\n  value,\n  property AS metric\nFROM ${table:raw}\nWHERE ('__all__' IN ($property) OR property IN ($property))\n  AND value IS NOT NULL\n  AND $__timeFilter(time)\nORDER BY time"
+          "rawSql": "SELECT \n  time,\n  value,\n  coalesce(nullif(concat_ws(' ', nullif(concat_ws('-', to_jsonb(t)->>'room', to_jsonb(t)->>'device'), ''), unit), ''), property) AS metric\nFROM ${table:raw} t\nWHERE property = ${num_property:sqlstring}\n  AND value IS NOT NULL\n  AND $__timeFilter(time)\nORDER BY time"
         }
       ],
       "fieldConfig": {
@@ -242,20 +307,35 @@
       }
     },
     {
+      "type": "row",
+      "title": "${table} 상태 타임라인 (칼럼/속성별 카드)",
+      "gridPos": {
+        "x": 0,
+        "y": 27,
+        "w": 24,
+        "h": 1
+      },
+      "id": 200,
+      "collapsed": false
+    },
+    {
       "type": "state-timeline",
-      "title": "${table} 상태 타임라인 (텍스트 상태)",
-      "description": "선택한 테이블의 value_text 문자열 상태(수면 단계, 연결 상태 등)를 시간대별 타임라인으로 그립니다.",
+      "title": "$text_property",
+      "description": "상태/단계형 속성마다 개별 타임라인 카드(2열 그리드)로 자동 생성됩니다.",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "timescaledb"
       },
       "gridPos": {
         "x": 0,
-        "y": 30,
-        "w": 24,
-        "h": 10
+        "y": 28,
+        "w": 12,
+        "h": 6
       },
       "id": 5,
+      "repeat": "text_property",
+      "repeatDirection": "h",
+      "maxPerRow": 2,
       "targets": [
         {
           "refId": "A",
@@ -266,11 +346,114 @@
           "editorMode": "code",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT \n  time,\n  value_text AS state,\n  property AS metric\nFROM ${table:raw}\nWHERE ('__all__' IN ($property) OR property IN ($property))\n  AND value_text IS NOT NULL\n  AND $__timeFilter(time)\nORDER BY time"
+          "rawSql": "SELECT \n  time,\n  value_text AS state,\n  coalesce(nullif(concat_ws('-', to_jsonb(t)->>'room', to_jsonb(t)->>'device'), ''), ${text_property:sqlstring}) AS metric\nFROM ${table:raw} t\nWHERE property = ${text_property:sqlstring}\n  AND value_text IS NOT NULL\n  AND $__timeFilter(time)\nORDER BY time"
         }
       ],
       "fieldConfig": {
-        "defaults": {},
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "awake": {
+                  "index": 0,
+                  "color": "#E07A5F",
+                  "text": "깨어남"
+                }
+              }
+            },
+            {
+              "type": "value",
+              "options": {
+                "light": {
+                  "index": 1,
+                  "color": "#3A86FF",
+                  "text": "얕은 수면"
+                }
+              }
+            },
+            {
+              "type": "value",
+              "options": {
+                "deep": {
+                  "index": 2,
+                  "color": "#023E8A",
+                  "text": "깊은 수면"
+                }
+              }
+            },
+            {
+              "type": "value",
+              "options": {
+                "rem": {
+                  "index": 3,
+                  "color": "#8338EC",
+                  "text": "렘 수면"
+                }
+              }
+            },
+            {
+              "type": "value",
+              "options": {
+                "true": {
+                  "index": 4,
+                  "color": "#F2C94C",
+                  "text": "켜짐/참"
+                }
+              }
+            },
+            {
+              "type": "value",
+              "options": {
+                "on": {
+                  "index": 5,
+                  "color": "#F2C94C",
+                  "text": "켜짐"
+                }
+              }
+            },
+            {
+              "type": "value",
+              "options": {
+                "online": {
+                  "index": 6,
+                  "color": "#F2C94C",
+                  "text": "온라인"
+                }
+              }
+            },
+            {
+              "type": "value",
+              "options": {
+                "false": {
+                  "index": 7,
+                  "color": "#5f6368",
+                  "text": "꺼짐/거짓"
+                }
+              }
+            },
+            {
+              "type": "value",
+              "options": {
+                "off": {
+                  "index": 8,
+                  "color": "#5f6368",
+                  "text": "꺼짐"
+                }
+              }
+            },
+            {
+              "type": "value",
+              "options": {
+                "offline": {
+                  "index": 9,
+                  "color": "#5f6368",
+                  "text": "오프라인"
+                }
+              }
+            }
+          ]
+        },
         "overrides": []
       },
       "options": {
