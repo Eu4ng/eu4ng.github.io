@@ -16,7 +16,7 @@
     "to": "now"
   },
   "schemaVersion": 39,
-  "version": 6,
+  "version": 7,
   "templating": {
     "list": [
       {
@@ -305,7 +305,7 @@
           "editorMode": "code",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT \n  time,\n  value,\n  coalesce(nullif(concat_ws(' ', nullif(concat_ws('-', to_jsonb(t)->>'room', to_jsonb(t)->>'device'), ''), unit), ''), property) AS metric\nFROM ${table:raw} t\nWHERE property = ${num_property:sqlstring}\n  AND value IS NOT NULL\n  AND $__timeFilter(time)\nORDER BY time"
+          "rawSql": "WITH is_valid AS (\n    SELECT EXISTS (\n        SELECT 1 FROM information_schema.columns \n        WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'time'\n    ) AND EXISTS (\n        SELECT 1 FROM information_schema.columns \n        WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'property'\n    ) AS ok\n)\nSELECT \n  (to_jsonb(t)->>'time')::timestamptz AS time,\n  (to_jsonb(t)->>'value')::double precision AS value,\n  coalesce(nullif(concat_ws(' ', nullif(concat_ws('-', to_jsonb(t)->>'room', to_jsonb(t)->>'device'), ''), to_jsonb(t)->>'unit'), ''), to_jsonb(t)->>'property') AS metric\nFROM ${table:raw} t\nWHERE (SELECT ok FROM is_valid)\n  AND (to_jsonb(t)->>'property') = ${num_property:sqlstring}\n  AND (to_jsonb(t)->>'value') IS NOT NULL\n  AND (to_jsonb(t)->>'time') IS NOT NULL\n  AND (to_jsonb(t)->>'time')::timestamptz >= $__timeFrom()\n  AND (to_jsonb(t)->>'time')::timestamptz <= $__timeTo()\nORDER BY 1"
         }
       ],
       "fieldConfig": {
@@ -371,7 +371,7 @@
           "editorMode": "code",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT \n  time,\n  value_text AS state,\n  coalesce(nullif(concat_ws('-', to_jsonb(t)->>'room', to_jsonb(t)->>'device'), ''), ${text_property:sqlstring}) AS metric\nFROM ${table:raw} t\nWHERE property = ${text_property:sqlstring}\n  AND value_text IS NOT NULL\n  AND $__timeFilter(time)\nORDER BY time"
+          "rawSql": "WITH is_valid AS (\n    SELECT EXISTS (\n        SELECT 1 FROM information_schema.columns \n        WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'time'\n    ) AND EXISTS (\n        SELECT 1 FROM information_schema.columns \n        WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'property'\n    ) AS ok\n)\nSELECT \n  (to_jsonb(t)->>'time')::timestamptz AS time,\n  (to_jsonb(t)->>'value_text') AS state,\n  coalesce(nullif(concat_ws('-', to_jsonb(t)->>'room', to_jsonb(t)->>'device'), ''), ${text_property:sqlstring}) AS metric\nFROM ${table:raw} t\nWHERE (SELECT ok FROM is_valid)\n  AND (to_jsonb(t)->>'property') = ${text_property:sqlstring}\n  AND (to_jsonb(t)->>'value_text') IS NOT NULL\n  AND (to_jsonb(t)->>'time') IS NOT NULL\n  AND (to_jsonb(t)->>'time')::timestamptz >= $__timeFrom()\n  AND (to_jsonb(t)->>'time')::timestamptz <= $__timeTo()\nORDER BY 1"
         }
       ],
       "fieldConfig": {
