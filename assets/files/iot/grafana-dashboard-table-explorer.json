@@ -16,7 +16,7 @@
     "to": "now"
   },
   "schemaVersion": 39,
-  "version": 11,
+  "version": 12,
   "templating": {
     "list": [
       {
@@ -47,7 +47,7 @@
           "type": "grafana-postgresql-datasource",
           "uid": "timescaledb"
         },
-        "query": "SELECT CASE \n  WHEN EXISTS (\n    SELECT 1 FROM information_schema.columns \n    WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'time'\n  ) AND EXISTS (\n    SELECT 1 FROM information_schema.columns \n    WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'property'\n  ) THEN '${table:raw}'\n  ELSE 'readings'\nEND AS timeseries_table",
+        "query": "SELECT CASE \n  WHEN EXISTS (\n    SELECT 1 FROM information_schema.columns \n    WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'time'\n  ) AND EXISTS (\n    SELECT 1 FROM information_schema.columns \n    WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'property'\n  ) AND (\n    EXISTS (\n      SELECT 1 FROM information_schema.columns \n      WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'value'\n    ) OR EXISTS (\n      SELECT 1 FROM information_schema.columns \n      WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'value_text'\n    )\n  ) THEN '${table:raw}'\n  ELSE 'readings'\nEND AS timeseries_table",
         "definition": "",
         "refresh": 1,
         "sort": 1,
@@ -67,7 +67,7 @@
           "type": "grafana-postgresql-datasource",
           "uid": "timescaledb"
         },
-        "query": "SELECT DISTINCT prop AS property\nFROM (\n    SELECT to_jsonb(t)->>'property' AS prop,\n           to_jsonb(t)->>'value' AS val,\n           to_jsonb(t)->>'value_text' AS val_txt\n    FROM ${table:raw} t\n    LIMIT 5000\n) sub\nWHERE prop IS NOT NULL \n  AND val IS NOT NULL \n  AND prop NOT IN ('sleep_stage') \n  AND lower(coalesce(val_txt, '')) NOT IN ('on', 'off', 'true', 'false', 'online', 'offline')\nUNION ALL\nSELECT '(해당 없음)' AS property\nWHERE NOT EXISTS (\n    SELECT 1 FROM information_schema.columns \n    WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'property'\n)\nORDER BY 1",
+        "query": "WITH actual_props AS (\n    SELECT DISTINCT prop AS property\n    FROM (\n        SELECT to_jsonb(t)->>'property' AS prop,\n               to_jsonb(t)->>'value' AS val,\n               to_jsonb(t)->>'value_text' AS val_txt\n        FROM ${table:raw} t\n        LIMIT 5000\n    ) sub\n    WHERE prop IS NOT NULL \n      AND val IS NOT NULL \n      AND prop NOT IN ('sleep_stage') \n      AND lower(coalesce(val_txt, '')) NOT IN ('on', 'off', 'true', 'false', 'online', 'offline')\n)\nSELECT property FROM actual_props\nUNION ALL\nSELECT '(해당 없음)' AS property\nWHERE NOT EXISTS (SELECT 1 FROM actual_props)\nORDER BY 1",
         "definition": "",
         "refresh": 1,
         "sort": 1,
@@ -92,7 +92,7 @@
           "type": "grafana-postgresql-datasource",
           "uid": "timescaledb"
         },
-        "query": "SELECT DISTINCT prop AS property\nFROM (\n    SELECT to_jsonb(t)->>'property' AS prop,\n           to_jsonb(t)->>'value' AS val,\n           to_jsonb(t)->>'value_text' AS val_txt\n    FROM ${table:raw} t\n    LIMIT 5000\n) sub\nWHERE prop IS NOT NULL \n  AND val_txt IS NOT NULL\n  AND (prop IN ('sleep_stage') OR lower(coalesce(val_txt, '')) IN ('on', 'off', 'true', 'false', 'online', 'offline'))\nUNION ALL\nSELECT '(해당 없음)' AS property\nWHERE NOT EXISTS (\n    SELECT 1 FROM information_schema.columns \n    WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'property'\n)\nORDER BY 1",
+        "query": "WITH actual_props AS (\n    SELECT DISTINCT prop AS property\n    FROM (\n        SELECT to_jsonb(t)->>'property' AS prop,\n               to_jsonb(t)->>'value' AS val,\n               to_jsonb(t)->>'value_text' AS val_txt\n        FROM ${table:raw} t\n        LIMIT 5000\n    ) sub\n    WHERE prop IS NOT NULL \n      AND val_txt IS NOT NULL\n      AND (prop IN ('sleep_stage') OR lower(coalesce(val_txt, '')) IN ('on', 'off', 'true', 'false', 'online', 'offline'))\n)\nSELECT property FROM actual_props\nUNION ALL\nSELECT '(해당 없음)' AS property\nWHERE NOT EXISTS (SELECT 1 FROM actual_props)\nORDER BY 1",
         "definition": "",
         "refresh": 1,
         "sort": 1,
@@ -117,7 +117,7 @@
           "type": "grafana-postgresql-datasource",
           "uid": "timescaledb"
         },
-        "query": "WITH is_eav AS (\n    SELECT EXISTS (\n        SELECT 1 FROM information_schema.columns \n        WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'property'\n    ) AS val\n)\nSELECT column_name AS rel_column\nFROM information_schema.columns\nWHERE NOT (SELECT val FROM is_eav)\n  AND table_schema = 'public' \n  AND table_name = '${table:raw}'\n  AND column_name NOT IN ('id')\nUNION ALL\nSELECT '(해당 없음)' AS rel_column\nWHERE (SELECT val FROM is_eav)\nORDER BY 1",
+        "query": "WITH is_eav AS (\n    SELECT (\n        EXISTS (\n            SELECT 1 FROM information_schema.columns \n            WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'property'\n        ) AND (\n            EXISTS (\n                SELECT 1 FROM information_schema.columns \n                WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'value'\n            ) OR EXISTS (\n                SELECT 1 FROM information_schema.columns \n                WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'value_text'\n            )\n        )\n    ) AS val\n)\nSELECT column_name AS rel_column\nFROM information_schema.columns\nWHERE NOT (SELECT val FROM is_eav)\n  AND table_schema = 'public' \n  AND table_name = '${table:raw}'\n  AND column_name NOT IN ('id')\nUNION ALL\nSELECT '(해당 없음)' AS rel_column\nWHERE (SELECT val FROM is_eav)\nORDER BY 1",
         "definition": "",
         "refresh": 1,
         "sort": 1,
