@@ -1,0 +1,283 @@
+{
+  "uid": "table-explorer",
+  "title": "테이블 탐색기",
+  "tags": [
+    "iot",
+    "timescaledb",
+    "explorer"
+  ],
+  "description": "선택한 DB 테이블을 스키마 그대로 미러링하여 보여주는 범용 탐색기 대시보드입니다. 상단에서 테이블을 변경하면 컬럼, 청크, 데이터 표, 시계열 그래프, 상태 타임라인이 자동으로 전환됩니다.",
+  "timezone": "Asia/Seoul",
+  "editable": true,
+  "graphTooltip": 1,
+  "refresh": "1m",
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "schemaVersion": 39,
+  "version": 1,
+  "templating": {
+    "list": [
+      {
+        "name": "table",
+        "label": "테이블",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "timescaledb"
+        },
+        "query": "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('personal_health', 'readings', 'events', 'appliances', 'appliance_specs', 'weather_missing') ORDER BY (table_name != 'personal_health'), table_name",
+        "definition": "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('personal_health', 'readings', 'events', 'appliances', 'appliance_specs', 'weather_missing') ORDER BY (table_name != 'personal_health'), table_name",
+        "refresh": 2,
+        "sort": 1,
+        "multi": false,
+        "includeAll": false,
+        "current": {
+          "selected": true,
+          "text": "personal_health",
+          "value": "personal_health"
+        }
+      },
+      {
+        "name": "property",
+        "label": "속성",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "timescaledb"
+        },
+        "query": "SELECT DISTINCT property FROM ${table:raw} WHERE $__timeFilter(time) ORDER BY 1",
+        "definition": "SELECT DISTINCT property FROM ${table:raw} WHERE $__timeFilter(time) ORDER BY 1",
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": "'__all__'",
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "table",
+      "title": "${table} 컬럼 구성",
+      "description": "선택한 테이블의 현재 컬럼 정의와 데이터 타입입니다.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "timescaledb"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "id": 1,
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT ordinal_position, column_name, data_type, is_nullable\nFROM information_schema.columns\nWHERE table_schema = 'public' AND table_name = '${table:raw}'\nORDER BY ordinal_position"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "filterable": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      }
+    },
+    {
+      "type": "table",
+      "title": "${table} 청크 구성 (하이퍼테이블인 경우)",
+      "description": "선택한 테이블이 하이퍼테이블일 경우의 청크 범위와 압축 상태입니다.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "timescaledb"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "id": 2,
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT chunk_name, range_start, range_end, is_compressed\nFROM timescaledb_information.chunks\nWHERE hypertable_name = '${table:raw}'\nORDER BY range_start DESC"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "filterable": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      }
+    },
+    {
+      "type": "table",
+      "title": "${table} 최근 데이터 표",
+      "description": "선택한 테이블의 모든 컬럼을 스키마 그대로 미러링하여 보여 줍니다.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "timescaledb"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 24,
+        "h": 12
+      },
+      "id": 3,
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT *\nFROM ${table:raw}\nWHERE $__timeFilter(time)\nORDER BY time DESC\nLIMIT 200"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "filterable": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "${table} 시계열 수치 그래프",
+      "description": "선택한 테이블에서 value 수치가 있는 속성들의 시계열 변화를 그립니다.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "timescaledb"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 20,
+        "w": 24,
+        "h": 10
+      },
+      "id": 4,
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT \n  time,\n  value,\n  property AS metric\nFROM ${table:raw}\nWHERE ('__all__' IN ($property) OR property IN ($property))\n  AND value IS NOT NULL\n  AND $__timeFilter(time)\nORDER BY time"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "type": "state-timeline",
+      "title": "${table} 상태 타임라인 (텍스트 상태)",
+      "description": "선택한 테이블의 value_text 문자열 상태(수면 단계, 연결 상태 등)를 시간대별 타임라인으로 그립니다.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "timescaledb"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 30,
+        "w": 24,
+        "h": 10
+      },
+      "id": 5,
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT \n  time,\n  value_text AS state,\n  property AS metric\nFROM ${table:raw}\nWHERE ('__all__' IN ($property) OR property IN ($property))\n  AND value_text IS NOT NULL\n  AND $__timeFilter(time)\nORDER BY time"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "showValue": "auto",
+        "rowHeight": 0.8,
+        "mergeValues": true
+      }
+    }
+  ]
+}
