@@ -16,7 +16,7 @@
     "to": "now"
   },
   "schemaVersion": 39,
-  "version": 4,
+  "version": 6,
   "templating": {
     "list": [
       {
@@ -47,9 +47,9 @@
           "type": "grafana-postgresql-datasource",
           "uid": "timescaledb"
         },
-        "query": "SELECT DISTINCT (to_jsonb(sub)->>'property') AS property FROM (SELECT * FROM ${table:raw} LIMIT 50000) sub WHERE (to_jsonb(sub)->>'property') IS NOT NULL ORDER BY 1",
-        "definition": "SELECT DISTINCT (to_jsonb(sub)->>'property') AS property FROM (SELECT * FROM ${table:raw} LIMIT 50000) sub WHERE (to_jsonb(sub)->>'property') IS NOT NULL ORDER BY 1",
-        "refresh": 2,
+        "query": "WITH is_eav AS (\n    SELECT EXISTS (\n        SELECT 1 FROM information_schema.columns \n        WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'property'\n    ) AS val\n)\nSELECT DISTINCT (to_jsonb(sub)->>'property') AS property \nFROM (SELECT * FROM ${table:raw} LIMIT 50000) sub \nWHERE (SELECT val FROM is_eav) AND (to_jsonb(sub)->>'property') IS NOT NULL \nORDER BY 1",
+        "definition": "WITH is_eav AS (\n    SELECT EXISTS (\n        SELECT 1 FROM information_schema.columns \n        WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'property'\n    ) AS val\n)\nSELECT DISTINCT (to_jsonb(sub)->>'property') AS property \nFROM (SELECT * FROM ${table:raw} LIMIT 50000) sub \nWHERE (SELECT val FROM is_eav) AND (to_jsonb(sub)->>'property') IS NOT NULL \nORDER BY 1",
+        "refresh": 1,
         "sort": 1,
         "multi": true,
         "includeAll": true,
@@ -72,9 +72,9 @@
           "type": "grafana-postgresql-datasource",
           "uid": "timescaledb"
         },
-        "query": "SELECT DISTINCT (to_jsonb(sub)->>'property') AS property FROM (SELECT * FROM ${table:raw} LIMIT 50000) sub WHERE (to_jsonb(sub)->>'property') IS NOT NULL AND ('__all__' IN ($property) OR (to_jsonb(sub)->>'property') IN ($property)) AND (to_jsonb(sub)->>'value') IS NOT NULL AND (to_jsonb(sub)->>'property') NOT IN ('sleep_stage') AND lower(coalesce(to_jsonb(sub)->>'value_text', '')) NOT IN ('on', 'off', 'true', 'false', 'online', 'offline') ORDER BY 1",
-        "definition": "SELECT DISTINCT (to_jsonb(sub)->>'property') AS property FROM (SELECT * FROM ${table:raw} LIMIT 50000) sub WHERE (to_jsonb(sub)->>'property') IS NOT NULL AND ('__all__' IN ($property) OR (to_jsonb(sub)->>'property') IN ($property)) AND (to_jsonb(sub)->>'value') IS NOT NULL AND (to_jsonb(sub)->>'property') NOT IN ('sleep_stage') AND lower(coalesce(to_jsonb(sub)->>'value_text', '')) NOT IN ('on', 'off', 'true', 'false', 'online', 'offline') ORDER BY 1",
-        "refresh": 2,
+        "query": "WITH is_eav AS (\n    SELECT EXISTS (\n        SELECT 1 FROM information_schema.columns \n        WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'property'\n    ) AS val\n)\nSELECT DISTINCT (to_jsonb(sub)->>'property') AS property \nFROM (SELECT * FROM ${table:raw} LIMIT 50000) sub \nWHERE (SELECT val FROM is_eav) \n  AND (to_jsonb(sub)->>'property') IS NOT NULL \n  AND ('__all__' IN ($property) OR (to_jsonb(sub)->>'property') IN ($property)) \n  AND (to_jsonb(sub)->>'value') IS NOT NULL \n  AND (to_jsonb(sub)->>'property') NOT IN ('sleep_stage') \n  AND lower(coalesce(to_jsonb(sub)->>'value_text', '')) NOT IN ('on', 'off', 'true', 'false', 'online', 'offline') \nORDER BY 1",
+        "definition": "WITH is_eav AS (\n    SELECT EXISTS (\n        SELECT 1 FROM information_schema.columns \n        WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'property'\n    ) AS val\n)\nSELECT DISTINCT (to_jsonb(sub)->>'property') AS property \nFROM (SELECT * FROM ${table:raw} LIMIT 50000) sub \nWHERE (SELECT val FROM is_eav) \n  AND (to_jsonb(sub)->>'property') IS NOT NULL \n  AND ('__all__' IN ($property) OR (to_jsonb(sub)->>'property') IN ($property)) \n  AND (to_jsonb(sub)->>'value') IS NOT NULL \n  AND (to_jsonb(sub)->>'property') NOT IN ('sleep_stage') \n  AND lower(coalesce(to_jsonb(sub)->>'value_text', '')) NOT IN ('on', 'off', 'true', 'false', 'online', 'offline') \nORDER BY 1",
+        "refresh": 1,
         "sort": 1,
         "multi": true,
         "includeAll": true,
@@ -97,9 +97,34 @@
           "type": "grafana-postgresql-datasource",
           "uid": "timescaledb"
         },
-        "query": "SELECT (to_jsonb(sub)->>'property') AS property FROM (SELECT * FROM ${table:raw} LIMIT 50000) sub WHERE (to_jsonb(sub)->>'property') IS NOT NULL AND ('__all__' IN ($property) OR (to_jsonb(sub)->>'property') IN ($property)) GROUP BY 1 HAVING count(to_jsonb(sub)->>'value_text') > 0 AND ((to_jsonb(sub)->>'property') IN ('sleep_stage') OR count(to_jsonb(sub)->>'value') = 0 OR bool_and(lower(to_jsonb(sub)->>'value_text') IN ('on', 'off', 'true', 'false', 'online', 'offline'))) ORDER BY 1",
-        "definition": "SELECT (to_jsonb(sub)->>'property') AS property FROM (SELECT * FROM ${table:raw} LIMIT 50000) sub WHERE (to_jsonb(sub)->>'property') IS NOT NULL AND ('__all__' IN ($property) OR (to_jsonb(sub)->>'property') IN ($property)) GROUP BY 1 HAVING count(to_jsonb(sub)->>'value_text') > 0 AND ((to_jsonb(sub)->>'property') IN ('sleep_stage') OR count(to_jsonb(sub)->>'value') = 0 OR bool_and(lower(to_jsonb(sub)->>'value_text') IN ('on', 'off', 'true', 'false', 'online', 'offline'))) ORDER BY 1",
-        "refresh": 2,
+        "query": "WITH is_eav AS (\n    SELECT EXISTS (\n        SELECT 1 FROM information_schema.columns \n        WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'property'\n    ) AS val\n)\nSELECT (to_jsonb(sub)->>'property') AS property \nFROM (SELECT * FROM ${table:raw} LIMIT 50000) sub \nWHERE (SELECT val FROM is_eav) \n  AND (to_jsonb(sub)->>'property') IS NOT NULL \n  AND ('__all__' IN ($property) OR (to_jsonb(sub)->>'property') IN ($property)) \nGROUP BY 1 \nHAVING count(to_jsonb(sub)->>'value_text') > 0 \n  AND ((to_jsonb(sub)->>'property') IN ('sleep_stage') OR count(to_jsonb(sub)->>'value') = 0 OR bool_and(lower(to_jsonb(sub)->>'value_text') IN ('on', 'off', 'true', 'false', 'online', 'offline'))) \nORDER BY 1",
+        "definition": "WITH is_eav AS (\n    SELECT EXISTS (\n        SELECT 1 FROM information_schema.columns \n        WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'property'\n    ) AS val\n)\nSELECT (to_jsonb(sub)->>'property') AS property \nFROM (SELECT * FROM ${table:raw} LIMIT 50000) sub \nWHERE (SELECT val FROM is_eav) \n  AND (to_jsonb(sub)->>'property') IS NOT NULL \n  AND ('__all__' IN ($property) OR (to_jsonb(sub)->>'property') IN ($property)) \nGROUP BY 1 \nHAVING count(to_jsonb(sub)->>'value_text') > 0 \n  AND ((to_jsonb(sub)->>'property') IN ('sleep_stage') OR count(to_jsonb(sub)->>'value') = 0 OR bool_and(lower(to_jsonb(sub)->>'value_text') IN ('on', 'off', 'true', 'false', 'online', 'offline'))) \nORDER BY 1",
+        "refresh": 1,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "hide": 2,
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      },
+      {
+        "name": "rel_column",
+        "label": "일반 컬럼",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "timescaledb"
+        },
+        "query": "WITH is_eav AS (\n    SELECT EXISTS (\n        SELECT 1 FROM information_schema.columns \n        WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'property'\n    ) AS val\n)\nSELECT column_name AS rel_column\nFROM information_schema.columns\nWHERE NOT (SELECT val FROM is_eav)\n  AND table_schema = 'public' \n  AND table_name = '${table:raw}'\n  AND column_name NOT IN ('id')\nORDER BY ordinal_position",
+        "definition": "WITH is_eav AS (\n    SELECT EXISTS (\n        SELECT 1 FROM information_schema.columns \n        WHERE table_schema = 'public' AND table_name = '${table:raw}' AND column_name = 'property'\n    ) AS val\n)\nSELECT column_name AS rel_column\nFROM information_schema.columns\nWHERE NOT (SELECT val FROM is_eav)\n  AND table_schema = 'public' \n  AND table_name = '${table:raw}'\n  AND column_name NOT IN ('id')\nORDER BY ordinal_position",
+        "refresh": 1,
         "sort": 1,
         "multi": true,
         "includeAll": true,
@@ -460,6 +485,73 @@
         "showValue": "auto",
         "rowHeight": 0.8,
         "mergeValues": true
+      }
+    },
+    {
+      "type": "row",
+      "title": "${table} 컬럼별 데이터 분포 (일반 테이블 칼럼 카드)",
+      "gridPos": {
+        "x": 0,
+        "y": 35,
+        "w": 24,
+        "h": 1
+      },
+      "id": 300,
+      "collapsed": false
+    },
+    {
+      "type": "barchart",
+      "title": "$rel_column",
+      "description": "선택한 일반 테이블의 $rel_column 컬럼 데이터 값 분포 및 건수입니다.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "timescaledb"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 36,
+        "w": 8,
+        "h": 7
+      },
+      "id": 6,
+      "repeat": "rel_column",
+      "repeatDirection": "h",
+      "maxPerRow": 3,
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT \n  coalesce(nullif(to_jsonb(t)->>'${rel_column:raw}', ''), '(빈 값)') AS \"값\",\n  count(*)::bigint AS \"건수\"\nFROM ${table:raw} t\nGROUP BY 1\nORDER BY \"건수\" DESC\nLIMIT 10"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "lineWidth": 1
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "showValue": "auto",
+        "groupWidth": 0.7,
+        "barWidth": 0.97,
+        "xTickLabelRotation": 0,
+        "legend": {
+          "displayMode": "hidden"
+        }
       }
     }
   ]
