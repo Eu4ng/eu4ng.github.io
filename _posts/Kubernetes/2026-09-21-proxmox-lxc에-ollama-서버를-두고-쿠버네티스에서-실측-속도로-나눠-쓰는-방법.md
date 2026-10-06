@@ -421,6 +421,9 @@ defaults
   log-format "%tr ollama backend=%b server=%s status=%ST retries=%rc queue_ms=%Tw total_ms=%Ta bytes_in=%U bytes_out=%B model=%[var(txn.model)] role=%[var(txn.role)] client=%ci %{+Q}r"
   # 서버가 요청을 처리하다 실패하면(연결 실패, 빈 응답, 5xx) 다른 서버로 다시 보냅니다. 쓰는 쪽은 어느 서버가 실패했는지 몰라도 됩니다
   option http-buffer-request
+  # 쓰는 쪽이 연결을 끊었으면(작업 취소, 시간 초과 뒤 재전송) 대기열에 남은 그 요청을 서버로 보내지 않습니다. 없으면 주인 없는 요청이
+  # 30B 서버를 몇십 분 차지합니다(2026-10-07 실측)
+  option abortonclose
   retries 2
   option redispatch 1
   retry-on conn-failure empty-response 500 502 503 504
