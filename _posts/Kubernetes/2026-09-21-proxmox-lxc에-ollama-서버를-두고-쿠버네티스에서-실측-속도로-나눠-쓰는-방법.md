@@ -398,6 +398,7 @@ curl -fsSL https://eu4ng.github.io/assets/files/ollama/weights.py -o services/ol
 # 서버는 proxmox-ansible playbooks/ollama.yml 의 LXC 와 윈도우 PC 이고, 이름은 내부망 DNS 가 풉니다. 이 프로세스 하나가 연결 수를 세므로 replicas 는 1 입니다.
 global
   log stdout format raw local0 info
+  hard-stop-after 115m           # soft-stop(SIGUSR1) 뒤 이 시간이 지나면 남은 연결을 끊고 끝냅니다. 파드 종료 유예(7200s)보다 짧게
   stats socket ipv4@127.0.0.1:9999 level admin   # weights.py 가 가중치를 고치는 통로(파드 안에서만 열립니다)
   maxconn 200                    # 동시 연결 상한(버퍼가 1MB 라 메모리를 제한). 실제 동시 요청은 서버 수 안팎
   tune.bufsize 1048576           # 요청 본문 전체를 버퍼에 담아야 다른 서버로 다시 보낼 수 있습니다(64K 컨텍스트 요청도 수백 KB)
@@ -665,8 +666,13 @@ metadata:
   name: ollama-router
 spec:
   replicas: 1                # 서버마다 동시 요청 1개(maxconn 1)를 이 프로세스가 셉니다. 늘리면 한 서버에 요청이 겹칩니다
+  # 설정이 바뀌어 파드를 갈 때 진행 중인 요청(수십 분짜리 추론)을 끊지 않습니다. haproxy 이미지는 STOPSIGNAL 이 SIGUSR1(soft-stop)이라
+  # 새 연결만 거부하고 기존 요청은 끝까지 보냅니다 — 종료 유예를 요청 상한보다 길게 두고(hard-stop-after 는 haproxy.cfg), 새 파드를
+  # 먼저 띄웁니다(RollingUpdate). 겹치는 동안은 두 프로세스가 따로 세어 한 서버에 요청이 2개 갈 수 있지만, ollama 는
+  # OLLAMA_NUM_PARALLEL=1 이라 서버 안에서 줄을 섭니다.
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
   selector:
     matchLabels: { app: ollama-router }
   template:
@@ -674,6 +680,7 @@ spec:
       labels: { app: ollama-router }
     spec:
       priorityClassName: optional             # 자리가 모자라면 먼저 내보냄(iot/shared/priority-classes)
+      terminationGracePeriodSeconds: 7200     # soft-stop 뒤 기존 요청이 끝날 때까지. haproxy.cfg 의 hard-stop-after 보다 길어야 합니다
       containers:
         - name: haproxy
           image: haproxy:3.2.24-alpine
@@ -701,6 +708,8 @@ spec:
           configMap: { name: ollama-router }
 ```
 {: file="services/ollama/deployment.yaml" }
+
+라우터는 수십 분짜리 요청을 받으므로 **설정을 바꿀 때 진행 중인 요청을 끊지 않아야** 합니다. 처음에는 `Recreate` 였는데, 설정을 두 번 바꾸는 사이 처리 중이던 논문 다섯 편의 호출이 끊겼습니다. 공식 haproxy 이미지는 `STOPSIGNAL` 이 `SIGUSR1`(soft-stop) 이라, 종료 신호를 받으면 새 연결만 거부하고 쥐고 있던 요청은 끝까지 보냅니다. 그래서 종료 유예(`terminationGracePeriodSeconds`)를 요청 상한보다 길게 두고, `hard-stop-after` 로 그 안에서 마무리하게 하며, `RollingUpdate` 로 새 파드를 먼저 띄웁니다. 준비 상태 검사가 통계 포트를 보므로 soft-stop 으로 포트가 닫히면 옛 파드는 Service 에서 바로 빠집니다.
 
 `priorityClassName: optional` 은 서버 한 대가 죽어 남은 worker 에 자리가 모자랄 때 이 파드를 가장 먼저 내보내게 합니다. 등급은 [쿠버네티스에 Longhorn과 Patroni로 볼륨과 TimescaleDB 이중화하는 방법](/posts/54/)의 6단계에서 만들고, 등급이 없으면 파드가 만들어지지 않습니다.
 
