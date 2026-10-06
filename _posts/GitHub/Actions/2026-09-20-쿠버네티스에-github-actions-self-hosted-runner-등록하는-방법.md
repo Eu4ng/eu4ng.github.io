@@ -85,10 +85,15 @@ ARC_VERSION=0.14.2           # 두 Helm 차트의 버전
 # 러너 종류: "이름 CPU 메모리 [CPU상한 메모리상한]". 줄을 추가·수정·삭제한 뒤 스크립트를 다시 실행하면 그대로 반영됩니다.
 # CPU 와 메모리는 러너 파드 하나가 보장받는 자원이며, 상한을 생략하면 보장값과 같습니다. 가장 큰 worker 의 사양보다 작아야 합니다.
 RUNNERS=(
+  "arc-linux-xs      1  2Gi"   # 원격 서비스(추출·모델 서버)를 기다리기만 하는 작업용. wiki-papers paper job 실측 0.5GiB
   "arc-linux-low     2  4Gi"
   "arc-linux-medium  4  8Gi"
   "arc-linux-high    8 16Gi"
 )
+# 러너 파드의 우선순위 등급(PriorityClass 이름, 비우면 기본 0). 러너는 기본 우선순위가 0 이라 그보다 낮은 등급의 서비스 파드
+# (예: 음수 등급으로 둔 추출·모델 서버)를 선점해 내쫓습니다 — 그러면 러너 위의 작업이 그 서비스를 기다리다 멈춥니다. 러너를 그
+# 서비스와 같은 등급으로 두면 선점이 없고, 자리가 없는 러너는 뜨지 않은 채 GitHub 쪽 대기열에 남습니다. 등급은 미리 만들어 둬야 합니다.
+RUNNER_PRIORITY_CLASS=optional
 # Docker Hub 이미지 캐시: 보존 기간과 최대 용량입니다.
 CACHE_TTL=720h    # 받은 시점부터 이 시간이 지나면 삭제되고 다음에 필요할 때 다시 받습니다 (30일). 사용 여부와는 관계없습니다. 0 이면 만료가 없어 용량 한도에 닿을 때까지 쌓입니다.
 CACHE_SIZE=20Gi   # 넘으면 캐시 파드가 퇴출되어 새로 만들어지며 캐시 전체가 초기화됩니다. worker 노드의 디스크를 러너와 나눠 씁니다.
@@ -127,6 +132,8 @@ done
 # 캐시 설정 형식 검사
 [[ "$CACHE_TTL" =~ ^([0-9]+[smh]|0)$ ]] || die "CACHE_TTL 은 30m, 720h 같은 형식이거나 0 이어야 합니다: $CACHE_TTL"
 [[ "$CACHE_SIZE" =~ ^[0-9]+(Mi|Gi)$ ]] || die "CACHE_SIZE 는 512Mi, 20Gi 같은 형식이어야 합니다: $CACHE_SIZE"
+[ -z "$RUNNER_PRIORITY_CLASS" ] || kubectl get priorityclass "$RUNNER_PRIORITY_CLASS" >/dev/null \
+  || die "PriorityClass $RUNNER_PRIORITY_CLASS 가 없습니다. 먼저 만들거나 RUNNER_PRIORITY_CLASS 를 비웁니다."
 
 # 저장소(또는 조직)마다 네임스페이스를 나눠, 모든 저장소에서 같은 러너 이름을 쓸 수 있게 합니다.
 slug=$(basename "$GITHUB_CONFIG_URL" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//' | cut -c1-51 | sed -E 's/-+$//')
@@ -319,7 +326,8 @@ for runner in "${RUNNERS[@]}"; do
     --set-string template.spec.resources.requests.cpu="$cpu" \
     --set-string template.spec.resources.requests.memory="$mem" \
     --set-string template.spec.resources.limits.cpu="${cpu_limit:-$cpu}" \
-    --set-string template.spec.resources.limits.memory="${mem_limit:-$mem}"
+    --set-string template.spec.resources.limits.memory="${mem_limit:-$mem}" \
+    ${RUNNER_PRIORITY_CLASS:+--set-string template.spec.priorityClassName="$RUNNER_PRIORITY_CLASS"}
 
   applied=$(kubectl get autoscalingrunnerset "$name" -n "$RUNNER_NS" -o jsonpath='{.spec.template.spec.resources.limits.cpu}')
   [ -n "$applied" ] || die "$name 에 자원 설정이 적용되지 않았습니다. 쿠버네티스 1.34 이상인지 확인합니다."
