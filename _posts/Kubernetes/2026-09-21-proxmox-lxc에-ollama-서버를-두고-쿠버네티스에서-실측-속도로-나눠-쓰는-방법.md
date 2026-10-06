@@ -464,10 +464,10 @@ backend big
   http-check expect status 200
   http-response set-header X-Ollama-Server %s
   server pve02-780m ollama-780m.[DOMAIN]:11434 check inter 5s fall 2 rise 2 maxconn 1 weight 100 resolvers lan init-addr last,libc,none
-  # 윈도우 PC(32GB)는 30B 를 CPU 로 돌린다(gemma4:31b 6.4 tok/s — 780m 의 절반쯤). 사람이 PC 를 쓸 때 메모리가 모자랄 수 있어
-  # 30B 전용 에이전트(windows-agent.ps1 -Port 11436 -MinFreeGB 22)가 여유 메모리를 보고 drain 으로 답한다. 에이전트가 없으면
-  # 헬스체크만 보고 보내므로, 에이전트를 먼저 띄운 뒤 이 줄을 켠다(2026-10-06 켬).
-  server winpc-780m [WINPC_IP]:11434 check inter 5s fall 2 rise 2 maxconn 1 weight 40 agent-check agent-port 11436 agent-inter 5s
+  # 윈도우 PC(32GB)는 30B 를 못 돌린다 — qwen3.8:27b 를 65K 컨텍스트로 올리면 Vulkan 이 KV 캐시 버퍼를 못 잡아 즉시 500 을 낸다
+  # (실측). 메모리 기준 에이전트(11436)로는 못 막는다(여유 메모리가 아니라 장치 메모리 한도 문제). 컨텍스트를 줄이거나 CPU 전용으로
+  # 올릴 방법이 서버 단위 설정으로 생기기 전까지는 넣지 않는다.
+  # server winpc-780m [WINPC_IP]:11434 check inter 5s fall 2 rise 2 maxconn 1 weight 40 agent-check agent-port 11436 agent-inter 5s
 
 # 통계 페이지(/)와 Prometheus 지표(/metrics — 서버별 상태·가중치·처리 중·대기열·응답 코드. ServiceMonitor 가 긁습니다).
 # 준비 상태 검사가 5초마다 오므로 이 frontend 는 기록하지 않습니다.
