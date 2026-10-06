@@ -455,7 +455,9 @@ backend servers
   default-server check inter 5s fall 2 rise 2 maxconn 1 weight 100 resolvers lan init-addr last,libc,none
   http-response set-header X-Ollama-Server %s   # 어느 서버가 처리했는지 쓰는 쪽에 알립니다(쓰는 쪽이 토큰 수와 함께 기록할 수 있게)
   server pve02-780m ollama-780m.[DOMAIN]:11434
-  server pve01-610m ollama-610m.[DOMAIN]:11434
+  # pve01-610m 은 GPU 가 멈춰(amdgpu 커널 hung task, llama-server 가 D 상태로 14시간) 15토큰 prefill 에 82초, 생성 0.06 tok/s 가
+  # 됐다(2026-10-07). ollama 는 살아 있어 헬스체크는 통과하므로 라우터가 계속 보냈다 — GPU 를 되살릴 때까지 뺀다.
+  # server pve01-610m ollama-610m.[DOMAIN]:11434
   # 윈도우 PC 는 사용자 데스크톱입니다. 꺼지면 헬스체크로 빠지고, PC 의 상태 보고 스크립트(windows-agent.ps1, 포트 11435)가
   # "drain" 이라고 답하면(Ollama 가 아닌 프로그램이 GPU 를 쓰는 중) 새 요청을 보내지 않습니다. 스크립트가 없거나 답이 없으면 헬스체크만 봅니다.
   server winpc-780m [WINPC_IP]:11434 agent-check agent-port 11435 agent-inter 5s
