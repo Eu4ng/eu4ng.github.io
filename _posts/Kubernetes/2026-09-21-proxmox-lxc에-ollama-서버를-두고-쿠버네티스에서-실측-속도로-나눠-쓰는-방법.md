@@ -442,15 +442,10 @@ frontend ollama
   # 호스트가 26GB 를 빼앗겨 같은 호스트의 쿠버네티스 워커 VM(24GB)이 OOM 으로 죽었습니다. 윈도우 PC(32GB)도 GPU 에 못 올려 CPU 로 느리게 돕니다.
   # 요청 본문은 http-buffer-request 로 이미 다 받아 두므로 model 필드를 볼 수 있습니다. 모델을 더하거나 서버 메모리를 늘리면 여기를 고칩니다.
   acl big_model req.body -m reg -i '"model"\s*:\s*"(qwen3\.8:27b|gemma4:31b|muse-glimmer:30b)'
-  # 8~12B 급(gemma4:12b 8GB·gemma4:e4b 9.6GB, 32K 컨텍스트 KV 포함 10GB 넘게)은 pve01 의 ollama-610m 으로 보내지 않습니다.
-  # pve01 은 VM 들이 38GB 를 고정으로 쥐고 있어 610m 의 GPU(호스트 RAM) 몫이 10GB 안팎뿐입니다 — 넘치면 amdgpu 가 ENOMEM 뒤
-  # 커널 안에서 교착해 서버가 멈춥니다(2026-10-06 16:02, 14시간). 그래서 fat 는 별도 backend 로 두고, pve01 예산을 맞춘 뒤 610m 을 넣었습니다.
-  acl fat_model req.body -m reg -i '"model"\s*:\s*"(gemma4:12b|gemma4:e4b)'
   # 로그·지표용: 요청 본문의 모델 이름과 쓰는 쪽이 붙인 역할 헤더(X-Wiki-Role: summarizer 등). 없으면 비어 있습니다
   http-request set-var(txn.model) req.body,json_query('$.model')
   http-request set-var(txn.role) req.hdr(X-Wiki-Role)
   use_backend big if big_model
-  use_backend fat if fat_model
   default_backend servers
 
 backend servers
@@ -463,21 +458,11 @@ backend servers
   # 커널 안(D 상태)에 걸리면 ollama 는 /api/version 에 답해 헬스체크를 통과하지만 에이전트가 drain 으로 답합니다(2026-10-06 610m, 14시간
   # 동안 호출마다 20분씩 매달렸던 일의 재발 방지). 에이전트가 없거나 답이 없으면 헬스체크만 봅니다.
   server pve02-780m ollama-780m.[DOMAIN]:11434 agent-check agent-port 11435 agent-inter 5s
+  # 610m(pve01, 12GB CT)의 iGPU 는 호스트 RAM 을 쓴다. pve01 메모리 예산(VM 고정 34GB + CT·호스트 6GB + iGPU 상한 14GB = 54/60GB,
+  # proxmox-ansible gtt_mb·worker-1 20GB, 2026-10-07)으로 보통 크기(gemma4:12b 약 11GB)까지 받는다. 상한을 넘으면 교착 대신 할당 실패(500)다
   server pve01-610m ollama-610m.[DOMAIN]:11434 agent-check agent-port 11435 agent-inter 5s
   # 윈도우 PC 는 사용자 데스크톱입니다. 꺼지면 헬스체크로 빠지고, PC 의 상태 보고 스크립트(windows-agent.ps1, 포트 11435)가
   # "drain" 이라고 답하면(Ollama 가 아닌 프로그램이 GPU 를 쓰는 중) 새 요청을 보내지 않습니다. 스크립트가 없거나 답이 없으면 헬스체크만 봅니다.
-  server winpc-780m [WINPC_IP]:11434 agent-check agent-port 11435 agent-inter 5s
-
-# 8~12B 급 전용(fat_model). pve01 의 메모리 예산 때문에 610m 을 뺀 것 말고는 servers 와 같습니다. 가중치 조정은 하지 않습니다
-backend fat
-  balance roundrobin
-  option httpchk GET /api/version
-  http-check expect status 200
-  default-server check inter 5s fall 2 rise 2 maxconn 1 weight 100 resolvers lan init-addr last,libc,none
-  http-response set-header X-Ollama-Server %s
-  server pve02-780m ollama-780m.[DOMAIN]:11434 agent-check agent-port 11435 agent-inter 5s
-  # 610m 은 pve01 메모리 예산을 맞춘 뒤(worker-1 VM 20GB, amdgpu.gttsize 14GB — proxmox-ansible, 2026-10-07 재부팅 때 적용) gemma4:12b(약 11GB)까지 받습니다
-  server pve01-610m ollama-610m.[DOMAIN]:11434 agent-check agent-port 11435 agent-inter 5s
   server winpc-780m [WINPC_IP]:11434 agent-check agent-port 11435 agent-inter 5s
 
 # 30B 급 모델 전용. 서버 하나라 가중치 조정(weights.py)은 하지 않습니다. 780m 이 바쁘면 여기서 줄을 섭니다(timeout queue).
