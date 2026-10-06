@@ -454,8 +454,8 @@ backend big
   server pve02-780m ollama-780m.[DOMAIN]:11434 check inter 5s fall 2 rise 2 maxconn 1 weight 100 resolvers lan init-addr last,libc,none
   # 윈도우 PC(32GB)는 30B 를 CPU 로 돌린다(gemma4:31b 6.4 tok/s — 780m 의 절반쯤). 사람이 PC 를 쓸 때 메모리가 모자랄 수 있어
   # 30B 전용 에이전트(windows-agent.ps1 -Port 11436 -MinFreeGB 22)가 여유 메모리를 보고 drain 으로 답한다. 에이전트가 없으면
-  # 헬스체크만 보고 보내므로, 에이전트를 먼저 띄운 뒤 이 줄을 켠다.
-  # server winpc-780m [WINPC_IP]:11434 check inter 5s fall 2 rise 2 maxconn 1 weight 40 agent-check agent-port 11436 agent-inter 5s
+  # 헬스체크만 보고 보내므로, 에이전트를 먼저 띄운 뒤 이 줄을 켠다(2026-10-06 켬).
+  server winpc-780m [WINPC_IP]:11434 check inter 5s fall 2 rise 2 maxconn 1 weight 40 agent-check agent-port 11436 agent-inter 5s
 
 frontend stats
   bind :8404
