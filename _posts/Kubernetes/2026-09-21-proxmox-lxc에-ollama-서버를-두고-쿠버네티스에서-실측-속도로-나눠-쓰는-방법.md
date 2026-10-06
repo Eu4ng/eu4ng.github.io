@@ -444,7 +444,7 @@ frontend ollama
   acl big_model req.body -m reg -i '"model"\s*:\s*"(qwen3\.8:27b|gemma4:31b|muse-glimmer:30b)'
   # 8~12B 급(gemma4:12b 8GB·gemma4:e4b 9.6GB, 32K 컨텍스트 KV 포함 10GB 넘게)은 pve01 의 ollama-610m 으로 보내지 않습니다.
   # pve01 은 VM 들이 38GB 를 고정으로 쥐고 있어 610m 의 GPU(호스트 RAM) 몫이 10GB 안팎뿐입니다 — 넘치면 amdgpu 가 ENOMEM 뒤
-  # 커널 안에서 교착해 서버가 멈춥니다(2026-10-06 16:02, 14시간). 610m 에는 7GB 이하(glm-ocr·qwen3.5:9b·llama3.1:8b)만 갑니다.
+  # 커널 안에서 교착해 서버가 멈춥니다(2026-10-06 16:02, 14시간). 그래서 fat 는 별도 backend 로 두고, pve01 예산을 맞춘 뒤 610m 을 넣었습니다.
   acl fat_model req.body -m reg -i '"model"\s*:\s*"(gemma4:12b|gemma4:e4b)'
   # 로그·지표용: 요청 본문의 모델 이름과 쓰는 쪽이 붙인 역할 헤더(X-Wiki-Role: summarizer 등). 없으면 비어 있습니다
   http-request set-var(txn.model) req.body,json_query('$.model')
@@ -476,6 +476,8 @@ backend fat
   default-server check inter 5s fall 2 rise 2 maxconn 1 weight 100 resolvers lan init-addr last,libc,none
   http-response set-header X-Ollama-Server %s
   server pve02-780m ollama-780m.[DOMAIN]:11434 agent-check agent-port 11435 agent-inter 5s
+  # 610m 은 pve01 메모리 예산을 맞춘 뒤(worker-1 VM 20GB, amdgpu.gttsize 14GB — proxmox-ansible, 2026-10-07 재부팅 때 적용) gemma4:12b(약 11GB)까지 받습니다
+  server pve01-610m ollama-610m.[DOMAIN]:11434 agent-check agent-port 11435 agent-inter 5s
   server winpc-780m [WINPC_IP]:11434 agent-check agent-port 11435 agent-inter 5s
 
 # 30B 급 모델 전용. 서버 하나라 가중치 조정(weights.py)은 하지 않습니다. 780m 이 바쁘면 여기서 줄을 섭니다(timeout queue).
