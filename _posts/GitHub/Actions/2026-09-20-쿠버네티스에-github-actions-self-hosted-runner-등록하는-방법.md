@@ -85,6 +85,7 @@ ARC_VERSION=0.14.2           # 두 Helm 차트의 버전
 # 러너 종류: "이름 CPU 메모리 [CPU상한 메모리상한]". 줄을 추가·수정·삭제한 뒤 스크립트를 다시 실행하면 그대로 반영됩니다.
 # CPU 와 메모리는 러너 파드 하나가 보장받는 자원이며, 상한을 생략하면 보장값과 같습니다. 가장 큰 worker 의 사양보다 작아야 합니다.
 RUNNERS=(
+  "arc-linux-xs      1  2Gi"   # 원격 서비스(추출·모델 서버)를 기다리기만 하는 작업용. wiki-papers paper job 실측 0.5GiB
   "arc-linux-low     2  4Gi"
   "arc-linux-medium  4  8Gi"
   "arc-linux-high    8 16Gi"
