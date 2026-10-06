@@ -374,6 +374,8 @@ GitOps 저장소의 `services/ollama/` 폴더에 HAProxy 설정, Deployment, Ser
 
 HAProxy 설정의 핵심은 `backend servers` 입니다. 서버마다 `maxconn 1` 이라 요청 하나가 서버 하나를 차지하고, `balance roundrobin` 은 비어 있는 서버 가운데 가중치 비율로 다음 요청을 받을 서버를 고릅니다. 모두 바쁘면 `timeout queue` 동안 줄을 세웠다가 먼저 빈 서버로 보냅니다. `/api/version` 헬스체크가 두 번 실패한 서버는 건너뛰므로 PC 가 꺼져 있어도 요청이 멈추지 않습니다. 서버가 요청을 처리하다 실패하면(연결 실패, 빈 응답, 5xx) `retry-on` 으로 다른 서버에 다시 보내므로, 쓰는 쪽은 어느 서버가 실패했는지 몰라도 됩니다. 다시 보내려면 요청 본문 전체가 버퍼에 들어가야 해서 `tune.bufsize` 를 1MB 로 키웁니다. 서버 이름은 파드의 DNS 로 풀고(`resolvers lan`), `init-addr` 에 `none` 이 있어 풀리지 않는 서버가 있어도 HAProxy 가 뜹니다.
 
+한 가지 예외가 있습니다. 30B 급 모델은 `backend big`(메모리가 넉넉한 서버 하나)으로만 보냅니다. iGPU 는 호스트 메모리를 그대로 쓰기 때문에 컨테이너의 메모리 한도가 모델 로드를 막아 주지 못합니다. 12GB 컨테이너의 서버에 `gemma4:31b` 를 65K 컨텍스트로 올리자 호스트 메모리 26GB 가 GPU 로 넘어가, 같은 호스트에 있던 쿠버네티스 워커 VM 이 OOM 으로 죽었습니다. `http-buffer-request` 로 요청 본문을 이미 다 받아 두므로 `req.body` 에서 `model` 필드를 정규식으로 읽어 갈 수 있습니다.
+
 ```bash
 # HAProxy 설정과 가중치 프로그램 내려받기
 mkdir -p services/ollama
@@ -422,6 +424,12 @@ defaults
 
 frontend ollama
   bind :11434
+  # 30B 급 모델(qwen3.8:27b·gemma4:31b·muse-glimmer:30b)은 메모리가 넉넉한 서버(ollama-780m, 48GB CT)로만 보냅니다.
+  # iGPU 메모리는 호스트 메모리에서 잡혀 CT 메모리 한도 밖입니다. 12GB CT 의 ollama-610m 에 gemma4:31b 를 65K 컨텍스트로 올리자
+  # 호스트가 26GB 를 빼앗겨 같은 호스트의 쿠버네티스 워커 VM(24GB)이 OOM 으로 죽었습니다. 윈도우 PC(32GB)도 GPU 에 못 올려 CPU 로 느리게 돕니다.
+  # 요청 본문은 http-buffer-request 로 이미 다 받아 두므로 model 필드를 볼 수 있습니다. 모델을 더하거나 서버 메모리를 늘리면 여기를 고칩니다.
+  acl big_model req.body -m reg -i '"model"\s*:\s*"(qwen3\.8:27b|gemma4:31b|muse-glimmer:30b)'
+  use_backend big if big_model
   default_backend servers
 
 backend servers
@@ -434,6 +442,12 @@ backend servers
   # 윈도우 PC 는 사용자 데스크톱입니다. 꺼지면 헬스체크로 빠지고, PC 의 상태 보고 스크립트(windows-agent.ps1, 포트 11435)가
   # "drain" 이라고 답하면(Ollama 가 아닌 프로그램이 GPU 를 쓰는 중) 새 요청을 보내지 않습니다. 스크립트가 없거나 답이 없으면 헬스체크만 봅니다.
   server winpc-780m [WINPC_IP]:11434 agent-check agent-port 11435 agent-inter 5s
+
+# 30B 급 모델 전용. 서버 하나라 가중치 조정(weights.py)은 하지 않습니다. 780m 이 바쁘면 여기서 줄을 섭니다(timeout queue 60m).
+backend big
+  option httpchk GET /api/version
+  http-check expect status 200
+  server pve02-780m ollama-780m.[DOMAIN]:11434 check inter 5s fall 2 rise 2 maxconn 1 resolvers lan init-addr last,libc,none
 
 frontend stats
   bind :8404
