@@ -6,6 +6,9 @@ UDP 로 이 프로그램에 보낸다. HAProxy 자체 익스포터는 서버 단
 그리고 HAProxy runtime API(`show stat`)로 서버 주소를 알아내 서버마다 `/api/ps` 를 읽어 지금 올라간 모델·크기를 내고, 올라간
 모델이 바뀐 횟수(교체)를 센다 — 라우터를 거치지 않은 직접 호출도 "모델이 올라감" 수준으로는 잡힌다.
 윈도우 PC 의 상태 보고 에이전트(windows-agent.ps1)에 `stats` 를 보내면 여유 메모리·GPU 사용률을 JSON 으로 답하므로 그것도 낸다.
+서버마다 상태 보고 에이전트의 `:11437/status`(LXC: proxmox-ansible ollama-agent.py, 윈도우: windows-agent.ps1)를 읽어 러너가 지금
+계산 중인지·GPU 사용률을 낸다 — 라우터가 롤링 재시작되면 진행 중 요청은 옛 파드가 쥐고 통계는 새 파드가 답해 HAProxy 지표의
+'처리 중'이 0 으로 비는데(2026-10-07 11:47), 서버 쪽 값은 라우터와 무관하게 남는다.
 표준 라이브러리만 쓴다(라우터 파드의 python:alpine 이미지).
 """
 
@@ -190,6 +193,25 @@ def build_registry() -> Registry:
     )
     reg.declare("ollama_server_up", "gauge", "/api/ps 에 답했으면 1", ("server",))
     reg.declare(
+        "ollama_server_working",
+        "gauge",
+        "상태 에이전트(:11437/status)가 러너가 계산 중이라 답했으면 1(라우터 재시작과 무관한 서버 쪽 '처리 중')",
+        ("server",),
+    )
+    reg.declare(
+        "ollama_server_gpu_busy_percent",
+        "gauge",
+        "상태 에이전트가 답한 GPU 사용률(%)",
+        ("server",),
+    )
+    reg.declare(
+        "ollama_server_runner_cpu_percent",
+        "gauge",
+        "상태 에이전트가 답한 러너 CPU 사용률 가운데 가장 큰 값(%, 코어 하나 = 100)",
+        ("server",),
+    )
+    reg.declare("ollama_server_status_up", "gauge", "상태 에이전트가 답했으면 1", ("server",))
+    reg.declare(
         "ollama_agent_free_gb",
         "gauge",
         "상태 보고 에이전트가 답한, Ollama 가 쓸 수 있는 메모리(GB)",
@@ -353,6 +375,31 @@ def fetch_ps(addr: str, timeout: float) -> dict[str, tuple[int, int]] | None:
         return None
 
 
+def fetch_status(addr: str, port: int, timeout: float) -> dict | None:
+    """서버 주소(host:port)의 호스트에서 상태 에이전트 `/status` JSON 을 읽는다. 에이전트가 없거나 못 읽으면 None."""
+    host = addr.rpartition(":")[0]
+    try:
+        with urllib.request.urlopen(f"http://{host}:{port}/status", timeout=timeout) as resp:
+            data = json.load(resp)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def update_status(reg: Registry, server: str, status: dict | None) -> None:
+    """상태 JSON 을 지표로. 못 읽은 서버는 값을 지워 옛 값이 남지 않게 한다."""
+    reg.set("ollama_server_status_up", {"server": server}, 0 if status is None else 1)
+    for name in ("ollama_server_working", "ollama_server_gpu_busy_percent", "ollama_server_runner_cpu_percent"):
+        reg.clear_gauge(name, {"server": server})
+    if status is None:
+        return
+    reg.set("ollama_server_working", {"server": server}, 1 if status.get("working") else 0)
+    if isinstance(status.get("gpu_busy_percent"), (int, float)):
+        reg.set("ollama_server_gpu_busy_percent", {"server": server}, float(status["gpu_busy_percent"]))
+    cpus = [float(r["cpu_percent"]) for r in status.get("runners") or [] if isinstance(r.get("cpu_percent"), (int, float))]
+    reg.set("ollama_server_runner_cpu_percent", {"server": server}, max(cpus, default=0.0))
+
+
 def query_agent(address: tuple[str, int], timeout: float) -> dict | None:
     """windows-agent.ps1 에 stats 를 보내 JSON 한 줄을 받는다. 옛 에이전트는 ready/drain 만 답한다."""
     try:
@@ -390,6 +437,8 @@ def poll_servers(
             servers = {}
         for name, addr in servers.items():
             watcher.update(name, fetch_ps(addr, args.timeout))
+            if args.status_port:
+                update_status(reg, name, fetch_status(addr, args.status_port, args.timeout))
         for name, target in agents.items():
             host, _, port = target.rpartition(":")
             reply = query_agent((host, int(port)), args.timeout)
@@ -473,6 +522,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="상태 보고 에이전트(windows-agent.ps1) 주소. 여러 번 줄 수 있다",
     )
     parser.add_argument(
+        "--status-port",
+        type=int,
+        default=11437,
+        help="서버의 상태 에이전트 /status 포트 (기본 11437, 0 이면 읽지 않음)",
+    )
+    parser.add_argument(
         "--once",
         action="store_true",
         help="서버 상태를 한 번 읽고 지표를 출력한 뒤 끝낸다",
@@ -497,6 +552,8 @@ def main(argv: list[str] | None = None) -> int:
         watcher = ModelWatcher(reg)
         for name, addr in servers.items():
             watcher.update(name, fetch_ps(addr, args.timeout))
+            if args.status_port:
+                update_status(reg, name, fetch_status(addr, args.status_port, args.timeout))
         print(reg.render(), end="")
         return EXIT_OK
     threading.Thread(

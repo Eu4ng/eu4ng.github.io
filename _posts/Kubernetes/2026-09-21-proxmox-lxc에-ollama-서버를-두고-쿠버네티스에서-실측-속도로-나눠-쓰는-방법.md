@@ -389,7 +389,7 @@ curl -fsSL https://eu4ng.github.io/assets/files/ollama/dashboard.json -o service
 
 내려받은 뒤 `haproxy.cfg` 의 `[WINPC_IP]` 와 `[DOMAIN]` 을 바꾸고, 없는 서버의 줄은 지웁니다. `server` 줄의 순서는 분배에 영향을 주지 않습니다.
 
-어느 모델이 어느 서버에서 얼마나 쓰였는지는 `metrics.py` 가 셉니다. HAProxy 의 통계 페이지는 서버 단위 누적값뿐이고 파드가 다시 뜨면 0 으로 돌아가므로, 설정의 `log-format` 으로 요청마다 모델·서버·역할·대기열 시간·처리 시간을 key=value 한 줄로 남기고 그 로그를 UDP(`log 127.0.0.1:5514`)로 같은 파드의 `metrics` 컨테이너에도 보냅니다. `metrics.py` 는 이 줄을 받아 Prometheus 카운터·히스토그램으로 내고(`:9100/metrics`), 5초마다 서버마다 `/api/ps` 를 읽어 지금 올라간 모델과 모델이 바뀐 횟수도 냅니다. 모델 이름은 `http-buffer-request` 로 받아 둔 본문에서 `json_query` 로 꺼내 변수에 넣고(`txn.model`), 역할은 쓰는 쪽이 붙이는 `X-Wiki-Role` 헤더에서 읽습니다. HAProxy 자체 지표(서버 상태·가중치·처리 중·대기열)는 내장 익스포터(`http-request use-service prometheus-exporter`)가 통계 포트의 `/metrics` 로 냅니다. 응답에는 `X-Ollama-Server` 헤더로 처리한 서버 이름을 붙여, 쓰는 쪽이 토큰 수와 함께 기록할 수 있게 합니다 — 토큰 수·생성 속도·적재 시간은 Ollama 응답 본문에만 있어 라우터가 셀 수 없습니다.
+어느 모델이 어느 서버에서 얼마나 쓰였는지는 `metrics.py` 가 셉니다. HAProxy 의 통계 페이지는 서버 단위 누적값뿐이고 파드가 다시 뜨면 0 으로 돌아가므로, 설정의 `log-format` 으로 요청마다 모델·서버·역할·대기열 시간·처리 시간을 key=value 한 줄로 남기고 그 로그를 UDP(`log 127.0.0.1:5514`)로 같은 파드의 `metrics` 컨테이너에도 보냅니다. `metrics.py` 는 이 줄을 받아 Prometheus 카운터·히스토그램으로 내고(`:9100/metrics`), 5초마다 서버마다 `/api/ps` 를 읽어 지금 올라간 모델과 모델이 바뀐 횟수도 냅니다. 같은 주기에 서버의 상태 보고 에이전트(`:11437/status`)를 읽어 러너가 지금 계산 중인지(`ollama_server_working`)와 GPU 사용률도 냅니다 — 라우터가 롤링 재시작되면 진행 중 요청은 옛 파드가 끝까지 쥐지만 HAProxy 지표는 새 파드 것만 남아 '처리 중'이 0 으로 비는데, 서버 쪽 값은 라우터와 무관하게 남습니다. 모델 이름은 `http-buffer-request` 로 받아 둔 본문에서 `json_query` 로 꺼내 변수에 넣고(`txn.model`), 역할은 쓰는 쪽이 붙이는 `X-Wiki-Role` 헤더에서 읽습니다. HAProxy 자체 지표(서버 상태·가중치·처리 중·대기열)는 내장 익스포터(`http-request use-service prometheus-exporter`)가 통계 포트의 `/metrics` 로 냅니다. 응답에는 `X-Ollama-Server` 헤더로 처리한 서버 이름을 붙여, 쓰는 쪽이 토큰 수와 함께 기록할 수 있게 합니다 — 토큰 수·생성 속도·적재 시간은 Ollama 응답 본문에만 있어 라우터가 셀 수 없습니다.
 
 <details markdown="1">
 <summary>services/ollama/haproxy.cfg 전문</summary>
@@ -454,10 +454,16 @@ backend servers
   http-check expect status 200
   default-server check inter 5s fall 2 rise 2 maxconn 1 weight 100 resolvers lan init-addr last,libc,none
   http-response set-header X-Ollama-Server %s   # 어느 서버가 처리했는지 쓰는 쪽에 알립니다(쓰는 쪽이 토큰 수와 함께 기록할 수 있게)
-  server pve02-780m ollama-780m.[DOMAIN]:11434
-  server pve01-610m ollama-610m.[DOMAIN]:11434
+  # LXC 서버도 상태 보고 에이전트(proxmox-ansible templates/ollama/ollama-agent.py, 포트 11435)가 있습니다. GPU 가 멈춰 llama-server 가
+  # 커널 안(D 상태)에 걸리면 ollama 는 /api/version 에 답해 헬스체크를 통과하지만 에이전트가 drain 으로 답합니다(2026-10-06 610m, 14시간
+  # 동안 호출마다 20분씩 매달렸던 일의 재발 방지). 에이전트가 없거나 답이 없으면 헬스체크만 봅니다.
+  server pve02-780m ollama-780m.[DOMAIN]:11434 agent-check agent-port 11435 agent-inter 5s
+  # 610m(pve01, 12GB CT)의 iGPU 는 호스트 RAM 을 쓴다. pve01 메모리 예산(VM 고정 34GB + CT·호스트 6GB + iGPU 상한 14GB = 54/60GB,
+  # proxmox-ansible gtt_mb·worker-1 20GB, 2026-10-07)으로 보통 크기(gemma4:12b 약 11GB)까지 받는다. 상한을 넘으면 교착 대신 할당 실패(500)다
+  server pve01-610m ollama-610m.[DOMAIN]:11434 agent-check agent-port 11435 agent-inter 5s
   # 윈도우 PC 는 사용자 데스크톱입니다. 꺼지면 헬스체크로 빠지고, PC 의 상태 보고 스크립트(windows-agent.ps1, 포트 11435)가
   # "drain" 이라고 답하면(Ollama 가 아닌 프로그램이 GPU 를 쓰는 중) 새 요청을 보내지 않습니다. 스크립트가 없거나 답이 없으면 헬스체크만 봅니다.
+  # 같은 스크립트가 LXC 에이전트와 같은 상태 JSON(:11437/status, 계산 중인지)도 내서 wiki-papers 가 이 서버로 간 호출의 멈춤도 상태로 판정합니다.
   server winpc-780m [WINPC_IP]:11434 agent-check agent-port 11435 agent-inter 5s
 
 # 30B 급 모델 전용. 서버 하나라 가중치 조정(weights.py)은 하지 않습니다. 780m 이 바쁘면 여기서 줄을 섭니다(timeout queue).
@@ -693,6 +699,9 @@ UDP 로 이 프로그램에 보낸다. HAProxy 자체 익스포터는 서버 단
 그리고 HAProxy runtime API(`show stat`)로 서버 주소를 알아내 서버마다 `/api/ps` 를 읽어 지금 올라간 모델·크기를 내고, 올라간
 모델이 바뀐 횟수(교체)를 센다 — 라우터를 거치지 않은 직접 호출도 "모델이 올라감" 수준으로는 잡힌다.
 윈도우 PC 의 상태 보고 에이전트(windows-agent.ps1)에 `stats` 를 보내면 여유 메모리·GPU 사용률을 JSON 으로 답하므로 그것도 낸다.
+서버마다 상태 보고 에이전트의 `:11437/status`(LXC: proxmox-ansible ollama-agent.py, 윈도우: windows-agent.ps1)를 읽어 러너가 지금
+계산 중인지·GPU 사용률을 낸다 — 라우터가 롤링 재시작되면 진행 중 요청은 옛 파드가 쥐고 통계는 새 파드가 답해 HAProxy 지표의
+'처리 중'이 0 으로 비는데(2026-10-07 11:47), 서버 쪽 값은 라우터와 무관하게 남는다.
 표준 라이브러리만 쓴다(라우터 파드의 python:alpine 이미지).
 """
 
@@ -877,6 +886,25 @@ def build_registry() -> Registry:
     )
     reg.declare("ollama_server_up", "gauge", "/api/ps 에 답했으면 1", ("server",))
     reg.declare(
+        "ollama_server_working",
+        "gauge",
+        "상태 에이전트(:11437/status)가 러너가 계산 중이라 답했으면 1(라우터 재시작과 무관한 서버 쪽 '처리 중')",
+        ("server",),
+    )
+    reg.declare(
+        "ollama_server_gpu_busy_percent",
+        "gauge",
+        "상태 에이전트가 답한 GPU 사용률(%)",
+        ("server",),
+    )
+    reg.declare(
+        "ollama_server_runner_cpu_percent",
+        "gauge",
+        "상태 에이전트가 답한 러너 CPU 사용률 가운데 가장 큰 값(%, 코어 하나 = 100)",
+        ("server",),
+    )
+    reg.declare("ollama_server_status_up", "gauge", "상태 에이전트가 답했으면 1", ("server",))
+    reg.declare(
         "ollama_agent_free_gb",
         "gauge",
         "상태 보고 에이전트가 답한, Ollama 가 쓸 수 있는 메모리(GB)",
@@ -1040,6 +1068,31 @@ def fetch_ps(addr: str, timeout: float) -> dict[str, tuple[int, int]] | None:
         return None
 
 
+def fetch_status(addr: str, port: int, timeout: float) -> dict | None:
+    """서버 주소(host:port)의 호스트에서 상태 에이전트 `/status` JSON 을 읽는다. 에이전트가 없거나 못 읽으면 None."""
+    host = addr.rpartition(":")[0]
+    try:
+        with urllib.request.urlopen(f"http://{host}:{port}/status", timeout=timeout) as resp:
+            data = json.load(resp)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def update_status(reg: Registry, server: str, status: dict | None) -> None:
+    """상태 JSON 을 지표로. 못 읽은 서버는 값을 지워 옛 값이 남지 않게 한다."""
+    reg.set("ollama_server_status_up", {"server": server}, 0 if status is None else 1)
+    for name in ("ollama_server_working", "ollama_server_gpu_busy_percent", "ollama_server_runner_cpu_percent"):
+        reg.clear_gauge(name, {"server": server})
+    if status is None:
+        return
+    reg.set("ollama_server_working", {"server": server}, 1 if status.get("working") else 0)
+    if isinstance(status.get("gpu_busy_percent"), (int, float)):
+        reg.set("ollama_server_gpu_busy_percent", {"server": server}, float(status["gpu_busy_percent"]))
+    cpus = [float(r["cpu_percent"]) for r in status.get("runners") or [] if isinstance(r.get("cpu_percent"), (int, float))]
+    reg.set("ollama_server_runner_cpu_percent", {"server": server}, max(cpus, default=0.0))
+
+
 def query_agent(address: tuple[str, int], timeout: float) -> dict | None:
     """windows-agent.ps1 에 stats 를 보내 JSON 한 줄을 받는다. 옛 에이전트는 ready/drain 만 답한다."""
     try:
@@ -1077,6 +1130,8 @@ def poll_servers(
             servers = {}
         for name, addr in servers.items():
             watcher.update(name, fetch_ps(addr, args.timeout))
+            if args.status_port:
+                update_status(reg, name, fetch_status(addr, args.status_port, args.timeout))
         for name, target in agents.items():
             host, _, port = target.rpartition(":")
             reply = query_agent((host, int(port)), args.timeout)
@@ -1160,6 +1215,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="상태 보고 에이전트(windows-agent.ps1) 주소. 여러 번 줄 수 있다",
     )
     parser.add_argument(
+        "--status-port",
+        type=int,
+        default=11437,
+        help="서버의 상태 에이전트 /status 포트 (기본 11437, 0 이면 읽지 않음)",
+    )
+    parser.add_argument(
         "--once",
         action="store_true",
         help="서버 상태를 한 번 읽고 지표를 출력한 뒤 끝낸다",
@@ -1184,6 +1245,8 @@ def main(argv: list[str] | None = None) -> int:
         watcher = ModelWatcher(reg)
         for name, addr in servers.items():
             watcher.update(name, fetch_ps(addr, args.timeout))
+            if args.status_port:
+                update_status(reg, name, fetch_status(addr, args.status_port, args.timeout))
         print(reg.render(), end="")
         return EXIT_OK
     threading.Thread(
