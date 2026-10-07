@@ -463,6 +463,7 @@ backend servers
   server pve01-610m ollama-610m.[DOMAIN]:11434 agent-check agent-port 11435 agent-inter 5s
   # 윈도우 PC 는 사용자 데스크톱입니다. 꺼지면 헬스체크로 빠지고, PC 의 상태 보고 스크립트(windows-agent.ps1, 포트 11435)가
   # "drain" 이라고 답하면(Ollama 가 아닌 프로그램이 GPU 를 쓰는 중) 새 요청을 보내지 않습니다. 스크립트가 없거나 답이 없으면 헬스체크만 봅니다.
+  # 같은 스크립트가 LXC 에이전트와 같은 상태 JSON(:11437/status, 계산 중인지)도 내서 wiki-papers 가 이 서버로 간 호출의 멈춤도 상태로 판정합니다.
   server winpc-780m [WINPC_IP]:11434 agent-check agent-port 11435 agent-inter 5s
 
 # 30B 급 모델 전용. 서버 하나라 가중치 조정(weights.py)은 하지 않습니다. 780m 이 바쁘면 여기서 줄을 섭니다(timeout queue).
