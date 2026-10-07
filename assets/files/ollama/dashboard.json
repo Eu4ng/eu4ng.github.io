@@ -36,7 +36,7 @@
     {
       "type": "stat",
       "title": "지금",
-      "description": "라우터가 쥐고 있는 요청. 서버마다 1개(maxconn 1)씩 처리하고 나머지는 대기열에 섭니다.",
+      "description": "라우터가 쥐고 있는 요청. 서버마다 1개(maxconn 1)씩 처리하고 나머지는 대기열에 섭니다. 라우터가 재시작되면 진행 중 요청은 옛 파드가 끝까지 쥐지만 지표는 새 파드 것만 남아 '처리 중(라우터)'이 0 으로 빕니다. '계산 중 서버'는 모델 서버의 상태 에이전트(:11437)가 러너가 계산 중이라 답한 수라 라우터와 무관합니다.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -49,7 +49,7 @@
             "uid": "prometheus"
           },
           "expr": "sum(haproxy_server_current_sessions{proxy=~\"servers|big\"})",
-          "legendFormat": "처리 중",
+          "legendFormat": "처리 중(라우터)",
           "editorMode": "code",
           "range": true,
           "instant": false
@@ -74,6 +74,18 @@
           },
           "expr": "count(haproxy_server_status{proxy=\"servers\",state=\"UP\"} == 1)",
           "legendFormat": "UP 서버",
+          "editorMode": "code",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(ollama_server_working)",
+          "legendFormat": "계산 중 서버",
           "editorMode": "code",
           "range": true,
           "instant": false
@@ -215,6 +227,83 @@
       }
     },
     {
+      "id": 34,
+      "type": "state-timeline",
+      "title": "서버 계산 중 (상태 에이전트 기준)",
+      "description": "모델 서버의 상태 에이전트(:11437/status)가 러너가 계산 중이라 답한 구간. 라우터(HAProxy) 지표와 달리 라우터가 재시작돼도 비지 않는다. 회색 빈칸은 에이전트가 답하지 않은 구간.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 24,
+        "h": 5
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "ollama_server_working",
+          "legendFormat": "{{server}}",
+          "editorMode": "code",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 80,
+            "lineWidth": 0
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "쉼",
+                  "color": "#E0E0E0",
+                  "index": 0
+                },
+                "1": {
+                  "text": "계산 중",
+                  "color": "#1F60C4",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#E0E0E0",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showValue": "never",
+        "mergeValues": true,
+        "rowHeight": 0.8,
+        "legend": {
+          "showLegend": false
+        },
+        "insertNulls": 30000
+      }
+    },
+    {
       "type": "timeseries",
       "title": "처리 중 요청 (서버별)",
       "description": "서버마다 동시에 1개만 처리합니다. 같은 서버가 두 backend(servers, big) 에 있으면 합이 1 을 넘지 않습니다.",
@@ -265,7 +354,7 @@
       "id": 4,
       "gridPos": {
         "x": 0,
-        "y": 8,
+        "y": 13,
         "w": 8,
         "h": 7
       }
@@ -317,7 +406,7 @@
       "id": 5,
       "gridPos": {
         "x": 8,
-        "y": 8,
+        "y": 13,
         "w": 8,
         "h": 7
       }
@@ -369,7 +458,7 @@
       "id": 6,
       "gridPos": {
         "x": 16,
-        "y": 8,
+        "y": 13,
         "w": 8,
         "h": 7
       }
@@ -425,7 +514,7 @@
       "id": 7,
       "gridPos": {
         "x": 0,
-        "y": 15,
+        "y": 20,
         "w": 8,
         "h": 7
       }
@@ -481,7 +570,7 @@
       "id": 8,
       "gridPos": {
         "x": 8,
-        "y": 15,
+        "y": 20,
         "w": 8,
         "h": 7
       }
@@ -534,7 +623,7 @@
       "id": 9,
       "gridPos": {
         "x": 16,
-        "y": 15,
+        "y": 20,
         "w": 8,
         "h": 7
       }
@@ -547,7 +636,7 @@
       "id": 10,
       "gridPos": {
         "x": 0,
-        "y": 22,
+        "y": 27,
         "w": 24,
         "h": 1
       }
@@ -695,7 +784,7 @@
       "id": 11,
       "gridPos": {
         "x": 0,
-        "y": 23,
+        "y": 28,
         "w": 12,
         "h": 9
       }
@@ -801,7 +890,7 @@
       "id": 12,
       "gridPos": {
         "x": 12,
-        "y": 23,
+        "y": 28,
         "w": 12,
         "h": 9
       }
@@ -857,7 +946,7 @@
       "id": 13,
       "gridPos": {
         "x": 0,
-        "y": 32,
+        "y": 37,
         "w": 8,
         "h": 7
       }
@@ -913,7 +1002,7 @@
       "id": 14,
       "gridPos": {
         "x": 8,
-        "y": 32,
+        "y": 37,
         "w": 8,
         "h": 7
       }
@@ -966,7 +1055,7 @@
       "id": 15,
       "gridPos": {
         "x": 16,
-        "y": 32,
+        "y": 37,
         "w": 8,
         "h": 7
       }
@@ -1019,7 +1108,7 @@
       "id": 16,
       "gridPos": {
         "x": 0,
-        "y": 39,
+        "y": 44,
         "w": 8,
         "h": 7
       }
@@ -1072,7 +1161,7 @@
       "id": 17,
       "gridPos": {
         "x": 8,
-        "y": 39,
+        "y": 44,
         "w": 8,
         "h": 7
       }
@@ -1125,7 +1214,7 @@
       "id": 18,
       "gridPos": {
         "x": 16,
-        "y": 39,
+        "y": 44,
         "w": 8,
         "h": 7
       }
@@ -1138,7 +1227,7 @@
       "id": 19,
       "gridPos": {
         "x": 0,
-        "y": 46,
+        "y": 51,
         "w": 24,
         "h": 1
       }
@@ -1193,7 +1282,7 @@
       "id": 20,
       "gridPos": {
         "x": 0,
-        "y": 47,
+        "y": 52,
         "w": 8,
         "h": 7
       }
@@ -1248,7 +1337,7 @@
       "id": 21,
       "gridPos": {
         "x": 8,
-        "y": 47,
+        "y": 52,
         "w": 8,
         "h": 7
       }
@@ -1301,7 +1390,7 @@
       "id": 22,
       "gridPos": {
         "x": 16,
-        "y": 47,
+        "y": 52,
         "w": 8,
         "h": 7
       }
@@ -1354,7 +1443,7 @@
       "id": 23,
       "gridPos": {
         "x": 0,
-        "y": 54,
+        "y": 59,
         "w": 8,
         "h": 7
       }
@@ -1407,7 +1496,7 @@
       "id": 24,
       "gridPos": {
         "x": 8,
-        "y": 54,
+        "y": 59,
         "w": 8,
         "h": 7
       }
@@ -1462,7 +1551,7 @@
       "id": 25,
       "gridPos": {
         "x": 16,
-        "y": 54,
+        "y": 59,
         "w": 8,
         "h": 7
       }
@@ -1505,7 +1594,7 @@
       "id": 26,
       "gridPos": {
         "x": 0,
-        "y": 61,
+        "y": 66,
         "w": 24,
         "h": 9
       }
@@ -1518,7 +1607,7 @@
       "id": 27,
       "gridPos": {
         "x": 0,
-        "y": 70,
+        "y": 75,
         "w": 24,
         "h": 1
       }
@@ -1572,7 +1661,7 @@
       "id": 28,
       "gridPos": {
         "x": 0,
-        "y": 71,
+        "y": 76,
         "w": 8,
         "h": 7
       }
@@ -1624,7 +1713,7 @@
       "id": 29,
       "gridPos": {
         "x": 8,
-        "y": 71,
+        "y": 76,
         "w": 8,
         "h": 7
       }
@@ -1676,7 +1765,7 @@
       "id": 30,
       "gridPos": {
         "x": 16,
-        "y": 71,
+        "y": 76,
         "w": 8,
         "h": 7
       }
@@ -1729,7 +1818,7 @@
       "id": 31,
       "gridPos": {
         "x": 0,
-        "y": 78,
+        "y": 83,
         "w": 8,
         "h": 7
       }
@@ -1782,7 +1871,7 @@
       "id": 32,
       "gridPos": {
         "x": 8,
-        "y": 78,
+        "y": 83,
         "w": 8,
         "h": 7
       }
@@ -1864,7 +1953,7 @@
       "id": 33,
       "gridPos": {
         "x": 16,
-        "y": 78,
+        "y": 83,
         "w": 8,
         "h": 7
       }
