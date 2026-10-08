@@ -2071,7 +2071,7 @@
     {
       "id": 37,
       "type": "timeseries",
-      "title": "조립 PC 수요 (켜기: normal_wake ≥ 2 가 60초 · 끄기: normal_keep ≤ 1 이 5분)",
+      "title": "조립 PC 수요 (켜기: normal_wake ≥ 2 가 60초 · 끄기: normal_keep = 0 이 30분)",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"

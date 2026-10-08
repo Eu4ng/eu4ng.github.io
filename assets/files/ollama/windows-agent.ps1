@@ -466,10 +466,10 @@ function Update-Power {
         Save-Power $power
     }
     $idle = $power.auto_boot -and -not $userPresent -and ($inbound.Ollama -eq 0) -and -not $current.Working
-    # 안전망: 컨트롤러 연락이 10분 없고, 일 없이 10분이면 스스로 release
+    # 안전망: 컨트롤러 연락이 10분 없고, 일 없이 30분이면 스스로 release(컨트롤러의 release 기준과 같은 30분)
     if ($power.auto_boot -and -not $power.released -and ((Get-Date) - $lastHint).TotalMinutes -ge 10 -and $idle) {
         if (-not $script:netIdleSince) { $script:netIdleSince = Get-Date }
-        if (((Get-Date) - $netIdleSince).TotalMinutes -ge 10) {
+        if (((Get-Date) - $netIdleSince).TotalMinutes -ge 30) {
             $power.released = $true
             Save-Power $power
         }

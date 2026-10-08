@@ -4,7 +4,8 @@
 PC 는 사용자 데스크톱이라 유휴 전력(약 110W)이 크다. 그래서 꺼져 있을 때는 다음 때만 켠다:
   - 30B 급 요청(라우터 backend big)이 새로 오거나 PC 로 옮길 수 있는 30B 요청이 있을 때(클라이언트 무관)
   - 보통 모델의 동시 요청(처리 중 + 대기 + 클라이언트 신고)이 2개 이상인 상태가 60초 이어질 때
-자동으로 켠 부팅에서, 옮길 수 있는 30B 요청이 없고 보통 동시 요청이 1 이하인 상태가 5분 이어지면 `/release` 를 보낸다.
+자동으로 켠 부팅에서, 옮길 수 있는 30B 요청도 보통 요청도 하나 없는 상태가 30분 이어지면 `/release` 를 보낸다(켜져 있는 동안은
+1건씩 오는 요청도 계속 받는다 — 일하는 동안은 PC 가 같은 일에 에너지를 덜 쓴다. 30분은 일이 끝나자마자 껐다가 곧 다시 켜는 되풀이를 막는다).
 PC 에이전트(windows-agent.ps1 -AutoPower)는 새 요청을 받지 않고(drain), 처리 중인 일이 끝나고 아무도 로그인하지
 않았을 때만 스스로 종료한다. 사용자가 켰거나 로그인한 부팅은 끄지 않는다 — 그 판단의 원본은 PC 에이전트다.
 
@@ -210,7 +211,7 @@ class Reports:
 @dataclass
 class Config:
     wake_seconds: float = 60.0
-    release_seconds: float = 300.0
+    release_seconds: float = 1800.0  # 요청이 하나도 없는 상태가 이만큼 이어지면 release
     cooldown_seconds: float = 600.0
     boot_timeout: float = 300.0
     wol_retry_seconds: float = 60.0
@@ -365,7 +366,7 @@ class Brain:
         if not self.auto_boot() and self._boot_is_mine():
             actions.append(("auto", self.agent.get("boot_id")))
         if self.auto_boot():
-            if big_movable == 0 and normal_keep <= 1:
+            if big_movable == 0 and normal_keep == 0:
                 self.keep_low_since = (
                     self.keep_low_since if self.keep_low_since is not None else now
                 )
