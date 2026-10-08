@@ -31,6 +31,12 @@
         src: ../scripts/pve-rename-node.sh
         dest: /root/pve-rename-node.sh
         mode: "0755"
+    # 호스트 재부팅은 이 스크립트로 한다(멈춘 게스트가 있으면 sysrq 로). 사용법은 스크립트 머리말
+    - name: 재부팅 스크립트
+      ansible.builtin.copy:
+        src: ../scripts/pve-reboot.sh
+        dest: /usr/local/sbin/pve-reboot.sh
+        mode: "0755"
     - name: 클러스터 합류 여부
       ansible.builtin.stat:
         path: /etc/pve/corosync.conf
