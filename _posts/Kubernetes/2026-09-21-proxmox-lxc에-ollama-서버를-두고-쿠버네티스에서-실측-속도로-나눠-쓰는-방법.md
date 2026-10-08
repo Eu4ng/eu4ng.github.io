@@ -475,7 +475,8 @@ backend servers
   # "drain" 이라고 답하면(Ollama 가 아닌 프로그램이 GPU 를 쓰는 중) 새 요청을 보내지 않습니다. 스크립트가 없거나 답이 없으면 헬스체크만 봅니다.
   server winpc-780m [WINPC_IP]:11434 agent-check agent-port 11435 agent-inter 5s
   # 평소 꺼 두는 GPU 데스크톱(RTX 4080 16GB). 보통 모델은 VRAM 에 다 올라가 iGPU 서버보다 생성 10배·입력 처리 30배 빠릅니다(실측).
-  # OLLAMA_NUM_PARALLEL=2 라 maxconn 2. 꺼져 있으면 헬스체크로 빠지고, 보통 모델 동시 요청이 몰리면 전원 컨트롤러(power.py)가 WOL 로 켭니다.
+  # OLLAMA_NUM_PARALLEL=2 라 maxconn 2. 꺼져 있으면 헬스체크로 빠지지만 대기 서버라 워크플로 자리(전원 컨트롤러 power.py 의 임대)로는
+  # 칩니다. 보통 모델 동시 요청이 몰리거나 자리가 없어 기다리는 요청이 이어지면 전원 컨트롤러가 WOL 로 켭니다.
   # 30B 는 받지 않습니다(big 참고). 에이전트(windows-agent.ps1 -AutoPower)가 게임 등 GPU 사용이나 자동 종료 직전이면 drain 으로 답합니다.
   server pc-custom [GPUPC_IP]:11434 maxconn 2 agent-check agent-port 11435 agent-inter 5s
 

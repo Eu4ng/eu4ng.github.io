@@ -34,7 +34,8 @@
 #   POST /release {boot_id}  자동 켜짐이고 사용자가 없으면 drain 하고, 일이 끝나면 스스로 종료한다
 #   POST /hint {...}         5초마다. 라우터 통계의 PC 처리 중(backend 별)과 30B 대기. -ExclusiveModels 의 두 포트 drain 에 쓴다
 # 요청마다 Authorization: Bearer <토큰>(C:\ProgramData\<TaskName>\token, scripts/gpu-pc-power-secret.sh 가 넣는다)이 맞아야 한다.
-# 끄는 조건: 자동 켜짐 + release + 사용자 없음 + 11434 로 들어온 연결 0 + 계산 중 아님이 60초 → shutdown /s /t 60.
+# 끄는 조건: 자동 켜짐 + release + 사용자 없음 + 11434 로 들어온 연결 0 + 계산 중 아님이 30초 → shutdown /s /t 30.
+# 안전망: 컨트롤러 연락(/hint)이 10분 없고 일 없이 10분이면 스스로 release 한다(컨트롤러가 죽어도 PC 가 계속 켜져 있지 않게).
 # 카운트다운 중 사용자·새 연결·/auto 가 오면 shutdown /a 로 취소한다. 사용자가 한 번이라도 있었던 부팅은 끄지 않는다.
 # 사람의 흔적 = 원격 세션(RDP, 연결 끊긴 세션 포함) 또는 콘솔에 사람이 입력한 흔적. 한 번이라도 있으면 그 부팅은 끄지 않는다.
 # 들어온 연결(SSH, RDP 로그인 전, SMB 등)은 연결돼 있는 동안만 끄기를 막는다(관리 작업이 PC 를 영영 켜 두지 않게). 콘솔 세션이 있다는 것만으로는 사용자로 보지 않는다 — 비밀번호 없는 계정은 부팅 때
@@ -375,7 +376,7 @@ $power = if ($AutoPower) { Read-Power $bootId } else { $null }
 $hint = $null
 $lastHint = Get-Date              # 안전망은 에이전트가 뜬 뒤부터 센다
 $idleSince = $null                # 끄기 조건이 맞기 시작한 때
-$netIdleSince = $null             # 컨트롤러 연락이 끊긴 채 일이 없기 시작한 때
+$netIdleSince = $null             # 자동 켜짐이고 일이 없기 시작한 때(안전망)
 $shutdownAt = $null
 $token = if ($AutoPower) { Read-Token } else { '' }
 $userPresent = $false
@@ -466,10 +467,10 @@ function Update-Power {
         Save-Power $power
     }
     $idle = $power.auto_boot -and -not $userPresent -and ($inbound.Ollama -eq 0) -and -not $current.Working
-    # 안전망: 컨트롤러 연락이 10분 없고, 일 없이 30분이면 스스로 release(컨트롤러의 release 기준과 같은 30분)
-    if ($power.auto_boot -and -not $power.released -and ((Get-Date) - $lastHint).TotalMinutes -ge 10 -and $idle) {
+    # 안전망: 컨트롤러 연락이 10분 없고 일 없이 10분이면 스스로 release
+    if ($power.auto_boot -and -not $power.released -and $idle) {
         if (-not $script:netIdleSince) { $script:netIdleSince = Get-Date }
-        if (((Get-Date) - $netIdleSince).TotalMinutes -ge 30) {
+        if (((Get-Date) - $lastHint).TotalMinutes -ge 10 -and ((Get-Date) - $netIdleSince).TotalMinutes -ge 10) {
             $power.released = $true
             Save-Power $power
         }
@@ -478,9 +479,9 @@ function Update-Power {
     }
     if ($power.auto_boot -and $power.released -and $idle) {
         if (-not $script:idleSince) { $script:idleSince = Get-Date }
-        if (-not $shutdownAt -and ((Get-Date) - $idleSince).TotalSeconds -ge 60) {
-            & shutdown.exe /s /t 60 /c "LLM 작업이 끝나 자동으로 종료합니다(ollama-agent). 취소: shutdown /a" 2>$null | Out-Null
-            $script:shutdownAt = (Get-Date).AddSeconds(60)
+        if (-not $shutdownAt -and ((Get-Date) - $idleSince).TotalSeconds -ge 30) {
+            & shutdown.exe /s /t 30 /c "LLM 작업이 끝나 자동으로 종료합니다(ollama-agent). 취소: shutdown /a" 2>$null | Out-Null
+            $script:shutdownAt = (Get-Date).AddSeconds(30)
         }
     } else {
         Stop-Shutdown 'not idle'

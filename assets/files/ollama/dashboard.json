@@ -132,7 +132,7 @@
     {
       "type": "state-timeline",
       "title": "서버 상태",
-      "description": "HAProxy 익스포터의 상태(state 라벨별 0/1)를 코드 하나로 합침: 0 DOWN, 1 UP, 2 MAINT, 3 DRAIN(윈도우 PC 에이전트가 사용 중이라 답함), 4 NOLB",
+      "description": "HAProxy 익스포터의 상태(state 라벨별 0/1)를 코드 하나로 합침: 0 DOWN(상시 서버면 장애), 1 UP, 2 MAINT, 3 DRAIN(에이전트가 사용 중·멈춤·release 라 답함), 4 NOLB. 대기 서버(전원 컨트롤러의 ollama_server_class=standby, 조립 PC)의 DOWN 은 5 대기(꺼짐, WOL 로 깨울 수 있어 자리로 침), 6 켜는 중, 7 깨울 수 없음(WOL 실패 쿨다운 — 장애)",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -144,7 +144,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (proxy, server) (\n    (haproxy_server_status{proxy=~\"servers|big\", state=\"DOWN\"} == 1) * 0\n or (haproxy_server_status{proxy=~\"servers|big\", state=\"UP\"} == 1) * 1\n or (haproxy_server_status{proxy=~\"servers|big\", state=\"MAINT\"} == 1) * 2\n or (haproxy_server_status{proxy=~\"servers|big\", state=\"DRAIN\"} == 1) * 3\n or (haproxy_server_status{proxy=~\"servers|big\", state=\"NOLB\"} == 1) * 4\n)",
+          "expr": "sum by (proxy, server) (\n    (haproxy_server_status{proxy=~\"servers|big\", state=\"DOWN\"} == 1) * 0\n      + on (server) group_left () (\n          max by (server) (ollama_server_class{class=\"standby\"})\n          * on () group_left () (max(gpu_pc_wakeable) * (5 + max(gpu_pc_state{state=\"waking\"})) + (1 - max(gpu_pc_wakeable)) * 7)\n        )\n or (haproxy_server_status{proxy=~\"servers|big\", state=\"DOWN\"} == 1) * 0\n or (haproxy_server_status{proxy=~\"servers|big\", state=\"UP\"} == 1) * 1\n or (haproxy_server_status{proxy=~\"servers|big\", state=\"MAINT\"} == 1) * 2\n or (haproxy_server_status{proxy=~\"servers|big\", state=\"DRAIN\"} == 1) * 3\n or (haproxy_server_status{proxy=~\"servers|big\", state=\"NOLB\"} == 1) * 4\n)",
           "legendFormat": "{{proxy}}/{{server}}",
           "editorMode": "code",
           "range": true,
@@ -188,6 +188,21 @@
                   "text": "NOLB",
                   "color": "blue",
                   "index": 4
+                },
+                "5": {
+                  "text": "대기(꺼짐)",
+                  "color": "#9e9e9e",
+                  "index": 5
+                },
+                "6": {
+                  "text": "켜는 중",
+                  "color": "blue",
+                  "index": 6
+                },
+                "7": {
+                  "text": "깨울 수 없음",
+                  "color": "dark-red",
+                  "index": 7
                 }
               }
             }
@@ -2071,7 +2086,7 @@
     {
       "id": 37,
       "type": "timeseries",
-      "title": "조립 PC 수요 (켜기: normal_wake ≥ 2 가 60초 · 끄기: normal_keep = 0 이 30분)",
+      "title": "조립 PC 수요 (켜기: 새 구간 normal_wake ≥ 2 또는 waiting ≥ 1 이 60초 · 끄기: pc_load ≤ 1 이 2분)",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -2133,7 +2148,88 @@
           "mode": "multi",
           "sort": "desc"
         }
-      }
+      },
+      "description": "normal_wake 전역 보통 수요(처리 중 + 대기열 + 신고 + 인계), waiting 기다리는 일(대기열 + waiting=true 신고), pc_load PC 몫(PC 처리 중 + waiting). 상시 서버의 켜진 자리가 0 이면 waiting 1건에 바로 켠다. release 뒤에는 그 뒤 새로 생긴 waiting 만 되살린다"
+    },
+    {
+      "id": 38,
+      "type": "timeseries",
+      "title": "자리·임대 (워크플로가 예약하는 동시 처리 수)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 97,
+        "w": 24,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (backend, class) (ollama_capacity_slots)",
+          "legendFormat": "자리 {{backend}}/{{class}}",
+          "editorMode": "code",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (backend) (ollama_leases)",
+          "legendFormat": "임대 {{backend}}",
+          "editorMode": "code",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (backend) (ollama_capacity_free)",
+          "legendFormat": "남은 자리 {{backend}}",
+          "editorMode": "code",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "spanNulls": false,
+            "showPoints": "auto",
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter"
+          },
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "ollama_capacity_slots: backend 별 자리(online 켜진 상시 서버, standby 깨울 수 있는 대기 서버, 서버가 여러 backend 에 있으면 각각에 센다). leases: 살아 있는 임대(job 하나에 하나). free: 지금 더 줄 수 있는 임대(공유 서버는 한 번만 셈)"
     }
   ]
 }
