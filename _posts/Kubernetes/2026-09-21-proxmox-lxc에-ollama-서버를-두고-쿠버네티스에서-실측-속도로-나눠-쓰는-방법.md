@@ -387,7 +387,12 @@ curl -fsSL https://eu4ng.github.io/assets/files/ollama/dashboard.json -o service
 
 가중치는 설정에 적지 않고 `weights.py` 가 정합니다. 라우터 파드에 함께 뜨는 이 프로그램은 5초마다 HAProxy 통계를 읽어 서버마다 요청을 처리하던 시간과 그동안 내보낸 응답 바이트를 모으고, 가장 빠른 서버를 256 으로 둔 가중치를 runtime API(`stats socket`)로 넣습니다. 속도 비율을 세제곱해서 낮추므로 속도가 3분의 1 인 서버의 가중치는 9 쯤이 되어, 빠른 서버가 비어 있는 동안에는 요청이 거의 그쪽으로 갑니다. 처리 시간이 2분에 못 미쳐 아직 속도를 모르는 서버는 256 을 받아 요청을 받아 보게 합니다.
 
-내려받은 뒤 `haproxy.cfg` 의 `[WINPC_IP]` 와 `[DOMAIN]` 을 바꾸고, 없는 서버의 줄은 지웁니다. `server` 줄의 순서는 분배에 영향을 주지 않습니다.
+내려받은 뒤 `haproxy.cfg` 의 `[WINPC_IP]`·`[GPUPC_IP]` 와 `[DOMAIN]` 을 바꾸고, 없는 서버의 줄은 지웁니다. `server` 줄의 순서는 분배에 영향을 주지 않습니다.
+
+모델 확인·조회 요청(`/api/tags`·`/api/version`·`/api/show`·`/api/ps`)은 `backend meta` 로 따로 보냅니다. 추론 전에 `/api/tags` 로 모델을 확인하는 클라이언트는, 서버가 모두 바쁘면 이 요청이 `servers` 의 자리를 기다리느라 30B 요청이 `big` 에 닿지도 못합니다. `meta` 에는 자리 제한이 없고, 라우터로 가는 모델을 모두 가진 서버만 넣습니다.
+
+> 평소 꺼 두는 GPU 데스크톱을 서버로 넣고 요청이 몰릴 때만 켜려면 [꺼 둔 GPU 데스크톱을 Ollama 라우터에 넣고 요청이 몰릴 때만 WOL로 켜고 끄는 방법](/posts/86/)을 이어서 봅니다. `haproxy.cfg` 의 `pc-custom` 줄이 그 서버입니다.
+{: .prompt-info }
 
 어느 모델이 어느 서버에서 얼마나 쓰였는지는 `metrics.py` 가 셉니다. HAProxy 의 통계 페이지는 서버 단위 누적값뿐이고 파드가 다시 뜨면 0 으로 돌아가므로, 설정의 `log-format` 으로 요청마다 모델·서버·역할·대기열 시간·처리 시간을 key=value 한 줄로 남기고 그 로그를 UDP(`log 127.0.0.1:5514`)로 같은 파드의 `metrics` 컨테이너에도 보냅니다. `metrics.py` 는 이 줄을 받아 Prometheus 카운터·히스토그램으로 내고(`:9100/metrics`), 5초마다 서버마다 `/api/ps` 를 읽어 지금 올라간 모델과 모델이 바뀐 횟수도 냅니다. 같은 주기에 서버의 상태 보고 에이전트(`:11437/status`)를 읽어 러너가 지금 계산 중인지(`ollama_server_working`)와 GPU 사용률도 냅니다 — 라우터가 롤링 재시작되면 진행 중 요청은 옛 파드가 끝까지 쥐지만 HAProxy 지표는 새 파드 것만 남아 '처리 중'이 0 으로 비는데, 서버 쪽 값은 라우터와 무관하게 남습니다. 모델 이름은 `http-buffer-request` 로 받아 둔 본문에서 `json_query` 로 꺼내 변수에 넣고(`txn.model`), 역할은 쓰는 쪽이 붙이는 `X-Wiki-Role` 헤더에서 읽습니다. HAProxy 자체 지표(서버 상태·가중치·처리 중·대기열)는 내장 익스포터(`http-request use-service prometheus-exporter`)가 통계 포트의 `/metrics` 로 냅니다. 응답에는 `X-Ollama-Server` 헤더로 처리한 서버 이름을 붙여, 쓰는 쪽이 토큰 수와 함께 기록할 수 있게 합니다 — 토큰 수·생성 속도·적재 시간은 Ollama 응답 본문에만 있어 라우터가 셀 수 없습니다.
 
@@ -429,11 +434,12 @@ defaults
   retry-on conn-failure empty-response 500 502 503 504
   option http-server-close       # 응답이 끝나면 서버 연결을 닫아, 쉬는 keep-alive 연결이 자리를 차지하지 않게 합니다
   timeout connect 5s
-  # 끊는 쪽은 라우터가 아니라 쓰는 쪽이어야 합니다(쓰는 쪽의 역할별 timeout). 라우터 상한이 그보다 짧으면 쓰는 쪽은
-  # 503 을 받고 서버 장애로 오해합니다. 상한을 쓰는 쪽보다 길게 둡니다.
+  # 끊는 쪽은 라우터가 아니라 쓰는 쪽이어야 합니다. 쓰는 쪽이 시간이 아니라 서버 상태(에이전트의 "계산 중")로 멈춤을 판정하고
+  # 계산 중이면 기다린다면, 라우터 상한이 그보다 짧을 때 쓰는 쪽은 503 을 받고 서버 장애로 오해합니다. 아래는 모두 '아무 바이트도
+  # 오가지 않는 시간'이라 스트리밍 중에는 되돌아갑니다.
   timeout client 90m
-  timeout server 90m             # 64K 컨텍스트 요청 하나가 수십 분 걸릴 수 있습니다(30B 요약 실측 36분)
-  timeout queue 90m              # 전용 서버가 바쁠 때 줄 서는 시간
+  timeout server 90m             # 서버가 한 바이트도 안 보내는 시간. 30B prefill 실측 15분(64K 컨텍스트 요약 전체는 36분 이상)
+  timeout queue 250m             # 전용 서버가 바쁠 때 줄 서는 시간. 쓰는 쪽의 대기열 상한보다 길게
 
 frontend ollama
   bind :11434
@@ -445,6 +451,10 @@ frontend ollama
   # 로그·지표용: 요청 본문의 모델 이름과 쓰는 쪽이 붙인 역할 헤더(X-Wiki-Role: summarizer 등). 없으면 비어 있습니다
   http-request set-var(txn.model) req.body,json_query('$.model')
   http-request set-var(txn.role) req.hdr(X-Wiki-Role)
+  # 모델 확인·조회(/api/tags 등)는 추론 자리(maxconn)를 기다리지 않게 따로 보냅니다. 추론 전에 /api/tags 로 모델을 확인하는
+  # 클라이언트는 servers 가 모두 바쁘면 이 요청이 거기서 줄을 서, 30B 요청이 big 에 닿지도 못합니다.
+  acl meta_path path /api/tags /api/version /api/show /api/ps
+  use_backend meta if meta_path
   use_backend big if big_model
   default_backend servers
 
@@ -463,8 +473,11 @@ backend servers
   server pve01-610m ollama-610m.[DOMAIN]:11434 agent-check agent-port 11435 agent-inter 5s
   # 윈도우 PC 는 사용자 데스크톱입니다. 꺼지면 헬스체크로 빠지고, PC 의 상태 보고 스크립트(windows-agent.ps1, 포트 11435)가
   # "drain" 이라고 답하면(Ollama 가 아닌 프로그램이 GPU 를 쓰는 중) 새 요청을 보내지 않습니다. 스크립트가 없거나 답이 없으면 헬스체크만 봅니다.
-  # 같은 스크립트가 LXC 에이전트와 같은 상태 JSON(:11437/status, 계산 중인지)도 내서 wiki-papers 가 이 서버로 간 호출의 멈춤도 상태로 판정합니다.
   server winpc-780m [WINPC_IP]:11434 agent-check agent-port 11435 agent-inter 5s
+  # 평소 꺼 두는 GPU 데스크톱(RTX 4080 16GB). 보통 모델은 VRAM 에 다 올라가 iGPU 서버보다 생성 10배·입력 처리 30배 빠릅니다(실측).
+  # OLLAMA_NUM_PARALLEL=2 라 maxconn 2. 꺼져 있으면 헬스체크로 빠지고, 보통 모델 동시 요청이 몰리면 전원 컨트롤러(power.py)가 WOL 로 켭니다.
+  # 30B 는 받지 않습니다(big 참고). 에이전트(windows-agent.ps1 -AutoPower)가 게임 등 GPU 사용이나 자동 종료 직전이면 drain 으로 답합니다.
+  server pc-custom [GPUPC_IP]:11434 maxconn 2 agent-check agent-port 11435 agent-inter 5s
 
 # 30B 급 모델 전용. 서버 하나라 가중치 조정(weights.py)은 하지 않습니다. 780m 이 바쁘면 여기서 줄을 섭니다(timeout queue).
 backend big
@@ -477,6 +490,19 @@ backend big
   # (실측). 메모리 기준 에이전트(11436)로는 못 막는다(여유 메모리가 아니라 장치 메모리 한도 문제). 컨텍스트를 줄이거나 CPU 전용으로
   # 올릴 방법이 서버 단위 설정으로 생기기 전까지는 넣지 않는다.
   # server winpc-780m [WINPC_IP]:11434 check inter 5s fall 2 rise 2 maxconn 1 weight 40 agent-check agent-port 11436 agent-inter 5s
+  # GPU 데스크톱(RTX 4080 16GB)도 넣지 않습니다. 30B 가중치(17.7~20.4GB)가 VRAM 을 넘어 절반이 CPU 로 가고, 입력 처리는 빠르지만
+  # 생성이 780m 보다 느립니다(실측 1.87 tok/s vs 5.0). 요약처럼 출력이 수천 토큰인 요청은 생성 속도가 결정합니다.
+
+# 모델 확인·조회 전용(/api/tags·/api/version·/api/show·/api/ps). 추론이 아니라 자리(maxconn)를 두지 않습니다.
+# 응답한 서버에 모델이 없으면 멈추는 클라이언트가 있으므로, 라우터로 가는 모델을 모두 가진 서버만 넣습니다.
+# 모델을 더하면 이 서버들에 모두 받고, 전원 컨트롤러의 --models 도 고칩니다.
+backend meta
+  balance roundrobin
+  option httpchk GET /api/version
+  http-check expect status 200
+  default-server check inter 5s fall 2 rise 2 resolvers lan init-addr last,libc,none
+  server pve02-780m ollama-780m.[DOMAIN]:11434
+  server pve01-610m ollama-610m.[DOMAIN]:11434
 
 # 통계 페이지(/)와 Prometheus 지표(/metrics — 서버별 상태·가중치·처리 중·대기열·응답 코드. ServiceMonitor 가 긁습니다).
 # 준비 상태 검사가 5초마다 오므로 이 frontend 는 기록하지 않습니다.
