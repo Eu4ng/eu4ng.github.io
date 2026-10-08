@@ -1,0 +1,110 @@
+# GPU 데스크톱 전원 컨트롤러(power.py). 보통 모델의 동시 요청이 2건 이상 60초 이어질 때만 PC 를 WOL 로 켜고,
+# 1건 이하가 5분 이어지면 PC 에이전트에 release 를 보낸다.
+# 끄는 것은 PC 에이전트(windows-agent.ps1 -AutoPower)가 사용자·연결·계산을 보고 스스로 한다.
+# hostNetwork: 매직 패킷을 LAN 브로드캐스트로 내보내야 한다(파드 네트워크에서는 LAN 으로 나가지 않는다). 그래서 노드 포트 9111(지표)·
+# 9112(수요 신고)를 잡는다 — 겹치지 않게 Recreate. 수요 신고는 토큰과 출발지(파드 대역)로 막는다.
+# 토큰: Secret gpu-pc-power(gpu-pc-power-secret.sh). WOL 을 보낸 시각은 ConfigMap gpu-pc-power-state 에 남긴다
+# (저장소에 선언하지 않는다 — 운전 상태라 selfHeal 이 되돌리면 안 된다. 없으면 컨트롤러가 만든다).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gpu-pc-power
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gpu-pc-power
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [list]                 # 라우터 파드 전부(종료 중 포함)의 통계를 합산
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [create]               # 상태 ConfigMap 이 없을 때(create 는 이름으로 제한할 수 없다)
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [gpu-pc-power-state]
+    verbs: [get, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gpu-pc-power
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: gpu-pc-power }
+subjects:
+  - { kind: ServiceAccount, name: gpu-pc-power }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gpu-pc-power
+spec:
+  replicas: 1
+  strategy: { type: Recreate }    # hostNetwork 포트를 두 파드가 동시에 잡지 못한다
+  selector:
+    matchLabels: { app: gpu-pc-power }
+  template:
+    metadata:
+      labels: { app: gpu-pc-power }
+    spec:
+      serviceAccountName: gpu-pc-power
+      priorityClassName: optional
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet   # hostNetwork 에서도 Service 이름(kubernetes.default.svc)을 푼다
+      containers:
+        - name: power
+          image: python:3.13-alpine
+          command:
+            - python3
+            - -u
+            - /app/power.py
+            - --pc-server=pc-custom
+            - --agent-host=[GPUPC_IP]
+            - --mac=[GPUPC_MAC]
+            - --wol-target=[LAN_BROADCAST]:9      # LAN 서브넷 브로드캐스트
+            - --wol-target=255.255.255.255:9
+            # meta backend(모델 확인) 서버가 모두 가져야 할 라우터 모델. 모델을 더하면 여기와 haproxy.cfg 의 ACL 도 고친다
+            - --models=[ROUTER_MODELS]       # 예: gemma4:12b,qwen3.5:9b,gemma4:31b
+            - --meta-servers=pve02-780m,pve01-610m
+            # 30B(backend big)는 받지 않는다(--serve-big 없음). 16GB GPU 에서는 30B 가중치가 VRAM 을 넘어 생성이 iGPU 서버보다 느렸다
+          env:
+            - name: GPU_PC_CONTROL_TOKEN
+              valueFrom: { secretKeyRef: { name: gpu-pc-power, key: control-token } }
+            - name: GPU_PC_DEMAND_TOKEN
+              valueFrom: { secretKeyRef: { name: gpu-pc-power, key: demand-token } }
+          ports:
+            - { name: metrics, containerPort: 9111 }
+            - { name: demand, containerPort: 9112 }
+          readinessProbe:
+            httpGet: { path: /healthz, port: 9111 }
+            periodSeconds: 10
+          volumeMounts:
+            - { name: config, mountPath: /app }
+          resources:
+            requests: { cpu: 5m, memory: 24Mi }
+            limits:   { cpu: 100m, memory: 64Mi }
+      volumes:
+        - name: config
+          configMap: { name: gpu-pc-power }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gpu-pc-power
+  labels: { app: gpu-pc-power }   # power-servicemonitor 가 이 라벨로 고른다
+spec:
+  selector: { app: gpu-pc-power }
+  ports:
+    - { name: metrics, port: 9111, targetPort: 9111 }
+    - { name: demand, port: 9112, targetPort: 9112 }   # wiki-papers 의 수요 신고(power_url)
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: gpu-pc-power
+  labels: { release: monitoring }
+spec:
+  selector:
+    matchLabels: { app: gpu-pc-power }
+  endpoints:
+    - { port: metrics, path: /metrics, interval: 15s }
