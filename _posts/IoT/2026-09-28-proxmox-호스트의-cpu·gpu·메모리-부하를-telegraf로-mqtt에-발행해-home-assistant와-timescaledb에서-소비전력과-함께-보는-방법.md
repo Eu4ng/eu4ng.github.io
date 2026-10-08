@@ -466,6 +466,10 @@ SENSORS = {
     "gpu_usage": ("GPU 사용률", PERCENT),
     "gpu_temp": ("GPU 온도", CELSIUS),
     "gpu_mem_used": ("GPU 메모리 사용량", BYTES),
+    "gpu_power": (
+        "GPU 전력",
+        WATT,
+    ),  # 외장 GPU 가 있는 Windows PC 만(iGPU 전력은 cpu_power 에 포함)
     "mem_used_percent": ("메모리 사용률", PERCENT),
     "mem_temp": ("메모리 온도", CELSIUS),
     "swap_used_percent": ("스왑 사용률", PERCENT),
@@ -733,6 +737,9 @@ apt 패키지 python3-paho-mqtt 만 쓴다. 호스트 Telegraf 의 MQTT 출력�
 - SIGTERM(서비스 정지. telegraf.service 에 BindsTo 로 묶여 Telegraf 가 멈추면 함께 멈춘다)을 받으면 offline 을 내고 끝낸다.
 - 호스트가 꺼지거나 네트워크가 끊기면 브로커가 keepalive 의 1.5배 뒤에 Last Will 로 offline 을 낸다.
 HA 발견 설정(host-metrics-discovery.py)의 availability 와 엣지 Telegraf 의 hosts/+/availability 입력이 이 토픽을 쓴다.
+Windows PC(playbooks/windows-host-metrics.yml)에서는 systemd 대신 예약 작업으로 돌고, BindsTo 대신 --follow-service 로
+Telegraf 서비스 상태를 10초마다 보고 따라간다(멈추면 offline, 다시 돌면 online). 예약 작업은 환경 변수를 줄 수 없어
+비밀번호는 --password-file 로 읽는다.
 구조: 순수 함수(availability_topic, availability_payload) → 브로커 함수(run) → CLI(build_parser, main).
 """
 
@@ -742,7 +749,9 @@ import argparse
 import json
 import logging
 import os
+import re
 import signal
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -767,10 +776,33 @@ def availability_payload(online: bool) -> str:
     return json.dumps({"state": "online" if online else "offline"})
 
 
+def service_running(sc_output: str) -> bool:
+    """Windows `sc query <서비스>` 출력에서 실행 중인지. 항목 이름은 언어마다 다르지만 값(4  RUNNING)은 같다."""
+    return re.search(r":\s*4\s+RUNNING\b", sc_output) is not None
+
+
+def windows_service_alive(name: str) -> bool:
+    """Windows 서비스가 실행 중인가(sc query). 조회가 실패하면 멈춘 것으로 본다."""
+    try:
+        out = subprocess.run(
+            ["sc", "query", name], capture_output=True, timeout=10, check=False
+        ).stdout.decode("ascii", "replace")
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return service_running(out)
+
+
 def run(
-    broker: str, user: str, password: str, device: str, stop: threading.Event
+    broker: str,
+    user: str,
+    password: str,
+    device: str,
+    stop: threading.Event,
+    alive=None,
+    interval: float = 10.0,
 ) -> int:
-    """stop 이 설정될 때까지 연결을 유지하며 online 을 알리고, 끝날 때 offline 을 알린다. 알린 횟수를 준다."""
+    """stop 이 설정될 때까지 연결을 유지하며 online 을 알리고, 끝날 때 offline 을 알린다. 알린 횟수를 준다.
+    alive 가 있으면(Windows 의 --follow-service) interval 마다 불러 그 값을 연결 상태로 알린다."""
     import paho.mqtt.client as mqtt  # 테스트에서 순수 함수만 쓸 때 paho 없이 불러오게 한다
 
     topic = availability_topic(device)
@@ -782,9 +814,10 @@ def run(
             log.warning("브로커 연결 실패: %s", reason_code)
             return
         # 끊겼던 동안 브로커가 Last Will 로 offline 을 냈을 수 있으므로 붙을 때마다 알린다
-        client.publish(topic, availability_payload(True), qos=1, retain=True)
-        announced += 1
-        log.info("online: %s", topic)
+        state = alive() if alive else True
+        client.publish(topic, availability_payload(state), qos=1, retain=True)
+        announced += 1 if state else 0
+        log.info("%s: %s", "online" if state else "offline", topic)
 
     host, _, port = broker.rpartition(":")
     client = mqtt.Client(
@@ -795,7 +828,17 @@ def run(
     client.on_connect = on_connect
     client.connect_async(host, int(port), keepalive=KEEPALIVE)
     client.loop_start()
-    stop.wait()
+    if alive is None:
+        stop.wait()
+    else:
+        last = None
+        while not stop.wait(interval):
+            state = alive()
+            if state != last and client.is_connected():
+                client.publish(topic, availability_payload(state), qos=1, retain=True)
+                announced += 1 if state else 0
+                log.info("%s: %s", "online" if state else "offline", topic)
+                last = state
     # 정상 종료에서는 브로커가 Last Will 을 내지 않으므로 직접 알린다
     info = client.publish(topic, availability_payload(False), qos=1, retain=True)
     try:
@@ -827,6 +870,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--device", required=True, help="기기 이름(hosts/<기기> 의 <기기>)"
     )
+    parser.add_argument(
+        "--password-file",
+        help="비밀번호 파일(MQTT_PASSWORD 가 없을 때. Windows 예약 작업용)",
+    )
+    parser.add_argument(
+        "--follow-service",
+        help="Windows 서비스 이름. 10초마다 실행 중인지 보고 그대로 알린다(systemd BindsTo 대신)",
+    )
     return parser
 
 
@@ -836,8 +887,16 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.INFO, format="%(levelname)s %(message)s", stream=sys.stderr
     )
     password = os.environ.get("MQTT_PASSWORD")
+    if not password and args.password_file:
+        try:
+            password = Path(args.password_file).read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            log.error("비밀번호 파일을 읽지 못했다: %s", exc)
+            return EXIT_USAGE
     if not password:
-        log.error("브로커 비밀번호가 필요하다: 환경 변수 MQTT_PASSWORD 를 설정한다")
+        log.error(
+            "브로커 비밀번호가 필요하다: 환경 변수 MQTT_PASSWORD 또는 --password-file"
+        )
         return EXIT_USAGE
     if ":" not in args.broker:
         log.error("--broker 는 호스트:포트 형식이다: %s", args.broker)
@@ -846,7 +905,14 @@ def main(argv: list[str] | None = None) -> int:
     stop = threading.Event()
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: stop.set())
-    announced = run(args.broker, args.user, password, args.device, stop)
+    alive = None
+    if args.follow_service:
+        service = args.follow_service
+
+        def alive() -> bool:
+            return windows_service_alive(service)
+
+    announced = run(args.broker, args.user, password, args.device, stop, alive)
     json.dump(
         {
             "device": args.device,
