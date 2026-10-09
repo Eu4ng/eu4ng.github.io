@@ -1,13 +1,13 @@
 ---
 layout: post
 title: 꺼 둔 GPU 데스크톱을 Ollama 라우터에 넣고 요청이 몰릴 때만 WOL로 켜고 끄는 방법
-description: 유휴 전력이 큰 GPU 데스크톱을 Ollama 라우터의 서버로 넣되 평소에는 꺼 두고, 보통 모델 요청이 동시에 몰릴 때만 쿠버네티스의 전원 컨트롤러가 Wake-on-LAN 으로 켜고, 수요가 줄면 PC 가 스스로 꺼지게 만드는 방법을 정리했습니다.
+description: 유휴 전력이 큰 GPU 데스크톱을 Ollama 라우터의 대기 서버로 넣어 평소에는 꺼 두고, 보통 모델 요청이 몰리거나 자리가 없어 기다리는 요청이 생길 때만 쿠버네티스의 전원 컨트롤러가 Wake-on-LAN 으로 켜고, 수요가 줄면 PC 가 스스로 꺼지게 만드는 방법을 정리했습니다.
 author: Eu4ng
 tags: [ollama, haproxy, kubernetes, wake-on-lan, windows, gitops]
 permalink: /posts/86/
 ---
 
-[Proxmox LXC에 Ollama 서버를 두고 쿠버네티스에서 실측 속도로 나눠 쓰는 방법](/posts/37/)의 라우터에 GPU 가 좋은 Windows 데스크톱을 서버로 더합니다. 데스크톱은 켜 두기만 해도 100W 넘게 쓰므로 평소에는 꺼 두고, 클러스터의 전원 컨트롤러가 라우터 통계와 클라이언트의 신고를 보고 보통 모델 요청이 동시에 2건 이상 60초 이어질 때만 Wake-on-LAN(WOL)으로 켭니다. 요청이 1건 이하로 5분 이어지면 컨트롤러가 PC 의 상태 에이전트에 내려도 된다고 알리고, 에이전트는 처리 중인 일이 끝나고 아무도 PC 를 쓰지 않을 때만 스스로 종료합니다. 사람이 쓴 흔적(콘솔 입력, 원격 데스크톱 세션)이 있는 부팅은 끄지 않습니다.
+[Proxmox LXC에 Ollama 서버를 두고 쿠버네티스에서 실측 속도로 나눠 쓰는 방법](/posts/37/)의 라우터에 GPU 가 좋은 Windows 데스크톱을 서버로 더합니다. 데스크톱은 켜 두기만 해도 100W 넘게 쓰므로 평소에는 꺼 두고, 클러스터의 전원 컨트롤러가 라우터 통계와 클라이언트의 신고를 보고 보통 모델 요청이 동시에 2건 이상이거나 자리가 없어 기다리는 요청이 60초 이어질 때만 Wake-on-LAN(WOL)으로 켭니다. PC 가 맡은 일이 1건 이하인 상태가 2분 이어지면 컨트롤러가 PC 의 상태 에이전트에 내려도 된다고 알리고, 에이전트는 처리 중인 일이 끝나고 아무도 PC 를 쓰지 않을 때만 스스로 종료합니다. 컨트롤러는 꺼진 PC 를 '깨울 수 있는 대기 서버'로 알리고, 여러 일을 동시에 보내는 워크플로가 그 자리까지 쳐서 자리를 임대받게 합니다. 사람이 쓴 흔적(콘솔 입력, 원격 데스크톱 세션)이 있는 부팅은 끄지 않습니다.
 
 1. PC 준비
 2. 상태 에이전트 설치
@@ -78,7 +78,7 @@ for m in gemma4:12b qwen3.5:9b; do curl -s http://[GPUPC_IP]:11434/api/pull -d "
 
 ## 2. 상태 에이전트 설치
 
-PC 의 상태 에이전트 `windows-agent.ps1` 은 라우터의 `agent-check`(포트 11435)에 `ready`/`drain` 으로 답하고, `-AutoPower` 를 주면 전원 컨트롤러의 제어(포트 11438)를 받아 스스로 종료합니다. 끄는 조건은 아래가 모두 60초 이어질 때입니다.
+PC 의 상태 에이전트 `windows-agent.ps1` 은 라우터의 `agent-check`(포트 11435)에 `ready`/`drain` 으로 답하고, `-AutoPower` 를 주면 전원 컨트롤러의 제어(포트 11438)를 받아 스스로 종료합니다. 아래가 모두 30초 이어지면 30초 카운트다운(`shutdown /s /t 30`) 뒤 꺼집니다. 컨트롤러 연락이 10분 끊긴 채 일 없이 10분이 지나면 에이전트가 스스로 내려도 된다고 봅니다.
 
 - 컨트롤러가 켠 부팅(`/auto`)이고 컨트롤러가 내려도 된다고 알림(`/release`)
 - 이 부팅에서 사람의 흔적이 없음: 원격 데스크톱 세션, 또는 부팅 뒤 콘솔의 키보드·마우스 입력
@@ -113,7 +113,7 @@ bash gpu-pc-power-secret.sh
 #
 # GPU 데스크톱 전원 컨트롤러(services/ollama/power.py)의 토큰 둘을 만들어 필요한 곳에 넣습니다. 여러 번 실행해도 됩니다.
 #   - control-token: 컨트롤러 → PC 에이전트(windows-agent.ps1 -AutoPower, 제어 포트 /auto·/release·/hint)
-#   - demand-token : 클라이언트 → 컨트롤러(수요 신고 :9112 /demand)
+#   - demand-token : 클라이언트 → 컨트롤러(수요 신고 :9112 /demand, 워크플로 자리 임대 /reserve·/lease)
 # 넣는 곳:
 #   - 원본 ~/.config/gpu-pc-power/tokens.env (없으면 무작위로 만들어 적음)
 #   - 쿠버네티스 Secret ollama/gpu-pc-power (키 control-token, demand-token)
@@ -180,7 +180,15 @@ echo "끝. 수요를 신고할 클라이언트에는 GPU_PC_DEMAND_TOKEN 을 넘
 ```
 {: file="services/ollama/haproxy.cfg" }
 
-전원 컨트롤러 `power.py` 는 10초마다 라우터 파드 전부(롤링 업데이트 중 종료되는 파드 포함)의 통계를 합쳐 보통 모델의 동시 요청(처리 중 + 대기)을 셉니다. 2건 이상이 60초 이어지면 매직 패킷을 보내고(쿨다운 10분), 그 뒤 켜진 부팅을 에이전트에 `/auto` 로 확정합니다. 1건 이하가 5분 이어지면 `/release` 를 보냅니다. 매직 패킷은 LAN 브로드캐스트라 파드 네트워크에서는 나가지 않으므로 `hostNetwork` 로 돌립니다.
+전원 컨트롤러 `power.py` 는 10초마다 라우터 파드 전부(롤링 업데이트 중 종료되는 파드 포함)의 통계를 합쳐 판단합니다.
+
+- 켜기: 아래 가운데 하나가 60초 이어지면 매직 패킷을 보내고, 켜진 부팅을 에이전트에 `/auto` 로 확정합니다.
+  - 보통 모델의 동시 요청(처리 중 + 대기 + 클라이언트 신고)이 2건 이상인 새 수요 구간. 한 구간에 한 번만 켭니다(2건 미만으로 내려갔다가 다시 올라와야 새 구간).
+  - 기다리는 일(라우터 대기열 + `waiting` 신고)이 1건 이상. 켜진 상시 서버가 하나도 없으면 60초를 기다리지 않습니다.
+- 내리기: PC 가 맡은 일(PC 처리 중 + 기다리는 일)이 1건 이하인 상태가 2분 이어지면 `/release` 를 보냅니다. release 뒤에는 그 뒤 새로 생긴 기다리는 일만 PC 를 되살립니다.
+- WOL 을 다시 보내지 않는 쿨다운(10분)은 부팅이 확인되지 않은 실패 때만 둡니다.
+
+매직 패킷은 LAN 브로드캐스트라 파드 네트워크에서는 나가지 않으므로 `hostNetwork` 로 돌립니다.
 
 ```bash
 # 전원 컨트롤러 내려받기
@@ -194,13 +202,16 @@ curl -fsSL https://eu4ng.github.io/assets/files/ollama/power-deployment.yaml -o 
 <summary>services/ollama/power-deployment.yaml 전문</summary>
 
 ```yaml
-# GPU 데스크톱 전원 컨트롤러(power.py). 보통 모델의 동시 요청이 2건 이상 60초 이어질 때만 PC 를 WOL 로 켜고,
-# 1건 이하가 5분 이어지면 PC 에이전트에 release 를 보낸다.
-# 끄는 것은 PC 에이전트(windows-agent.ps1 -AutoPower)가 사용자·연결·계산을 보고 스스로 한다.
+# GPU 데스크톱 전원 컨트롤러(power.py). 보통 모델 수요가 충분할 때만 PC 를 WOL 로 켠다: 새 수요 구간에 전역 동시 요청
+# 2건 이상, 또는 기다리는 일(라우터 대기열 + waiting 신고) 1건 이상이 60초(상시 서버 자리가 0 이면 바로). PC 몫(PC 처리 중 +
+# 기다리는 일)이 1건 이하인 상태가 2분 이어지면 PC 에이전트에 release 를 보낸다. 끄는 것은 PC 에이전트(windows-agent.ps1
+# -AutoPower)가 사용자·연결·계산을 보고 스스로 한다.
+# 서버 등급(GET :9112/servers — PC 는 대기 서버)과 워크플로 자리 임대(POST :9112/reserve, job 마다 하나)도 맡는다.
+# wiki-papers 의 draft·quality 가 임대로 동시 처리 수를 정한다(꺼져 있어도 깨울 수 있는 PC 자리까지 친다).
 # hostNetwork: 매직 패킷을 LAN 브로드캐스트로 내보내야 한다(파드 네트워크에서는 LAN 으로 나가지 않는다). 그래서 노드 포트 9111(지표)·
-# 9112(수요 신고)를 잡는다 — 겹치지 않게 Recreate. 수요 신고는 토큰과 출발지(파드 대역)로 막는다.
-# 토큰: Secret gpu-pc-power(gpu-pc-power-secret.sh). WOL 을 보낸 시각은 ConfigMap gpu-pc-power-state 에 남긴다
-# (저장소에 선언하지 않는다 — 운전 상태라 selfHeal 이 되돌리면 안 된다. 없으면 컨트롤러가 만든다).
+# 9112(수요 신고·임대)를 잡는다 — 겹치지 않게 Recreate. 9112 는 토큰과 출발지(파드 대역)로 막는다.
+# 토큰: Secret gpu-pc-power(gpu-pc-power-secret.sh). WOL 을 보낸 시각(부팅 판정 전까지)과 임대는 ConfigMap
+# gpu-pc-power-state 에 남긴다(저장소에 선언하지 않는다 — 운전 상태라 selfHeal 이 되돌리면 안 된다. 없으면 컨트롤러가 만든다).
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -261,7 +272,7 @@ spec:
             - --wol-target=255.255.255.255:9
             # meta backend(모델 확인) 서버가 모두 가져야 할 라우터 모델. 모델을 더하면 여기와 haproxy.cfg 의 ACL 도 고친다
             - --models=[ROUTER_MODELS]       # 예: gemma4:12b,qwen3.5:9b,gemma4:31b
-            - --meta-servers=pve02-780m,pve01-610m
+            - --meta-servers=pve02-780m
             # 30B(backend big)는 받지 않는다(--serve-big 없음). 16GB GPU 에서는 30B 가중치가 VRAM 을 넘어 생성이 iGPU 서버보다 느렸다
           env:
             - name: GPU_PC_CONTROL_TOKEN
@@ -329,7 +340,14 @@ configMapGenerator:
 ```
 {: file="services/ollama/kustomization.yaml" }
 
-클라이언트가 서버 자리가 빌 때까지 라우터에 보내지 않고 기다린다면, 그 요청은 라우터 통계에 보이지 않습니다. 그런 클라이언트는 기다리는 동안 컨트롤러에 신고합니다. `POST http://gpu-pc-power.ollama.svc:9112/demand` 에 `Authorization: Bearer [DEMAND_TOKEN]` 과 `{"id": "<요청마다 고유>", "backend": "servers"}` 를 15초마다 보내고, 라우터로 보내기 직전에 `DELETE /demand/<id>` 합니다. 신고는 60초 안에 갱신하지 않으면 사라집니다.
+클라이언트가 서버 자리가 빌 때까지 라우터에 보내지 않고 기다린다면, 그 요청은 라우터 통계에 보이지 않습니다. 그런 클라이언트는 기다리는 동안 컨트롤러에 신고합니다. `POST http://gpu-pc-power.ollama.svc:9112/demand` 에 `Authorization: Bearer [DEMAND_TOKEN]` 과 `{"id": "<요청마다 고유>", "backend": "servers", "waiting": true}` 를 15초마다 보내고, 라우터로 보내기 직전에 `DELETE /demand/<id>` 합니다. `waiting` 은 자리가 없어 실제로 기다리는 중일 때만 `true` 로 둡니다. 신고는 60초 안에 갱신하지 않으면 사라집니다.
+
+여러 일을 동시에 보내는 워크플로는 동시 처리 수를 컨트롤러에 임대받아 정합니다. 남은 자리는 그 backend 서버들의 `maxconn` 합(켜진 상시 서버 + 깨울 수 있는 대기 서버)에서 살아 있는 임대를 뺀 값입니다. 임대는 자리만 확보하고 PC 를 켜지는 않습니다.
+
+- `POST /reserve` 에 `{"run": "<실행 id>", "workflow": "<이름>", "backend": "servers", "want": <원하는 수>}` 를 보냅니다. 받은 수만큼 임대 id 가 돌아옵니다.
+- job 이 시작하면 `POST /lease/<id>/activate`, 이어서 60초마다 `POST /lease/<id>/renew` 를 보냅니다. 갓 받은 임대는 30분, 시작한 임대는 갱신마다 5분 삽니다.
+- 끝나면 `DELETE /lease/<id>` 합니다.
+- 대기 서버의 상태는 `GET /servers` 로 봅니다(`wakeable` 이 `false` 면 WOL 실패 뒤 쿨다운 중이라 자리로 치지 않습니다).
 
 ```bash
 # 커밋하고 push
@@ -362,7 +380,7 @@ curl -s http://[GPUPC_IP]:11437/status
 - **확인:**
   - 컨트롤러 로그에 `"actions": [["save", ...], ["wol"]]` 가 찍히고 1~2분 뒤 PC 가 켜져 `PC 에이전트 /auto → 200` 이 이어집니다.
   - 요청 응답의 서버 이름에 `pc-custom` 이 나옵니다.
-  - 요청이 끝나고 5분 뒤 상태 JSON 의 `released` 가 `true`, 이어서 `shutdown_at` 이 채워지고 1분 뒤 PC 가 꺼집니다.
+  - 요청이 끝나고 2분 뒤 상태 JSON 의 `released` 가 `true`, 30초 뒤 `shutdown_at` 이 채워지고 다시 30초 뒤 PC 가 꺼집니다.
   - 컨트롤러 지표 `curl http://[NODE_IP]:9111/metrics` 의 `gpu_pc_state` 가 `off → waking → auto → released → off` 로 바뀝니다.
 
 ## 트러블슈팅
@@ -379,13 +397,13 @@ curl -s http://[GPUPC_IP]:11437/status
 <summary><code>released</code> 가 true 인데 꺼지지 않음</summary>
 
 - **원인:** 들어와 있는 연결(`other_inbound`의 SSH·SMB, `ollama_connections`)이 있거나 러너가 계산 중입니다. ansible 같은 도구는 SSH 연결을 60초쯤 열어 둡니다.
-- **해결:** 연결이 끊기면 60초 뒤 `shutdown_at` 이 채워집니다. 그동안 새 요청이 오거나 사람이 쓰면 종료를 취소합니다.
+- **해결:** 연결이 끊기면 30초 뒤 `shutdown_at` 이 채워집니다. 그동안 새 요청이 오거나 사람이 쓰면 종료를 취소합니다.
 
 </details>
 
 ## 마무리
 
-GPU 데스크톱을 Ollama 라우터의 서버로 넣고, 평소에는 꺼 둔 채 보통 모델 요청이 동시에 몰릴 때만 쿠버네티스의 전원 컨트롤러가 WOL 로 켜고, 수요가 줄면 PC 가 스스로 꺼지는 구성을 완성했습니다. 사람이 쓴 흔적이 있는 부팅은 끄지 않고, 관리용 연결은 연결된 동안만 종료를 막습니다. 켜는 기준(동시 2건·60초)과 끄는 유예(5분)는 `power.py` 의 `Config` 에서 바꿉니다.
+GPU 데스크톱을 Ollama 라우터의 대기 서버로 넣고, 평소에는 꺼 둔 채 보통 모델 요청이 몰리거나 자리가 없어 기다리는 요청이 생길 때만 쿠버네티스의 전원 컨트롤러가 WOL 로 켜고, 수요가 줄면 PC 가 스스로 꺼지는 구성을 완성했습니다. 워크플로는 꺼진 PC 의 자리까지 임대받아 동시 처리 수를 정합니다. 사람이 쓴 흔적이 있는 부팅은 끄지 않고, 관리용 연결은 연결된 동안만 종료를 막습니다. 켜는 기준(60초)과 끄는 유예(2분)는 `power.py` 의 `Config` 에서 바꿉니다.
 
 ## 참고 자료
 

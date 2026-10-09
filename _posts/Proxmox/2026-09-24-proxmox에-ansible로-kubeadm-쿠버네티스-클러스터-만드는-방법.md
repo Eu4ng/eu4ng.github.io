@@ -230,6 +230,7 @@ ansible-playbook playbooks/vm-template.yml
 - Longhorn 준비: `open-iscsi`·`nfs-common`, `iscsi_tcp` 모듈, multipath 에서 `sd` 장치 제외, 전용 디스크를 ext4 로 `/var/lib/longhorn` 에 마운트, 디스크를 늘렸으면 파일시스템도 그 크기로
 - etcd 리더 감시: control plane 마다 `etcd-leader-guard` 서비스. 원격 투표자가 etcd 리더가 되면 자기 노드로 리더를 되돌림
 - 옛 노드 빼기: `retire: true` 가 붙은 노드(5단계)
+- 노드 라벨: 노드마다 VM 이 있는 Proxmox 노드를 `eu4ng.com/pve` 라벨로 붙임. 이것만 다시 맞출 때는 `--tags node-labels`
 - 확인: 모든 노드 Ready, 노드 수
 - 내부망 DNS: `lan-dns.yml` 을 다시 실행해 노드·역할 이름을 새로 만듦
 
@@ -281,6 +282,7 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/tasks/kube-vip.yml -o 
       loop: "{{ active }}"
       loop_control: { label: "{{ item.name }}" }
       changed_when: false
+      tags: [always]                      # --tags node-labels 처럼 일부만 돌릴 때도 노드 그룹은 만듭니다
       when: state == 'present'            # 삭제할 때는 뒤의 플레이가 노드에 접속하지 않게 그룹을 비워 둡니다
     - name: 뺄 옛 노드
       ansible.builtin.add_host:
@@ -292,6 +294,7 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/tasks/kube-vip.yml -o 
         node_vmid: "{{ item.vmid }}"
         node_pve: "{{ item.pve | default(proxmox_node) }}"
       loop: "{{ kc.nodes | selectattr('retire', 'defined') | list }}"
+      tags: [always]
       loop_control: { label: "{{ item.name }}" }
       changed_when: false
       when: state == 'present'
@@ -525,6 +528,7 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/tasks/kube-vip.yml -o 
   hosts: k8s_control_planes
   become: true
   gather_facts: false
+  tags: [always]                  # 읽기만 합니다. 뒤 플레이가 쓰는 k8s_cp 그룹을 만들므로 일부 태그만 돌릴 때도 실행
   tasks:
     - name: admin.conf 가 있는지
       ansible.builtin.stat:
@@ -876,6 +880,26 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/tasks/kube-vip.yml -o 
         timeout: 120
       delegate_to: localhost
       become: false
+
+# 노드마다 VM 이 있는 Proxmox 노드를 라벨로 붙입니다. 배치 정책(k8s-gitops 의 Kyverno prefer-primary-host)이
+# 이 라벨로 메인 서버(pve01) 노드를 고릅니다. 이 플레이만: -e k8s_cluster=<이름> --tags node-labels
+- name: 노드 라벨 (eu4ng.com/pve)
+  hosts: k8s_cp
+  become: true
+  gather_facts: false
+  tags: [node-labels]
+  tasks:
+    - name: eu4ng.com/pve = VM 이 있는 Proxmox 노드
+      ansible.builtin.shell: |
+        K="kubectl --kubeconfig /etc/kubernetes/admin.conf"
+        cur=$($K get node {{ item.name }} -o jsonpath='{.metadata.labels.eu4ng\.com/pve}')
+        [ "$cur" = "{{ item.pve | default(proxmox_node) }}" ] && exit 0
+        $K label node {{ item.name }} eu4ng.com/pve={{ item.pve | default(proxmox_node) }} --overwrite
+        echo CHANGED
+      loop: "{{ kc.nodes | rejectattr('retire', 'defined') | list }}"
+      loop_control: { label: "{{ item.name }}" }
+      register: node_label
+      changed_when: "'CHANGED' in node_label.stdout"
 
 - name: 확인
   hosts: k8s_cp

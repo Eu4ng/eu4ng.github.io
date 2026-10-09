@@ -324,7 +324,9 @@ spec:
       affinity:                            # Matter 서버·OTBR 에 127.0.0.1 로 붙으므로 그 파드들과 같은 노드에 둡니다(그쪽이 HA 를 따라옴)
         podAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 100
+            # 메인 서버(pve01) 선호(Kyverno prefer-primary-host, essential 100)보다 낮게 둡니다. 같으면 HA 가 Matter 가 남은 pve02 에
+            # 붙어 돌아오지 못합니다. HA 를 옮긴 뒤에는 Matter·OTBR 을 바로 재시작해 따라오게 합니다(필수 동거라 HA 노드에 뜸)
+            - weight: 50
               podAffinityTerm:
                 labelSelector: { matchLabels: { app: matter-server } }
                 namespaces: [matter]

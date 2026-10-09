@@ -21,6 +21,7 @@ import logging
 import socket
 import sys
 import threading
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -386,6 +387,30 @@ def fetch_status(addr: str, port: int, timeout: float) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def public_status(status: dict | None) -> dict | None:
+    """쓰는 쪽(wiki-papers)이 멈춤 판정에 쓰는 칸만 고른다. 윈도우 에이전트의 세션·접속 칸은 내보내지 않는다.
+    `working` 이 불리언이 아니면(빈 객체 포함) 상태를 모르는 것으로 본다 — 쉬고 있다고 오판하지 않게."""
+    if not status or not isinstance(status.get("working"), bool):
+        return None
+    runners = [
+        {"cpu_percent": r["cpu_percent"]}
+        for r in status.get("runners") or []
+        if isinstance(r, dict) and isinstance(r.get("cpu_percent"), (int, float))
+    ]
+    out: dict = {"working": status["working"], "runners": runners}
+    for key in ("stuck", "gpu_busy_percent"):
+        if key in status:
+            out[key] = status[key]
+    return out
+
+
+class ServerBook:
+    """poll_servers 가 마지막으로 읽은 서버 이름 → 주소. HTTP 스레드가 읽으므로 dict 를 통째로 바꿔 끼운다."""
+
+    def __init__(self) -> None:
+        self.addresses: dict[str, str] = {}
+
+
 def update_status(reg: Registry, server: str, status: dict | None) -> None:
     """상태 JSON 을 지표로. 못 읽은 서버는 값을 지워 옛 값이 남지 않게 한다."""
     reg.set("ollama_server_status_up", {"server": server}, 0 if status is None else 1)
@@ -423,7 +448,10 @@ def query_agent(address: tuple[str, int], timeout: float) -> dict | None:
 
 
 def poll_servers(
-    reg: Registry, args: argparse.Namespace, stop: threading.Event
+    reg: Registry,
+    args: argparse.Namespace,
+    stop: threading.Event,
+    book: ServerBook | None = None,
 ) -> None:
     runtime = args.socket.rpartition(":")
     address = (runtime[0], int(runtime[2]))
@@ -435,6 +463,8 @@ def poll_servers(
         except OSError as exc:
             log.warning("runtime API 에 연결하지 못했다: %s", exc)
             servers = {}
+        if book is not None:
+            book.addresses = servers
         for name, addr in servers.items():
             watcher.update(name, fetch_ps(addr, args.timeout))
             if args.status_port:
@@ -458,19 +488,42 @@ def poll_servers(
         stop.wait(args.interval)
 
 
-def make_handler(reg: Registry):
+def make_handler(
+    reg: Registry,
+    book: ServerBook | None = None,
+    status_port: int = 0,
+    timeout: float = 3.0,
+):
+    """`/metrics` 와 `/status[/<서버>]`. 상태는 요청 때 에이전트에서 바로 읽어(캐시 없음) 판정에 쓰는 칸만 준다.
+    쓰는 쪽이 서버 목록·주소를 몰라도 라우터에 서버 이름(X-Ollama-Server)으로 물으면 된다."""
+
     class Handler(BaseHTTPRequestHandler):
-        def do_GET(self) -> None:
-            if self.path.split("?")[0] != "/metrics":
-                self.send_response(404)
-                self.end_headers()
-                return
-            body = reg.render().encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+        def _send(self, code: int, body: bytes, ctype: str) -> None:
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
+        def do_GET(self) -> None:
+            path = self.path.split("?")[0]
+            if path == "/metrics":
+                self._send(200, reg.render().encode(), "text/plain; version=0.0.4; charset=utf-8")
+                return
+            if book is not None and status_port and path == "/status":
+                body = {
+                    name: public_status(fetch_status(addr, status_port, timeout))
+                    for name, addr in book.addresses.items()
+                }
+                self._send(200, json.dumps(body).encode(), "application/json")
+                return
+            if book is not None and status_port and path.startswith("/status/"):
+                addr = book.addresses.get(urllib.parse.unquote(path[len("/status/"):]))
+                status = public_status(fetch_status(addr, status_port, timeout)) if addr else None
+                if status is not None:
+                    self._send(200, json.dumps(status).encode(), "application/json")
+                    return
+            self._send(404, b"", "text/plain")
 
         def log_message(
             self, *_: object
@@ -559,9 +612,12 @@ def main(argv: list[str] | None = None) -> int:
     threading.Thread(
         target=serve_logs, args=(reg, ("0.0.0.0", args.log_port), stop), daemon=True
     ).start()
-    threading.Thread(target=poll_servers, args=(reg, args, stop), daemon=True).start()
-    server = ThreadingHTTPServer(("0.0.0.0", args.port), make_handler(reg))
-    log.info("로그 UDP :%d, /metrics :%d", args.log_port, args.port)
+    book = ServerBook()
+    threading.Thread(target=poll_servers, args=(reg, args, stop, book), daemon=True).start()
+    server = ThreadingHTTPServer(
+        ("0.0.0.0", args.port), make_handler(reg, book, args.status_port, args.timeout)
+    )
+    log.info("로그 UDP :%d, /metrics·/status :%d", args.log_port, args.port)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

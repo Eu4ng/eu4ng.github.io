@@ -2,7 +2,7 @@
 #
 # GPU 데스크톱 전원 컨트롤러(services/ollama/power.py)의 토큰 둘을 만들어 필요한 곳에 넣습니다. 여러 번 실행해도 됩니다.
 #   - control-token: 컨트롤러 → PC 에이전트(windows-agent.ps1 -AutoPower, 제어 포트 /auto·/release·/hint)
-#   - demand-token : 클라이언트 → 컨트롤러(수요 신고 :9112 /demand)
+#   - demand-token : 클라이언트 → 컨트롤러(수요 신고 :9112 /demand, 워크플로 자리 임대 /reserve·/lease)
 # 넣는 곳:
 #   - 원본 ~/.config/gpu-pc-power/tokens.env (없으면 무작위로 만들어 적음)
 #   - 쿠버네티스 Secret ollama/gpu-pc-power (키 control-token, demand-token)

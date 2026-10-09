@@ -37,9 +37,9 @@ permalink: /posts/37/
 다음 항목이 준비되어 있어야 합니다.
 
 - `proxmox-ansible` 저장소, Proxmox API 토큰, 내부망 DNS ([Proxmox에 Ansible로 내부망 DNS 컨테이너 만드는 방법](/posts/41/)). 이 글의 플레이북은 그 글의 CT 템플릿과 변수를 쓰고, 새 CT 의 이름을 내부망 DNS 가 풉니다.
-- 노드가 내부망 DNS 를 쓰는 쿠버네티스 클러스터 ([Proxmox에 Ansible로 kubeadm 쿠버네티스 클러스터 만드는 방법](/posts/46/)). 파드가 CoreDNS 를 거쳐 CT 이름(`ollama-610m.[DOMAIN]` 등)을 풉니다.
+- 노드가 내부망 DNS 를 쓰는 쿠버네티스 클러스터 ([Proxmox에 Ansible로 kubeadm 쿠버네티스 클러스터 만드는 방법](/posts/46/)). 파드가 CoreDNS 를 거쳐 CT 이름(`ollama-780m.[DOMAIN]` 등)을 풉니다.
 - Argo CD 가 GitOps 저장소의 `services/<이름>/` 폴더를 Application 으로 만드는 구성 ([쿠버네티스에 Argo CD 설치하고 GitOps로 서비스 추가하는 방법](/posts/36/))
-- CT 마다 비어 있는 VM ID 와 고정 IP, 가장 큰 모델보다 넉넉한 메모리(여기서는 12GB)와 디스크 40GB
+- CT 마다 비어 있는 VM ID 와 고정 IP, 가장 큰 모델보다 넉넉한 메모리(여기서는 48GB)와 디스크 40GB
 - iGPU CT 를 둘 Proxmox 호스트에 `/dev/dri/renderD128` (호스트에서 `ls /dev/dri` 로 확인)
 
 ## 1. 변수 채우기
@@ -61,7 +61,7 @@ ollama_models: [gemma4:e4b, qwen3.5:9b, glm-ocr]   # 모든 백엔드가 쓸 모
 ollama_models_dir: /srv/ollama-models         # 호스트 마운트 위치이자 CT 안의 경로(OLLAMA_MODELS)
 ollama_models_lv_size: 100g                   # thin LV 라 실제로 쓴 만큼만 차지합니다
 ollama_backends:                              # 메모리: 9B 모델 약 7GB + 64K 컨텍스트 KV 약 2GB. inventory 의 ollama 그룹과 이름이 같아야 함
-  - { name: ollama-610m, pve: pve01, vmid: 212, ip: [OLLAMA_610M_IP], cores: 4,  memory: 12288, disk: 40, gpu: true }
+  # flash_attention: OLLAMA_FLASH_ATTENTION(기본 켬). 켜면 죽는 GPU 만 flash_attention: false 로 끕니다
   - { name: ollama-780m, pve: pve02, vmid: 213, ip: [OLLAMA_780M_IP], cores: 8,  memory: 49152, disk: 40, gpu: true }
 ```
 {: file="group_vars/all.yml" }
@@ -73,20 +73,17 @@ all:
   children:
     ollama:                       # playbooks/ollama.yml 이 만드는 모델 서버 CT (group_vars 의 ollama_backends)
       hosts:
-        ollama-610m:
-          ansible_host: [OLLAMA_610M_IP]
-          ansible_user: root
         ollama-780m:
           ansible_host: [OLLAMA_780M_IP]
           ansible_user: root
 ```
 {: file="inventory.yml" }
 
-- **확인:** `ansible-inventory --graph` 에 `@ollama` 아래 `ollama-610m`, `ollama-780m` 이 보입니다.
+- **확인:** `ansible-inventory --graph` 에 `@ollama` 아래 `ollama-780m` 이 보입니다. CT 를 더 두려면 `ollama_backends` 와 이 그룹에 같은 이름으로 한 줄씩 더합니다.
 
 ## 2. 플레이북 실행
 
-플레이북은 CT 를 정의하고, `gpu: true` 인 CT 에 `/dev/dri/renderD128` 을 넘기고, CT 가 있는 Proxmox 호스트에 모델 저장소를 만들어 CT 마다 바인드 마운트한 뒤, CT 를 켜고 Ollama 를 설치하고 모델을 받습니다. 모델 저장소는 호스트의 thin LV 하나(`pve/ollama-models`)를 `/srv/ollama-models` 에 붙이고 그 안의 `store` 폴더를 같은 호스트의 CT 들이 함께 쓰므로, 모델은 호스트마다 한 번만 받고 디스크도 한 벌만 씁니다. 비특권 CT 의 root 는 호스트에서 uid 100000 이라 `store` 폴더를 그 소유로 만듭니다. Ollama 는 시작할 때 쓰지 않는 blob 과 받는 중인 파일을 지우는데, 함께 쓰는 폴더에서는 다른 CT 가 받는 중인 모델을 깨뜨리므로 `OLLAMA_NOPRUNE=1` 로 끕니다. 바인드 마운트가 있는 CT 는 스냅샷과 다른 노드로의 이전이 안 됩니다. Ollama 는 서비스 설정으로 LAN 에서 요청을 받고(`OLLAMA_HOST=0.0.0.0:11434`), 한 번에 모델 하나(`OLLAMA_MAX_LOADED_MODELS=1`)와 요청 하나(`OLLAMA_NUM_PARALLEL=1`)만 다룹니다. 라우터가 서버마다 요청을 하나씩만 보내는 것과 짝을 이룹니다. AMD iGPU 는 ROCm 지원 밖이라 iGPU CT 는 `mesa-vulkan-drivers` 를 깔고 Vulkan 으로 돌립니다(`OLLAMA_VULKAN=1`, `OLLAMA_IGPU_ENABLE=1`). Vulkan 의 flash attention 에서 `gemma4:e4b` 가 약 750토큰이 넘는 프롬프트마다 죽어 iGPU CT 는 flash attention 을 끕니다(`OLLAMA_FLASH_ATTENTION=0`). 이미 설치된 버전과 받아 둔 모델은 건너뛰므로 여러 번 실행해도 결과가 같습니다.
+플레이북은 CT 를 정의하고, `gpu: true` 인 CT 에 `/dev/dri/renderD128` 을 넘기고, CT 가 있는 Proxmox 호스트에 모델 저장소를 만들어 CT 마다 바인드 마운트한 뒤, CT 를 켜고 Ollama 를 설치하고 모델을 받습니다. 모델 저장소는 호스트의 thin LV 하나(`pve/ollama-models`)를 `/srv/ollama-models` 에 붙이고 그 안의 `store` 폴더를 같은 호스트의 CT 들이 함께 쓰므로, 모델은 호스트마다 한 번만 받고 디스크도 한 벌만 씁니다. 비특권 CT 의 root 는 호스트에서 uid 100000 이라 `store` 폴더를 그 소유로 만듭니다. Ollama 는 시작할 때 쓰지 않는 blob 과 받는 중인 파일을 지우는데, 함께 쓰는 폴더에서는 다른 CT 가 받는 중인 모델을 깨뜨리므로 `OLLAMA_NOPRUNE=1` 로 끕니다. 바인드 마운트가 있는 CT 는 스냅샷과 다른 노드로의 이전이 안 됩니다. Ollama 는 서비스 설정으로 LAN 에서 요청을 받고(`OLLAMA_HOST=0.0.0.0:11434`), 한 번에 모델 하나(`OLLAMA_MAX_LOADED_MODELS=1`)와 요청 하나(`OLLAMA_NUM_PARALLEL=1`)만 다룹니다. 라우터가 서버마다 요청을 하나씩만 보내는 것과 짝을 이룹니다. AMD iGPU 는 ROCm 지원 밖이라 iGPU CT 는 `mesa-vulkan-drivers` 를 깔고 Vulkan 으로 돌립니다(`OLLAMA_VULKAN=1`, `OLLAMA_IGPU_ENABLE=1`). flash attention 은 기본으로 켜고, 켜면 죽는 GPU 만 CT 의 `flash_attention: false` 로 끕니다. Radeon 610M 의 Vulkan 에서는 켜면 `gemma4:e4b` 가 약 750토큰이 넘는 프롬프트마다 죽어 꺼야 했습니다. Radeon 780M 에서는 그 크래시가 없고, 켜면 `gemma4:12b` 의 4K 입력 + 1024 출력 작업이 126.6초에서 82.6초로, 32K 입력 + 512 출력 작업이 360.7초에서 285.5초로 줄었습니다(실측). 새 GPU 에서는 긴 프롬프트로 크래시가 없는지 먼저 확인합니다. 이미 설치된 버전과 받아 둔 모델은 건너뛰므로 여러 번 실행해도 결과가 같습니다.
 
 ```bash
 # 플레이북 내려받기
@@ -269,10 +266,10 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/ollama.yml -o playbook
           {% if backend.gpu %}
           Environment=OLLAMA_VULKAN=1
           Environment=OLLAMA_IGPU_ENABLE=1
-          # Vulkan(RADV, Radeon 610M)의 flash attention 에서 gemma4:e4b 가 약 750토큰을 넘는 프롬프트마다
-          # llama-server 가 'free(): invalid pointer' 로 죽는다(qwen3.5:9b 는 정상). 끄면 gemma4 프롬프트 처리는 82 -> 61~66 tok/s,
-          # qwen3.5:9b 는 26 -> 33 tok/s 로 오히려 빨라졌다(2026-09-29, ollama 0.34.4).
-          Environment=OLLAMA_FLASH_ATTENTION=0
+          # flash attention 은 기본으로 켜고, 문제가 있는 GPU 만 group_vars 의 flash_attention: false 로 끈다. Radeon 780M 에서는 켜는 쪽이
+          # 빠르다(2026-10-09 실측, group_vars 참고). Vulkan(RADV, Radeon 610M)에서는 켜면 gemma4:e4b 가 약 750토큰을 넘는 프롬프트마다
+          # llama-server 가 'free(): invalid pointer' 로 죽었다(2026-09-29, ollama 0.34.4) — 새 GPU 는 긴 프롬프트로 먼저 확인한다.
+          Environment=OLLAMA_FLASH_ATTENTION={{ 1 if backend.flash_attention | default(true) else 0 }}
           {% endif %}
       register: override
     - name: 모델 폴더 (호스트 저장소의 바인드 마운트)
@@ -325,13 +322,13 @@ export PROXMOX_HOST=[PROXMOX_IP] PROXMOX_USER=root@pam PROXMOX_TOKEN_ID=ansible 
        PROXMOX_TOKEN_SECRET=$(cat ~/.config/proxmox/token) PROXMOX_VALIDATE_CERTS=false
 ansible-playbook playbooks/ollama.yml
 
-# 새 CT 이름(ollama-610m.[DOMAIN] 등)을 내부망 DNS 에 등록
+# 새 CT 이름(ollama-780m.[DOMAIN] 등)을 내부망 DNS 에 등록
 ansible-playbook playbooks/lan-dns.yml
 ```
 
 ```bash
 # 이름과 API 응답 (아무 PC 에서)
-for h in ollama-610m ollama-780m; do
+for h in ollama-780m; do
   curl -s http://$h.[DOMAIN]:11434/api/tags | grep -o '"name":"[^"]*"'
 done
 ```
@@ -354,7 +351,7 @@ New-NetFirewallRule -DisplayName "Ollama" -Direction Inbound -Protocol TCP -Loca
 
 ```bash
 # 서버마다 생성 속도 재기 (qwen3.5:9b)
-for url in http://[WINPC_IP]:11434 http://ollama-780m.[DOMAIN]:11434 http://ollama-610m.[DOMAIN]:11434; do
+for url in http://[WINPC_IP]:11434 http://ollama-780m.[DOMAIN]:11434; do
   curl -s $url/api/generate -d '{"model":"qwen3.5:9b","prompt":"쿠버네티스를 세 문장으로 설명해 줘","stream":false}' \
     | python3 -c 'import json,sys; r=json.load(sys.stdin); print(sys.argv[1], round(r["eval_count"]/r["eval_duration"]*1e9,1), "tok/s")' $url
 done
@@ -364,7 +361,10 @@ done
 | :--- | :--- | :--- |
 | 윈도우 PC | Radeon 780M | 14 tok/s |
 | `ollama-780m` | Radeon 780M (iGPU) | 14.1 tok/s |
-| `ollama-610m` | Radeon 610M (iGPU) | 5.1 tok/s |
+| `ollama-610m` | Radeon 610M (iGPU) | 5.1 tok/s (2026-10-09 삭제) |
+
+> 처음에는 다른 Proxmox 호스트(Radeon 610M)에도 LXC 를 하나 더 두었습니다. 그런데 생성 속도가 780M 의 1/3 수준이었고, iGPU 가 호스트 RAM 을 빼앗아 같은 호스트의 워커 VM 이 OOM 으로 죽는 일이 있어 2026-10-09 에 뺐습니다. 이 글의 설정은 그 뒤의 구성(LXC 하나 + LAN 의 PC 둘)입니다.
+{: .prompt-info }
 
 - **확인:** 서버마다 `tok/s` 값이 한 줄씩 나옵니다.
 
@@ -394,7 +394,7 @@ curl -fsSL https://eu4ng.github.io/assets/files/ollama/dashboard.json -o service
 > 평소 꺼 두는 GPU 데스크톱을 서버로 넣고 요청이 몰릴 때만 켜려면 [꺼 둔 GPU 데스크톱을 Ollama 라우터에 넣고 요청이 몰릴 때만 WOL로 켜고 끄는 방법](/posts/86/)을 이어서 봅니다. `haproxy.cfg` 의 `pc-custom` 줄이 그 서버입니다.
 {: .prompt-info }
 
-어느 모델이 어느 서버에서 얼마나 쓰였는지는 `metrics.py` 가 셉니다. HAProxy 의 통계 페이지는 서버 단위 누적값뿐이고 파드가 다시 뜨면 0 으로 돌아가므로, 설정의 `log-format` 으로 요청마다 모델·서버·역할·대기열 시간·처리 시간을 key=value 한 줄로 남기고 그 로그를 UDP(`log 127.0.0.1:5514`)로 같은 파드의 `metrics` 컨테이너에도 보냅니다. `metrics.py` 는 이 줄을 받아 Prometheus 카운터·히스토그램으로 내고(`:9100/metrics`), 5초마다 서버마다 `/api/ps` 를 읽어 지금 올라간 모델과 모델이 바뀐 횟수도 냅니다. 같은 주기에 서버의 상태 보고 에이전트(`:11437/status`)를 읽어 러너가 지금 계산 중인지(`ollama_server_working`)와 GPU 사용률도 냅니다 — 라우터가 롤링 재시작되면 진행 중 요청은 옛 파드가 끝까지 쥐지만 HAProxy 지표는 새 파드 것만 남아 '처리 중'이 0 으로 비는데, 서버 쪽 값은 라우터와 무관하게 남습니다. 모델 이름은 `http-buffer-request` 로 받아 둔 본문에서 `json_query` 로 꺼내 변수에 넣고(`txn.model`), 역할은 쓰는 쪽이 붙이는 `X-Wiki-Role` 헤더에서 읽습니다. HAProxy 자체 지표(서버 상태·가중치·처리 중·대기열)는 내장 익스포터(`http-request use-service prometheus-exporter`)가 통계 포트의 `/metrics` 로 냅니다. 응답에는 `X-Ollama-Server` 헤더로 처리한 서버 이름을 붙여, 쓰는 쪽이 토큰 수와 함께 기록할 수 있게 합니다 — 토큰 수·생성 속도·적재 시간은 Ollama 응답 본문에만 있어 라우터가 셀 수 없습니다.
+어느 모델이 어느 서버에서 얼마나 쓰였는지는 `metrics.py` 가 셉니다. HAProxy 의 통계 페이지는 서버 단위 누적값뿐이고 파드가 다시 뜨면 0 으로 돌아가므로, 설정의 `log-format` 으로 요청마다 모델·서버·역할·대기열 시간·처리 시간을 key=value 한 줄로 남기고 그 로그를 UDP(`log 127.0.0.1:5514`)로 같은 파드의 `metrics` 컨테이너에도 보냅니다. `metrics.py` 는 이 줄을 받아 Prometheus 카운터·히스토그램으로 내고(`:9100/metrics`), 5초마다 서버마다 `/api/ps` 를 읽어 지금 올라간 모델과 모델이 바뀐 횟수도 냅니다. 같은 주기에 서버의 상태 보고 에이전트(`:11437/status`)를 읽어 러너가 지금 계산 중인지(`ollama_server_working`)와 GPU 사용률도 냅니다 — 라우터가 롤링 재시작되면 진행 중 요청은 옛 파드가 끝까지 쥐지만 HAProxy 지표는 새 파드 것만 남아 '처리 중'이 0 으로 비는데, 서버 쪽 값은 라우터와 무관하게 남습니다. 같은 포트의 `/status/<서버 이름>` 은 그 서버 에이전트의 상태를 요청 때 바로 읽어 멈춤 판정에 쓰는 칸(`working`·`stuck`·GPU·러너 CPU 사용률)만 JSON 으로 돌려줍니다(모르는 서버나 답이 없으면 404, `/status` 는 전체). 쓰는 쪽은 응답 헤더의 서버 이름으로 라우터에 묻기만 하면 되므로 서버 목록·주소를 따로 들고 있지 않아도 됩니다. 모델 이름은 `http-buffer-request` 로 받아 둔 본문에서 `json_query` 로 꺼내 변수에 넣고(`txn.model`), 역할은 쓰는 쪽이 붙이는 `X-Wiki-Role` 헤더에서 읽습니다. HAProxy 자체 지표(서버 상태·가중치·처리 중·대기열)는 내장 익스포터(`http-request use-service prometheus-exporter`)가 통계 포트의 `/metrics` 로 냅니다. 응답에는 `X-Ollama-Server` 헤더로 처리한 서버 이름을 붙여, 쓰는 쪽이 토큰 수와 함께 기록할 수 있게 합니다 — 토큰 수·생성 속도·적재 시간은 Ollama 응답 본문에만 있어 라우터가 셀 수 없습니다.
 
 <details markdown="1">
 <summary>services/ollama/haproxy.cfg 전문</summary>
@@ -444,7 +444,7 @@ defaults
 frontend ollama
   bind :11434
   # 30B 급 모델(qwen3.8:27b·gemma4:31b·muse-glimmer:30b)은 메모리가 넉넉한 서버(ollama-780m, 48GB CT)로만 보냅니다.
-  # iGPU 메모리는 호스트 메모리에서 잡혀 CT 메모리 한도 밖입니다. 12GB CT 의 ollama-610m 에 gemma4:31b 를 65K 컨텍스트로 올리자
+  # iGPU 메모리는 호스트 메모리에서 잡혀 CT 메모리 한도 밖입니다. 예전에 둔 12GB CT(Radeon 610M)에 gemma4:31b 를 65K 컨텍스트로 올리자
   # 호스트가 26GB 를 빼앗겨 같은 호스트의 쿠버네티스 워커 VM(24GB)이 OOM 으로 죽었습니다. 윈도우 PC(32GB)도 GPU 에 못 올려 CPU 로 느리게 돕니다.
   # 요청 본문은 http-buffer-request 로 이미 다 받아 두므로 model 필드를 볼 수 있습니다. 모델을 더하거나 서버 메모리를 늘리면 여기를 고칩니다.
   acl big_model req.body -m reg -i '"model"\s*:\s*"(qwen3\.8:27b|gemma4:31b|muse-glimmer:30b)'
@@ -465,17 +465,15 @@ backend servers
   default-server check inter 5s fall 2 rise 2 maxconn 1 weight 100 resolvers lan init-addr last,libc,none
   http-response set-header X-Ollama-Server %s   # 어느 서버가 처리했는지 쓰는 쪽에 알립니다(쓰는 쪽이 토큰 수와 함께 기록할 수 있게)
   # LXC 서버도 상태 보고 에이전트(proxmox-ansible templates/ollama/ollama-agent.py, 포트 11435)가 있습니다. GPU 가 멈춰 llama-server 가
-  # 커널 안(D 상태)에 걸리면 ollama 는 /api/version 에 답해 헬스체크를 통과하지만 에이전트가 drain 으로 답합니다(2026-10-06 610m, 14시간
+  # 커널 안(D 상태)에 걸리면 ollama 는 /api/version 에 답해 헬스체크를 통과하지만 에이전트가 drain 으로 답합니다(2026-10-06, 14시간
   # 동안 호출마다 20분씩 매달렸던 일의 재발 방지). 에이전트가 없거나 답이 없으면 헬스체크만 봅니다.
   server pve02-780m ollama-780m.[DOMAIN]:11434 agent-check agent-port 11435 agent-inter 5s
-  # 610m(pve01, 12GB CT)의 iGPU 는 호스트 RAM 을 쓴다. pve01 메모리 예산(VM 고정 34GB + CT·호스트 6GB + iGPU 상한 14GB = 54/60GB,
-  # proxmox-ansible gtt_mb·worker-1 20GB, 2026-10-07)으로 보통 크기(gemma4:12b 약 11GB)까지 받는다. 상한을 넘으면 교착 대신 할당 실패(500)다
-  server pve01-610m ollama-610m.[DOMAIN]:11434 agent-check agent-port 11435 agent-inter 5s
   # 윈도우 PC 는 사용자 데스크톱입니다. 꺼지면 헬스체크로 빠지고, PC 의 상태 보고 스크립트(windows-agent.ps1, 포트 11435)가
   # "drain" 이라고 답하면(Ollama 가 아닌 프로그램이 GPU 를 쓰는 중) 새 요청을 보내지 않습니다. 스크립트가 없거나 답이 없으면 헬스체크만 봅니다.
   server winpc-780m [WINPC_IP]:11434 agent-check agent-port 11435 agent-inter 5s
   # 평소 꺼 두는 GPU 데스크톱(RTX 4080 16GB). 보통 모델은 VRAM 에 다 올라가 iGPU 서버보다 생성 10배·입력 처리 30배 빠릅니다(실측).
-  # OLLAMA_NUM_PARALLEL=2 라 maxconn 2. 꺼져 있으면 헬스체크로 빠지고, 보통 모델 동시 요청이 몰리면 전원 컨트롤러(power.py)가 WOL 로 켭니다.
+  # OLLAMA_NUM_PARALLEL=2 라 maxconn 2. 꺼져 있으면 헬스체크로 빠지지만 대기 서버라 워크플로 자리(전원 컨트롤러 power.py 의 임대)로는
+  # 칩니다. 보통 모델 동시 요청이 몰리거나 자리가 없어 기다리는 요청이 이어지면 전원 컨트롤러가 WOL 로 켭니다.
   # 30B 는 받지 않습니다(big 참고). 에이전트(windows-agent.ps1 -AutoPower)가 게임 등 GPU 사용이나 자동 종료 직전이면 drain 으로 답합니다.
   server pc-custom [GPUPC_IP]:11434 maxconn 2 agent-check agent-port 11435 agent-inter 5s
 
@@ -494,7 +492,7 @@ backend big
   # 생성이 780m 보다 느립니다(실측 1.87 tok/s vs 5.0). 요약처럼 출력이 수천 토큰인 요청은 생성 속도가 결정합니다.
 
 # 모델 확인·조회 전용(/api/tags·/api/version·/api/show·/api/ps). 추론이 아니라 자리(maxconn)를 두지 않습니다.
-# 응답한 서버에 모델이 없으면 멈추는 클라이언트가 있으므로, 라우터로 가는 모델을 모두 가진 서버만 넣습니다.
+# 응답한 서버에 모델이 없으면 멈추는 클라이언트가 있으므로, 라우터로 가는 모델을 모두 가진 서버(LXC)만 넣습니다.
 # 모델을 더하면 이 서버들에 모두 받고, 전원 컨트롤러의 --models 도 고칩니다.
 backend meta
   balance roundrobin
@@ -502,7 +500,6 @@ backend meta
   http-check expect status 200
   default-server check inter 5s fall 2 rise 2 resolvers lan init-addr last,libc,none
   server pve02-780m ollama-780m.[DOMAIN]:11434
-  server pve01-610m ollama-610m.[DOMAIN]:11434
 
 # 통계 페이지(/)와 Prometheus 지표(/metrics — 서버별 상태·가중치·처리 중·대기열·응답 코드. ServiceMonitor 가 긁습니다).
 # 준비 상태 검사가 5초마다 오므로 이 frontend 는 기록하지 않습니다.
@@ -740,6 +737,7 @@ import logging
 import socket
 import sys
 import threading
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -1105,6 +1103,30 @@ def fetch_status(addr: str, port: int, timeout: float) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def public_status(status: dict | None) -> dict | None:
+    """쓰는 쪽(wiki-papers)이 멈춤 판정에 쓰는 칸만 고른다. 윈도우 에이전트의 세션·접속 칸은 내보내지 않는다.
+    `working` 이 불리언이 아니면(빈 객체 포함) 상태를 모르는 것으로 본다 — 쉬고 있다고 오판하지 않게."""
+    if not status or not isinstance(status.get("working"), bool):
+        return None
+    runners = [
+        {"cpu_percent": r["cpu_percent"]}
+        for r in status.get("runners") or []
+        if isinstance(r, dict) and isinstance(r.get("cpu_percent"), (int, float))
+    ]
+    out: dict = {"working": status["working"], "runners": runners}
+    for key in ("stuck", "gpu_busy_percent"):
+        if key in status:
+            out[key] = status[key]
+    return out
+
+
+class ServerBook:
+    """poll_servers 가 마지막으로 읽은 서버 이름 → 주소. HTTP 스레드가 읽으므로 dict 를 통째로 바꿔 끼운다."""
+
+    def __init__(self) -> None:
+        self.addresses: dict[str, str] = {}
+
+
 def update_status(reg: Registry, server: str, status: dict | None) -> None:
     """상태 JSON 을 지표로. 못 읽은 서버는 값을 지워 옛 값이 남지 않게 한다."""
     reg.set("ollama_server_status_up", {"server": server}, 0 if status is None else 1)
@@ -1142,7 +1164,10 @@ def query_agent(address: tuple[str, int], timeout: float) -> dict | None:
 
 
 def poll_servers(
-    reg: Registry, args: argparse.Namespace, stop: threading.Event
+    reg: Registry,
+    args: argparse.Namespace,
+    stop: threading.Event,
+    book: ServerBook | None = None,
 ) -> None:
     runtime = args.socket.rpartition(":")
     address = (runtime[0], int(runtime[2]))
@@ -1154,6 +1179,8 @@ def poll_servers(
         except OSError as exc:
             log.warning("runtime API 에 연결하지 못했다: %s", exc)
             servers = {}
+        if book is not None:
+            book.addresses = servers
         for name, addr in servers.items():
             watcher.update(name, fetch_ps(addr, args.timeout))
             if args.status_port:
@@ -1177,19 +1204,42 @@ def poll_servers(
         stop.wait(args.interval)
 
 
-def make_handler(reg: Registry):
+def make_handler(
+    reg: Registry,
+    book: ServerBook | None = None,
+    status_port: int = 0,
+    timeout: float = 3.0,
+):
+    """`/metrics` 와 `/status[/<서버>]`. 상태는 요청 때 에이전트에서 바로 읽어(캐시 없음) 판정에 쓰는 칸만 준다.
+    쓰는 쪽이 서버 목록·주소를 몰라도 라우터에 서버 이름(X-Ollama-Server)으로 물으면 된다."""
+
     class Handler(BaseHTTPRequestHandler):
-        def do_GET(self) -> None:
-            if self.path.split("?")[0] != "/metrics":
-                self.send_response(404)
-                self.end_headers()
-                return
-            body = reg.render().encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+        def _send(self, code: int, body: bytes, ctype: str) -> None:
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
+        def do_GET(self) -> None:
+            path = self.path.split("?")[0]
+            if path == "/metrics":
+                self._send(200, reg.render().encode(), "text/plain; version=0.0.4; charset=utf-8")
+                return
+            if book is not None and status_port and path == "/status":
+                body = {
+                    name: public_status(fetch_status(addr, status_port, timeout))
+                    for name, addr in book.addresses.items()
+                }
+                self._send(200, json.dumps(body).encode(), "application/json")
+                return
+            if book is not None and status_port and path.startswith("/status/"):
+                addr = book.addresses.get(urllib.parse.unquote(path[len("/status/"):]))
+                status = public_status(fetch_status(addr, status_port, timeout)) if addr else None
+                if status is not None:
+                    self._send(200, json.dumps(status).encode(), "application/json")
+                    return
+            self._send(404, b"", "text/plain")
 
         def log_message(
             self, *_: object
@@ -1278,9 +1328,12 @@ def main(argv: list[str] | None = None) -> int:
     threading.Thread(
         target=serve_logs, args=(reg, ("0.0.0.0", args.log_port), stop), daemon=True
     ).start()
-    threading.Thread(target=poll_servers, args=(reg, args, stop), daemon=True).start()
-    server = ThreadingHTTPServer(("0.0.0.0", args.port), make_handler(reg))
-    log.info("로그 UDP :%d, /metrics :%d", args.log_port, args.port)
+    book = ServerBook()
+    threading.Thread(target=poll_servers, args=(reg, args, stop, book), daemon=True).start()
+    server = ThreadingHTTPServer(
+        ("0.0.0.0", args.port), make_handler(reg, book, args.status_port, args.timeout)
+    )
+    log.info("로그 UDP :%d, /metrics·/status :%d", args.log_port, args.port)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -1458,8 +1511,8 @@ curl -s "http://$IP:8404/;csv" | cut -d, -f1,2,3,5,7,18,37 | grep servers
 
 ```text
 servers,pve02-780m,0,0,1,UP,L7OK
-servers,pve01-610m,0,0,1,UP,L7OK
 servers,winpc-780m,0,0,1,UP,L7OK
+servers,pc-custom,0,0,2,DOWN,L4CON
 servers,BACKEND,0,0,20,UP,
 ```
 
@@ -1477,11 +1530,11 @@ kubectl -n ollama logs deploy/ollama-router -c haproxy | grep servers/
 10.244.7.0:44870 [...] ollama servers/pve02-780m 0/0/0/2/2 200 2414 - - ---- 1/1/0/0/0 0/0 "GET /api/tags HTTP/1.1"
 ```
 
-동시에 요청 세 개를 보내면 세 서버가 하나씩 나눠 받습니다.
+동시에 요청 두 개를 보내면 켜져 있는 두 서버가 하나씩 나눠 받습니다(꺼 둔 GPU 데스크톱은 건너뜁니다).
 
 ```bash
-# 요청 세 개를 동시에 보내기
-for i in 1 2 3; do
+# 요청 두 개를 동시에 보내기
+for i in 1 2; do
   curl -s http://$IP:11434/api/generate -d '{"model":"qwen3.5:9b","prompt":"안녕","stream":false}' -o /dev/null &
 done; wait
 
@@ -1497,7 +1550,7 @@ kubectl -n ollama logs deploy/ollama-router -c weights --tail=1
 ```
 
 ```text
-{"weights": {"pve02-780m": 256, "pve01-610m": 256, "winpc-780m": 256}, "speeds": {"pve02-780m": null, "pve01-610m": null, "winpc-780m": null}}
+{"weights": {"pve02-780m": 256, "winpc-780m": 256, "pc-custom": 256}, "speeds": {"pve02-780m": null, "winpc-780m": null, "pc-custom": null}}
 ```
 
 지표는 두 포트에서 확인합니다. 방금 보낸 요청이 모델·서버별 카운터에 잡혀 있어야 합니다.
@@ -1519,7 +1572,7 @@ Grafana 에서 **Ollama 사용 현황** 대시보드를 엽니다. Prometheus �
 
 클러스터 안의 클라이언트는 `http://ollama.ollama.svc.cluster.local:11434` 하나로 모든 서버를 씁니다.
 
-- **확인:** 통계의 모든 서버가 `UP`, `L7OK` 이고 `slim` 이 1 입니다. 동시에 보낸 세 요청은 `servers/pve02-780m`, `servers/winpc-780m`, `servers/pve01-610m` 으로 모두 다른 서버에 남습니다. 가중치 로그에 서버 이름이 모두 보입니다.
+- **확인:** 켜져 있는 서버가 `UP`, `L7OK` 이고 `slim` 이 1 입니다(꺼 둔 GPU 데스크톱은 `DOWN`, `slim` 2). 동시에 보낸 두 요청은 `servers/pve02-780m`, `servers/winpc-780m` 으로 서로 다른 서버에 남습니다. 가중치 로그에 서버 이름이 모두 보입니다.
 
 ## 마무리
 

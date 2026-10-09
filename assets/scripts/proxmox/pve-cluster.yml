@@ -1,6 +1,7 @@
 # Proxmox 호스트들을 클러스터 하나로 묶습니다. inventory 의 proxmox 그룹이 노드이고, proxmox_primary 에서 클러스터를 만든 뒤 나머지가 합류합니다.
 # 호스트 이름을 inventory 이름(FQDN <이름>.{{ proxmox_domain }})으로 맞추고, apt 저장소를 구독 없는 저장소로 맞춥니다.
 # 노드 이름은 클러스터에 들어간 뒤에는 바꿀 수 없어, 합류 전에 scripts/pve-rename-node.sh 로 바꿉니다(게스트는 켠 채로 둬도 됩니다).
+# 호스트 CPU 주파수 정책(cpu-epp.service: governor·EPP, 값은 group_vars 의 pve_cpu_*)과 재부팅 스크립트도 둡니다.
 # 새 서버는 Proxmox 설치와 root ssh 키 등록(ssh-copy-id)만 해 두고 inventory 에 추가한 뒤 다시 실행합니다. 여러 번 실행해도 됩니다.
 #   ansible-playbook playbooks/pve-cluster.yml
 ---
@@ -31,6 +32,36 @@
         src: ../scripts/pve-rename-node.sh
         dest: /root/pve-rename-node.sh
         mode: "0755"
+    # 호스트 재부팅은 이 스크립트로 한다(멈춘 게스트가 있으면 sysrq 로). 사용법은 스크립트 머리말
+    - name: 재부팅 스크립트
+      ansible.builtin.copy:
+        src: ../scripts/pve-reboot.sh
+        dest: /usr/local/sbin/pve-reboot.sh
+        mode: "0755"
+    # governor 를 먼저 바꿔야 EPP 를 고를 수 있습니다(performance governor 에서는 EPP 가 performance 하나뿐)
+    - name: CPU 주파수 정책 (부팅 때 적용)
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/cpu-epp.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=CPU governor {{ pve_cpu_governor }} + EPP {{ pve_cpu_epp }} for idle power (proxmox-ansible pve-cluster.yml)
+          After=multi-user.target
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/bin/sh -c 'for c in /sys/devices/system/cpu/cpu[0-9]*/cpufreq; do echo {{ pve_cpu_governor }} > $c/scaling_governor; [ -w $c/energy_performance_preference ] && echo {{ pve_cpu_epp }} > $c/energy_performance_preference; done; true'
+
+          [Install]
+          WantedBy=multi-user.target
+      register: cpu_epp_unit
+    - name: CPU 주파수 정책 켜기
+      ansible.builtin.systemd:
+        name: cpu-epp
+        enabled: true
+        state: "{{ 'restarted' if cpu_epp_unit is changed else 'started' }}"
+        daemon_reload: "{{ cpu_epp_unit is changed }}"
     - name: 클러스터 합류 여부
       ansible.builtin.stat:
         path: /etc/pve/corosync.conf
