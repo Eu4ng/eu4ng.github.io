@@ -247,7 +247,7 @@ ansible-galaxy collection install ansible.posix
 
 ## 5. 플레이북 실행
 
-플레이북은 여섯 플레이입니다. 노드 준비(구독 없는 apt 저장소, 호스트 이름), 클러스터 만들기, 합류, Tailscale, QDevice, 확인 순서입니다. 합류와 QDevice 는 이미 되어 있으면 건너뜁니다.
+플레이북은 여섯 플레이입니다. 노드 준비(구독 없는 apt 저장소, 호스트 이름, CPU 절전 정책), 클러스터 만들기, 합류, Tailscale, QDevice, 확인 순서입니다. 합류와 QDevice 는 이미 되어 있으면 건너뜁니다. CPU 절전 정책은 부팅 때 도는 systemd 유닛(`cpu-epp`)으로, amd-pstate-epp 의 governor 를 `powersave`, EPP 를 `balance_performance` 로 둡니다. 부하가 오면 클럭이 바로 오르고, 한가할 때만 내려가 유휴 전력이 줄어듭니다(값은 `group_vars/all.yml` 의 `pve_cpu_governor`·`pve_cpu_epp`).
 
 Tailscale 플레이는 로그인 뒤 두 노드를 서브넷 라우터로 만듭니다. IP 포워딩을 켜고 `tailscale set --advertise-routes` 로 집 LAN 을 광고합니다. 두 노드가 같은 대역을 광고하면 Tailscale 은 한 노드를 주 라우터로 쓰고 다른 노드를 대기로 둡니다. 원격 노드는 LAN 대역으로 가는 응답을 주 라우터로만 보내므로, VM 이 tailnet 으로 보내는 패킷은 자기 Proxmox 노드의 Tailscale IP 로 바꿔([마스커레이드](/posts/68/)) 내보냅니다. 이 규칙은 부팅 때 `tailscaled` 뒤에 적용되도록 systemd 유닛(`tailscale-lan-masquerade`)으로 둡니다.
 
@@ -270,6 +270,7 @@ ansible-playbook playbooks/pve-cluster.yml
 # Proxmox 호스트들을 클러스터 하나로 묶습니다. inventory 의 proxmox 그룹이 노드이고, proxmox_primary 에서 클러스터를 만든 뒤 나머지가 합류합니다.
 # 호스트 이름을 inventory 이름(FQDN <이름>.{{ proxmox_domain }})으로 맞추고, apt 저장소를 구독 없는 저장소로 맞춥니다.
 # 노드 이름은 클러스터에 들어간 뒤에는 바꿀 수 없어, 합류 전에 scripts/pve-rename-node.sh 로 바꿉니다(게스트는 켠 채로 둬도 됩니다).
+# 호스트 CPU 주파수 정책(cpu-epp.service: governor·EPP, 값은 group_vars 의 pve_cpu_*)과 재부팅 스크립트도 둡니다.
 # 새 서버는 Proxmox 설치와 root ssh 키 등록(ssh-copy-id)만 해 두고 inventory 에 추가한 뒤 다시 실행합니다. 여러 번 실행해도 됩니다.
 #   ansible-playbook playbooks/pve-cluster.yml
 ---
@@ -306,6 +307,30 @@ ansible-playbook playbooks/pve-cluster.yml
         src: ../scripts/pve-reboot.sh
         dest: /usr/local/sbin/pve-reboot.sh
         mode: "0755"
+    # governor 를 먼저 바꿔야 EPP 를 고를 수 있습니다(performance governor 에서는 EPP 가 performance 하나뿐)
+    - name: CPU 주파수 정책 (부팅 때 적용)
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/cpu-epp.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=CPU governor {{ pve_cpu_governor }} + EPP {{ pve_cpu_epp }} for idle power (proxmox-ansible pve-cluster.yml)
+          After=multi-user.target
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/bin/sh -c 'for c in /sys/devices/system/cpu/cpu[0-9]*/cpufreq; do echo {{ pve_cpu_governor }} > $c/scaling_governor; [ -w $c/energy_performance_preference ] && echo {{ pve_cpu_epp }} > $c/energy_performance_preference; done; true'
+
+          [Install]
+          WantedBy=multi-user.target
+      register: cpu_epp_unit
+    - name: CPU 주파수 정책 켜기
+      ansible.builtin.systemd:
+        name: cpu-epp
+        enabled: true
+        state: "{{ 'restarted' if cpu_epp_unit is changed else 'started' }}"
+        daemon_reload: "{{ cpu_epp_unit is changed }}"
     - name: 클러스터 합류 여부
       ansible.builtin.stat:
         path: /etc/pve/corosync.conf

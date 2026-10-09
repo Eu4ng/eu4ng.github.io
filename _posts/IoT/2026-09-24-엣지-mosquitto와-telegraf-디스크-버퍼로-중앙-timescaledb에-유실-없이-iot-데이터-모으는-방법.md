@@ -322,6 +322,8 @@ Telegraf 설정 하나를 모든 지역이 공유합니다. 지역 이름과 허
 
 브리지 연결 상태 입력(`zigbee2mqtt/bridge/state`, `homeassistant/status`)은 들어 있습니다. Zigbee2MQTT 나 Home Assistant 자체가 끊기면 그 아래 기기 값이 멈추지만 기기마다 `offline` 이 오지 않으므로, starlark(`bridge_status`)가 기억해 둔 기기마다 `availability` 가 `offline` 인 행을 만듭니다. Zigbee 기기는 기기 정의(`bridge/devices`)에서 배우므로 이 파일만으로 동작하고, Matter 기기는 `hass/…` 입력으로 받은 기기만 기억하므로 Home Assistant 글의 입력을 더하기 전에는 `homeassistant/status` 가 행을 만들지 않습니다.
 
+브로커(Mosquitto) 자신이 내려가면 Last Will 을 낼 곳도 없어 그동안은 아무 행도 생기지 않습니다. 그래서 브로커 가동 시간(`$SYS/broker/uptime`, 10초마다)을 받아, 다시 떴을 때 시작 시각(수신 시각 − 가동 시간)이 앞보다 뒤로 간 것으로 재시작을 알아냅니다. starlark(`broker_status`)가 브로커 기기(`bedroom2-broker-mosquitto`)의 `offline`(마지막으로 살아 있던 시각)·`online`(다시 뜬 시각)과, 그동안 보고가 버려진 Zigbee 기기마다 `offline` 행을 만듭니다. Telegraf 1.38 부터는 `${...}` 만 환경 변수로 바꾸므로 토픽의 `$SYS` 는 그대로 둡니다.
+
 {% raw %}
 ```toml
 # 엣지 Telegraf. env 는 Secret telegraf-credentials(MQTT_USER, MQTT_PASSWORD, LOCAL_PG_PASSWORD, HUB_PG_PASSWORD)와
@@ -446,6 +448,22 @@ Telegraf 설정 하나를 모든 지역이 공유합니다. 지역 이름과 허
   data_format = "value"
   data_type = "string"
 
+# 브로커(Mosquitto) 자신의 가동 시간. 브로커가 내려간 동안은 Last Will 을 낼 곳도 없어 아무 행도 생기지 않으므로,
+# 다시 떴을 때 가동 시간이 줄어든 것으로 재시작을 알아내 아래 starlark(broker_status)가 공백을 행으로 남깁니다.
+#   $SYS/broker/uptime  "<초> seconds". 브로커가 10초마다 냅니다(sys_interval 기본값)
+# 원인(파드 이동·노드 장애 등)은 인프라 사건 수집기(iot/edge/infra-events)가 incidents 테이블에 남깁니다.
+[[inputs.mqtt_consumer]]
+  servers = ["tcp://mosquitto.mosquitto.svc.cluster.local:1883"]
+  topics = ["$SYS/broker/uptime"]
+  username = "${MQTT_USER}"
+  password = "${MQTT_PASSWORD}"
+  client_id = "telegraf-broker-sys"
+  qos = 0
+  topic_tag = "topic"
+  name_override = "broker_uptime"
+  data_format = "value"
+  data_type = "string"
+
 # Zigbee2MQTT 로 간 명령(zigbee2mqtt/<기기>/set). HA 를 거치지 않은 MQTT 명령까지 남습니다. 명령의 필드 하나(state, brightness …)가 행 하나이고,
 # property 는 필드 이름, action 은 보낸 값입니다. 보낸 쪽을 알 수 없어 origin 은 mqtt, 시각은 수신 시각입니다.
 [[inputs.mqtt_consumer]]
@@ -475,7 +493,7 @@ Telegraf 설정 하나를 모든 지역이 공유합니다. 지역 이름과 허
 # Zigbee2MQTT 연결 상태 메시지처럼 실물 정보가 없는 메시지에도 기기 정의에서 기억해 둔 hw_id·model·vendor 를 붙입니다.
 # 기기 정의에서는 기기 정보가 바뀐 것만 device_<키> 행으로 냅니다. 제어 기록(events)은 이름만 나누고 필드는 그대로 둡니다(z2m set 은 필드마다 행).
 [[processors.starlark]]
-  namepass = ["readings", "z2m_devices", "events", "host_sensors", "bridge_status"]
+  namepass = ["readings", "z2m_devices", "events", "host_sensors", "bridge_status", "broker_uptime"]
   order = 1
   source = '''
 load("json.star", "json")
@@ -671,6 +689,52 @@ def bridge_status(metric):
         out.append(m)
     return out
 
+# 브로커 자신의 연결 상태(readings 의 availability). 이름은 서버가 놓인 방을 따릅니다(호스트 bedroom2-host-… 와 같음)
+BROKER_DEVICE = "bedroom2-broker-mosquitto"
+BROKER_JITTER = 5                     # 시작 시각(수신 − 가동 시간)은 전달 지연만큼 흔들립니다. 이보다 크게 뒤로 가야 재시작입니다
+BROKER_FRESH = 60                     # Telegraf 가 막 떴을 때 브로커 가동 시간이 이보다 짧으면 브로커도 막 다시 뜬 것으로 봅니다
+
+def availability_row(base, name, protocol, source, t, status, hw={}):
+    m = Metric("readings")
+    m.time = t
+    tags = dict(base)
+    tags.update({"device": name, "protocol": protocol, "source": source, "property": "availability"})
+    for k, v in hw.items():
+        if v != "":
+            tags[k] = v
+    split_name(tags)
+    for k, v in tags.items():
+        m.tags[k] = v
+    set_value(m, status)
+    return m
+
+def broker_status(metric):
+    # 브로커가 다시 뜨면: 마지막으로 살아 있던 시각에 브로커 offline, 다시 뜬 시각에 online,
+    # 그리고 그동안 보고가 버려진 Zigbee 기기마다 offline(마지막 생존 시각)을 만듭니다. Z2M 은 다시 붙으면 기기마다 online 을 알립니다.
+    # 호스트·NVR·날씨는 각자 버퍼·백필로 값이 들어오므로 만들지 않습니다
+    words = metric.fields.get("value", "").strip().split(" ")
+    if not words or not words[0].isdigit():
+        return []
+    seen = metric.time // 1000000000
+    start = seen - int(words[0])
+    prev = state.get("broker")
+    state["broker"] = {"start": start, "seen": seen}
+    base = clean_tags(metric)
+    base.pop("topic", None)
+    if prev == None:
+        if seen - start < BROKER_FRESH:
+            return [availability_row(base, BROKER_DEVICE, "mqtt", "mosquitto", start * 1000000000, "online")]
+        return []
+    if start - prev["start"] <= BROKER_JITTER:
+        return []
+    down = prev["seen"] * 1000000000
+    out = [availability_row(base, BROKER_DEVICE, "mqtt", "mosquitto", down, "offline"),
+           availability_row(base, BROKER_DEVICE, "mqtt", "mosquitto", start * 1000000000, "online")]
+    for name, hw in bridge_devices("z2m").items():
+        if valid_name(name):
+            out.append(availability_row(base, name, "zigbee", "z2m", down, "offline", hw))
+    return out
+
 def event(metric):
     tags = clean_tags(metric)
     if "device" in tags:
@@ -768,6 +832,8 @@ def shape(metric):
         return event(metric)
     if metric.name == "bridge_status":
         return bridge_status(metric)
+    if metric.name == "broker_uptime":
+        return broker_status(metric)
     tags = clean_tags(metric)
     if not valid_name(tags.get("device", "")):
         return []                     # 이름이 없거나(옛 형식의 유지 메시지 등) 이름 규칙에 맞지 않는 기기는 버립니다
