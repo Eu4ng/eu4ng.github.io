@@ -61,8 +61,8 @@ ollama_models: [gemma4:e4b, qwen3.5:9b, glm-ocr]   # 모든 백엔드가 쓸 모
 ollama_models_dir: /srv/ollama-models         # 호스트 마운트 위치이자 CT 안의 경로(OLLAMA_MODELS)
 ollama_models_lv_size: 100g                   # thin LV 라 실제로 쓴 만큼만 차지합니다
 ollama_backends:                              # 메모리: 9B 모델 약 7GB + 64K 컨텍스트 KV 약 2GB. inventory 의 ollama 그룹과 이름이 같아야 함
-  # flash_attention: OLLAMA_FLASH_ATTENTION(기본 끔). GPU 마다 크래시·속도를 확인하고 켭니다
-  - { name: ollama-780m, pve: pve02, vmid: 213, ip: [OLLAMA_780M_IP], cores: 8,  memory: 49152, disk: 40, gpu: true, flash_attention: true }
+  # flash_attention: OLLAMA_FLASH_ATTENTION(기본 켬). 켜면 죽는 GPU 만 flash_attention: false 로 끕니다
+  - { name: ollama-780m, pve: pve02, vmid: 213, ip: [OLLAMA_780M_IP], cores: 8,  memory: 49152, disk: 40, gpu: true }
 ```
 {: file="group_vars/all.yml" }
 
@@ -83,7 +83,7 @@ all:
 
 ## 2. 플레이북 실행
 
-플레이북은 CT 를 정의하고, `gpu: true` 인 CT 에 `/dev/dri/renderD128` 을 넘기고, CT 가 있는 Proxmox 호스트에 모델 저장소를 만들어 CT 마다 바인드 마운트한 뒤, CT 를 켜고 Ollama 를 설치하고 모델을 받습니다. 모델 저장소는 호스트의 thin LV 하나(`pve/ollama-models`)를 `/srv/ollama-models` 에 붙이고 그 안의 `store` 폴더를 같은 호스트의 CT 들이 함께 쓰므로, 모델은 호스트마다 한 번만 받고 디스크도 한 벌만 씁니다. 비특권 CT 의 root 는 호스트에서 uid 100000 이라 `store` 폴더를 그 소유로 만듭니다. Ollama 는 시작할 때 쓰지 않는 blob 과 받는 중인 파일을 지우는데, 함께 쓰는 폴더에서는 다른 CT 가 받는 중인 모델을 깨뜨리므로 `OLLAMA_NOPRUNE=1` 로 끕니다. 바인드 마운트가 있는 CT 는 스냅샷과 다른 노드로의 이전이 안 됩니다. Ollama 는 서비스 설정으로 LAN 에서 요청을 받고(`OLLAMA_HOST=0.0.0.0:11434`), 한 번에 모델 하나(`OLLAMA_MAX_LOADED_MODELS=1`)와 요청 하나(`OLLAMA_NUM_PARALLEL=1`)만 다룹니다. 라우터가 서버마다 요청을 하나씩만 보내는 것과 짝을 이룹니다. AMD iGPU 는 ROCm 지원 밖이라 iGPU CT 는 `mesa-vulkan-drivers` 를 깔고 Vulkan 으로 돌립니다(`OLLAMA_VULKAN=1`, `OLLAMA_IGPU_ENABLE=1`). flash attention 은 CT 마다 `flash_attention` 값으로 정합니다. Radeon 610M 의 Vulkan 에서는 켜면 `gemma4:e4b` 가 약 750토큰이 넘는 프롬프트마다 죽어 꺼야 했습니다. Radeon 780M 에서는 그 크래시가 없고, 켜면 `gemma4:12b` 의 4K 입력 + 1024 출력 작업이 126.6초에서 82.6초로, 32K 입력 + 512 출력 작업이 360.7초에서 285.5초로 줄었습니다(실측). 기본값은 끔이니, 새 GPU 에서는 켜고 긴 프롬프트로 크래시가 없는지 먼저 확인합니다. 이미 설치된 버전과 받아 둔 모델은 건너뛰므로 여러 번 실행해도 결과가 같습니다.
+플레이북은 CT 를 정의하고, `gpu: true` 인 CT 에 `/dev/dri/renderD128` 을 넘기고, CT 가 있는 Proxmox 호스트에 모델 저장소를 만들어 CT 마다 바인드 마운트한 뒤, CT 를 켜고 Ollama 를 설치하고 모델을 받습니다. 모델 저장소는 호스트의 thin LV 하나(`pve/ollama-models`)를 `/srv/ollama-models` 에 붙이고 그 안의 `store` 폴더를 같은 호스트의 CT 들이 함께 쓰므로, 모델은 호스트마다 한 번만 받고 디스크도 한 벌만 씁니다. 비특권 CT 의 root 는 호스트에서 uid 100000 이라 `store` 폴더를 그 소유로 만듭니다. Ollama 는 시작할 때 쓰지 않는 blob 과 받는 중인 파일을 지우는데, 함께 쓰는 폴더에서는 다른 CT 가 받는 중인 모델을 깨뜨리므로 `OLLAMA_NOPRUNE=1` 로 끕니다. 바인드 마운트가 있는 CT 는 스냅샷과 다른 노드로의 이전이 안 됩니다. Ollama 는 서비스 설정으로 LAN 에서 요청을 받고(`OLLAMA_HOST=0.0.0.0:11434`), 한 번에 모델 하나(`OLLAMA_MAX_LOADED_MODELS=1`)와 요청 하나(`OLLAMA_NUM_PARALLEL=1`)만 다룹니다. 라우터가 서버마다 요청을 하나씩만 보내는 것과 짝을 이룹니다. AMD iGPU 는 ROCm 지원 밖이라 iGPU CT 는 `mesa-vulkan-drivers` 를 깔고 Vulkan 으로 돌립니다(`OLLAMA_VULKAN=1`, `OLLAMA_IGPU_ENABLE=1`). flash attention 은 기본으로 켜고, 켜면 죽는 GPU 만 CT 의 `flash_attention: false` 로 끕니다. Radeon 610M 의 Vulkan 에서는 켜면 `gemma4:e4b` 가 약 750토큰이 넘는 프롬프트마다 죽어 꺼야 했습니다. Radeon 780M 에서는 그 크래시가 없고, 켜면 `gemma4:12b` 의 4K 입력 + 1024 출력 작업이 126.6초에서 82.6초로, 32K 입력 + 512 출력 작업이 360.7초에서 285.5초로 줄었습니다(실측). 새 GPU 에서는 긴 프롬프트로 크래시가 없는지 먼저 확인합니다. 이미 설치된 버전과 받아 둔 모델은 건너뛰므로 여러 번 실행해도 결과가 같습니다.
 
 ```bash
 # 플레이북 내려받기
@@ -266,10 +266,10 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/ollama.yml -o playbook
           {% if backend.gpu %}
           Environment=OLLAMA_VULKAN=1
           Environment=OLLAMA_IGPU_ENABLE=1
-          # flash attention 은 서버마다 정한다(group_vars 의 flash_attention, 기본 끔). Vulkan(RADV, Radeon 610M)에서는 켜면 gemma4:e4b 가
-          # 약 750토큰을 넘는 프롬프트마다 llama-server 가 'free(): invalid pointer' 로 죽어 껐다(2026-09-29, ollama 0.34.4).
-          # Radeon 780M 에서는 그 크래시가 없고 켜는 쪽이 빠르다(2026-10-09 실측, group_vars 참고).
-          Environment=OLLAMA_FLASH_ATTENTION={{ 1 if backend.flash_attention | default(false) else 0 }}
+          # flash attention 은 기본으로 켜고, 문제가 있는 GPU 만 group_vars 의 flash_attention: false 로 끈다. Radeon 780M 에서는 켜는 쪽이
+          # 빠르다(2026-10-09 실측, group_vars 참고). Vulkan(RADV, Radeon 610M)에서는 켜면 gemma4:e4b 가 약 750토큰을 넘는 프롬프트마다
+          # llama-server 가 'free(): invalid pointer' 로 죽었다(2026-09-29, ollama 0.34.4) — 새 GPU 는 긴 프롬프트로 먼저 확인한다.
+          Environment=OLLAMA_FLASH_ATTENTION={{ 1 if backend.flash_attention | default(true) else 0 }}
           {% endif %}
       register: override
     - name: 모델 폴더 (호스트 저장소의 바인드 마운트)

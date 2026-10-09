@@ -169,10 +169,10 @@
           {% if backend.gpu %}
           Environment=OLLAMA_VULKAN=1
           Environment=OLLAMA_IGPU_ENABLE=1
-          # flash attention 은 서버마다 정한다(group_vars 의 flash_attention, 기본 끔). Vulkan(RADV, Radeon 610M)에서는 켜면 gemma4:e4b 가
-          # 약 750토큰을 넘는 프롬프트마다 llama-server 가 'free(): invalid pointer' 로 죽어 껐다(2026-09-29, ollama 0.34.4).
-          # Radeon 780M 에서는 그 크래시가 없고 켜는 쪽이 빠르다(2026-10-09 실측, group_vars 참고).
-          Environment=OLLAMA_FLASH_ATTENTION={{ 1 if backend.flash_attention | default(false) else 0 }}
+          # flash attention 은 기본으로 켜고, 문제가 있는 GPU 만 group_vars 의 flash_attention: false 로 끈다. Radeon 780M 에서는 켜는 쪽이
+          # 빠르다(2026-10-09 실측, group_vars 참고). Vulkan(RADV, Radeon 610M)에서는 켜면 gemma4:e4b 가 약 750토큰을 넘는 프롬프트마다
+          # llama-server 가 'free(): invalid pointer' 로 죽었다(2026-09-29, ollama 0.34.4) — 새 GPU 는 긴 프롬프트로 먼저 확인한다.
+          Environment=OLLAMA_FLASH_ATTENTION={{ 1 if backend.flash_attention | default(true) else 0 }}
           {% endif %}
       register: override
     - name: 모델 폴더 (호스트 저장소의 바인드 마운트)
