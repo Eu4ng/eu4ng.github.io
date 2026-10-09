@@ -6,7 +6,8 @@
 # 이 스크립트가 꺼져 있으면 라우터는 헬스체크(Ollama 응답 여부)만 봅니다.
 #
 # 상태 JSON(-StatusPort, 기본 11437, HTTP GET /status)도 냅니다. LXC 모델 서버의 에이전트(proxmox-ansible templates/ollama/ollama-agent.py)와
-# 같은 형식이라, wiki-papers 의 ollama 공급자(config.toml [providers.ollama] status_hosts)가 호출이 조용할 때 "지금 계산 중인가"를 묻습니다.
+# 같은 형식이라, 라우터의 metrics.py 가 서버 이름별로 모아(:9100/status/<서버>, 판정에 쓰는 칸만) wiki-papers 의 ollama 공급자가
+# 호출이 조용할 때 "지금 계산 중인가"를 묻습니다.
 #   {"state","working","runners":[{"pid","name","state","cpu_percent"}],"gpu_busy_percent","stuck":[],"ollama_alive","sampled_at"}
 #   working = 러너 CPU(코어 하나 = 100%) 또는 Ollama 프로세스의 GPU 사용률이 5% 를 넘음. 윈도우에는 D 상태가 없어 stuck 은 늘 빈 목록입니다.
 #   러너(llama-server)는 GPU 의 Compute 엔진을 씁니다(2026-10-07 실측: 생성 중 Compute 96%, 러너 CPU 32%; 쉴 때 둘 다 0).

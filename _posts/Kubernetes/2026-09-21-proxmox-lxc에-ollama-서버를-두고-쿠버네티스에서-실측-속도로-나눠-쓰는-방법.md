@@ -394,7 +394,7 @@ curl -fsSL https://eu4ng.github.io/assets/files/ollama/dashboard.json -o service
 > 평소 꺼 두는 GPU 데스크톱을 서버로 넣고 요청이 몰릴 때만 켜려면 [꺼 둔 GPU 데스크톱을 Ollama 라우터에 넣고 요청이 몰릴 때만 WOL로 켜고 끄는 방법](/posts/86/)을 이어서 봅니다. `haproxy.cfg` 의 `pc-custom` 줄이 그 서버입니다.
 {: .prompt-info }
 
-어느 모델이 어느 서버에서 얼마나 쓰였는지는 `metrics.py` 가 셉니다. HAProxy 의 통계 페이지는 서버 단위 누적값뿐이고 파드가 다시 뜨면 0 으로 돌아가므로, 설정의 `log-format` 으로 요청마다 모델·서버·역할·대기열 시간·처리 시간을 key=value 한 줄로 남기고 그 로그를 UDP(`log 127.0.0.1:5514`)로 같은 파드의 `metrics` 컨테이너에도 보냅니다. `metrics.py` 는 이 줄을 받아 Prometheus 카운터·히스토그램으로 내고(`:9100/metrics`), 5초마다 서버마다 `/api/ps` 를 읽어 지금 올라간 모델과 모델이 바뀐 횟수도 냅니다. 같은 주기에 서버의 상태 보고 에이전트(`:11437/status`)를 읽어 러너가 지금 계산 중인지(`ollama_server_working`)와 GPU 사용률도 냅니다 — 라우터가 롤링 재시작되면 진행 중 요청은 옛 파드가 끝까지 쥐지만 HAProxy 지표는 새 파드 것만 남아 '처리 중'이 0 으로 비는데, 서버 쪽 값은 라우터와 무관하게 남습니다. 모델 이름은 `http-buffer-request` 로 받아 둔 본문에서 `json_query` 로 꺼내 변수에 넣고(`txn.model`), 역할은 쓰는 쪽이 붙이는 `X-Wiki-Role` 헤더에서 읽습니다. HAProxy 자체 지표(서버 상태·가중치·처리 중·대기열)는 내장 익스포터(`http-request use-service prometheus-exporter`)가 통계 포트의 `/metrics` 로 냅니다. 응답에는 `X-Ollama-Server` 헤더로 처리한 서버 이름을 붙여, 쓰는 쪽이 토큰 수와 함께 기록할 수 있게 합니다 — 토큰 수·생성 속도·적재 시간은 Ollama 응답 본문에만 있어 라우터가 셀 수 없습니다.
+어느 모델이 어느 서버에서 얼마나 쓰였는지는 `metrics.py` 가 셉니다. HAProxy 의 통계 페이지는 서버 단위 누적값뿐이고 파드가 다시 뜨면 0 으로 돌아가므로, 설정의 `log-format` 으로 요청마다 모델·서버·역할·대기열 시간·처리 시간을 key=value 한 줄로 남기고 그 로그를 UDP(`log 127.0.0.1:5514`)로 같은 파드의 `metrics` 컨테이너에도 보냅니다. `metrics.py` 는 이 줄을 받아 Prometheus 카운터·히스토그램으로 내고(`:9100/metrics`), 5초마다 서버마다 `/api/ps` 를 읽어 지금 올라간 모델과 모델이 바뀐 횟수도 냅니다. 같은 주기에 서버의 상태 보고 에이전트(`:11437/status`)를 읽어 러너가 지금 계산 중인지(`ollama_server_working`)와 GPU 사용률도 냅니다 — 라우터가 롤링 재시작되면 진행 중 요청은 옛 파드가 끝까지 쥐지만 HAProxy 지표는 새 파드 것만 남아 '처리 중'이 0 으로 비는데, 서버 쪽 값은 라우터와 무관하게 남습니다. 같은 포트의 `/status/<서버 이름>` 은 그 서버 에이전트의 상태를 요청 때 바로 읽어 멈춤 판정에 쓰는 칸(`working`·`stuck`·GPU·러너 CPU 사용률)만 JSON 으로 돌려줍니다(모르는 서버나 답이 없으면 404, `/status` 는 전체). 쓰는 쪽은 응답 헤더의 서버 이름으로 라우터에 묻기만 하면 되므로 서버 목록·주소를 따로 들고 있지 않아도 됩니다. 모델 이름은 `http-buffer-request` 로 받아 둔 본문에서 `json_query` 로 꺼내 변수에 넣고(`txn.model`), 역할은 쓰는 쪽이 붙이는 `X-Wiki-Role` 헤더에서 읽습니다. HAProxy 자체 지표(서버 상태·가중치·처리 중·대기열)는 내장 익스포터(`http-request use-service prometheus-exporter`)가 통계 포트의 `/metrics` 로 냅니다. 응답에는 `X-Ollama-Server` 헤더로 처리한 서버 이름을 붙여, 쓰는 쪽이 토큰 수와 함께 기록할 수 있게 합니다 — 토큰 수·생성 속도·적재 시간은 Ollama 응답 본문에만 있어 라우터가 셀 수 없습니다.
 
 <details markdown="1">
 <summary>services/ollama/haproxy.cfg 전문</summary>
@@ -737,6 +737,7 @@ import logging
 import socket
 import sys
 import threading
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -1102,6 +1103,30 @@ def fetch_status(addr: str, port: int, timeout: float) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def public_status(status: dict | None) -> dict | None:
+    """쓰는 쪽(wiki-papers)이 멈춤 판정에 쓰는 칸만 고른다. 윈도우 에이전트의 세션·접속 칸은 내보내지 않는다.
+    `working` 이 불리언이 아니면(빈 객체 포함) 상태를 모르는 것으로 본다 — 쉬고 있다고 오판하지 않게."""
+    if not status or not isinstance(status.get("working"), bool):
+        return None
+    runners = [
+        {"cpu_percent": r["cpu_percent"]}
+        for r in status.get("runners") or []
+        if isinstance(r, dict) and isinstance(r.get("cpu_percent"), (int, float))
+    ]
+    out: dict = {"working": status["working"], "runners": runners}
+    for key in ("stuck", "gpu_busy_percent"):
+        if key in status:
+            out[key] = status[key]
+    return out
+
+
+class ServerBook:
+    """poll_servers 가 마지막으로 읽은 서버 이름 → 주소. HTTP 스레드가 읽으므로 dict 를 통째로 바꿔 끼운다."""
+
+    def __init__(self) -> None:
+        self.addresses: dict[str, str] = {}
+
+
 def update_status(reg: Registry, server: str, status: dict | None) -> None:
     """상태 JSON 을 지표로. 못 읽은 서버는 값을 지워 옛 값이 남지 않게 한다."""
     reg.set("ollama_server_status_up", {"server": server}, 0 if status is None else 1)
@@ -1139,7 +1164,10 @@ def query_agent(address: tuple[str, int], timeout: float) -> dict | None:
 
 
 def poll_servers(
-    reg: Registry, args: argparse.Namespace, stop: threading.Event
+    reg: Registry,
+    args: argparse.Namespace,
+    stop: threading.Event,
+    book: ServerBook | None = None,
 ) -> None:
     runtime = args.socket.rpartition(":")
     address = (runtime[0], int(runtime[2]))
@@ -1151,6 +1179,8 @@ def poll_servers(
         except OSError as exc:
             log.warning("runtime API 에 연결하지 못했다: %s", exc)
             servers = {}
+        if book is not None:
+            book.addresses = servers
         for name, addr in servers.items():
             watcher.update(name, fetch_ps(addr, args.timeout))
             if args.status_port:
@@ -1174,19 +1204,42 @@ def poll_servers(
         stop.wait(args.interval)
 
 
-def make_handler(reg: Registry):
+def make_handler(
+    reg: Registry,
+    book: ServerBook | None = None,
+    status_port: int = 0,
+    timeout: float = 3.0,
+):
+    """`/metrics` 와 `/status[/<서버>]`. 상태는 요청 때 에이전트에서 바로 읽어(캐시 없음) 판정에 쓰는 칸만 준다.
+    쓰는 쪽이 서버 목록·주소를 몰라도 라우터에 서버 이름(X-Ollama-Server)으로 물으면 된다."""
+
     class Handler(BaseHTTPRequestHandler):
-        def do_GET(self) -> None:
-            if self.path.split("?")[0] != "/metrics":
-                self.send_response(404)
-                self.end_headers()
-                return
-            body = reg.render().encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+        def _send(self, code: int, body: bytes, ctype: str) -> None:
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
+        def do_GET(self) -> None:
+            path = self.path.split("?")[0]
+            if path == "/metrics":
+                self._send(200, reg.render().encode(), "text/plain; version=0.0.4; charset=utf-8")
+                return
+            if book is not None and status_port and path == "/status":
+                body = {
+                    name: public_status(fetch_status(addr, status_port, timeout))
+                    for name, addr in book.addresses.items()
+                }
+                self._send(200, json.dumps(body).encode(), "application/json")
+                return
+            if book is not None and status_port and path.startswith("/status/"):
+                addr = book.addresses.get(urllib.parse.unquote(path[len("/status/"):]))
+                status = public_status(fetch_status(addr, status_port, timeout)) if addr else None
+                if status is not None:
+                    self._send(200, json.dumps(status).encode(), "application/json")
+                    return
+            self._send(404, b"", "text/plain")
 
         def log_message(
             self, *_: object
@@ -1275,9 +1328,12 @@ def main(argv: list[str] | None = None) -> int:
     threading.Thread(
         target=serve_logs, args=(reg, ("0.0.0.0", args.log_port), stop), daemon=True
     ).start()
-    threading.Thread(target=poll_servers, args=(reg, args, stop), daemon=True).start()
-    server = ThreadingHTTPServer(("0.0.0.0", args.port), make_handler(reg))
-    log.info("로그 UDP :%d, /metrics :%d", args.log_port, args.port)
+    book = ServerBook()
+    threading.Thread(target=poll_servers, args=(reg, args, stop, book), daemon=True).start()
+    server = ThreadingHTTPServer(
+        ("0.0.0.0", args.port), make_handler(reg, book, args.status_port, args.timeout)
+    )
+    log.info("로그 UDP :%d, /metrics·/status :%d", args.log_port, args.port)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
