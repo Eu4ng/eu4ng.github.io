@@ -1630,7 +1630,7 @@
     {
       "type": "timeseries",
       "title": "호스트 메모리 사용률",
-      "description": "pve01(server_ms_a2_1)·pve02(server_k12_1) 호스트 Telegraf. iGPU 메모리는 CT 한도 밖이라 호스트에서 빠집니다 — 610m 에 30B 를 올리면 여기서 보입니다.",
+      "description": "pve01(server_ms_a2_1)·pve02(server_k12_1) 호스트 Telegraf. iGPU 메모리는 CT 한도 밖이라 호스트에서 빠집니다(780m 은 pve02).",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "timescaledb"
@@ -1736,7 +1736,7 @@
     {
       "type": "timeseries",
       "title": "벽 전력",
-      "description": "스마트 플러그. server_ms_a2_1=pve01(610m), server_k12_1=pve02(780m), pc_k8_plus_1=윈도우 PC. 서버 전체 전력이라 k8s VM 몫이 섞여 있습니다.",
+      "description": "스마트 플러그. server_ms_a2_1=pve01(예전 610m 서버, 그 전 기록만), server_k12_1=pve02(780m), pc_k8_plus_1=윈도우 PC, pc_custom_1=조립 PC. 서버 전체 전력이라 k8s VM 몫이 섞여 있습니다.",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "timescaledb"

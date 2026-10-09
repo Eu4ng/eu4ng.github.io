@@ -929,7 +929,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "예:\n"
             "  python3 power.py --mac [GPUPC_MAC] --agent-host [GPUPC_IP] --pc-server pc-custom \\\n"
-            "      --models gemma4:12b,qwen3.5:9b --meta-servers pve02-780m,pve01-610m\n"
+            "      --models gemma4:12b,qwen3.5:9b --meta-servers pve02-780m\n"
             "  python3 power.py --mac [GPUPC_MAC] --agent-host [GPUPC_IP] --once --dry-run \\\n"
             "      --stats-url http://ollama.ollama.svc:8404/\\;csv   # 한 번 판단만 출력\n\n"
             "환경 변수: GPU_PC_CONTROL_TOKEN(PC 에이전트 제어), GPU_PC_DEMAND_TOKEN(수요 신고·임대 인증)\n"

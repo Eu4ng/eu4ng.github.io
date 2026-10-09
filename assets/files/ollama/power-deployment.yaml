@@ -68,7 +68,7 @@ spec:
             - --wol-target=255.255.255.255:9
             # meta backend(모델 확인) 서버가 모두 가져야 할 라우터 모델. 모델을 더하면 여기와 haproxy.cfg 의 ACL 도 고친다
             - --models=[ROUTER_MODELS]       # 예: gemma4:12b,qwen3.5:9b,gemma4:31b
-            - --meta-servers=pve02-780m,pve01-610m
+            - --meta-servers=pve02-780m
             # 30B(backend big)는 받지 않는다(--serve-big 없음). 16GB GPU 에서는 30B 가중치가 VRAM 을 넘어 생성이 iGPU 서버보다 느렸다
           env:
             - name: GPU_PC_CONTROL_TOKEN
