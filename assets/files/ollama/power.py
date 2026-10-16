@@ -933,7 +933,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  python3 power.py --mac [GPUPC_MAC] --agent-host [GPUPC_IP] --once --dry-run \\\n"
             "      --stats-url http://ollama.ollama.svc:8404/\\;csv   # 한 번 판단만 출력\n\n"
             "환경 변수: GPU_PC_CONTROL_TOKEN(PC 에이전트 제어), GPU_PC_DEMAND_TOKEN(수요 신고·임대 인증)\n"
-            "HTTP(:9112, --allow 대역만. /metrics·/healthz 는 예외): GET /servers·/leases, POST /demand {id, backend, waiting},\n"
+            "HTTP(:9112, --allow 대역만. /metrics·/healthz·GET /servers 는 예외): GET /servers·/leases, POST /demand {id, backend, waiting},\n"
             "  POST /reserve {run, workflow, backend, want} → {leases, granted, free}, POST /lease/<id>/activate·renew,\n"
             "  DELETE /demand/<id>·/lease/<id> (POST·DELETE 는 Bearer GPU_PC_DEMAND_TOKEN)\n"
             '출력: 판단마다 stdout 에 JSON 한 줄 {"state", "load", "counts", "actions"}\n'
@@ -1335,14 +1335,12 @@ def make_handler(service: Service):
                 self._send(200, service.metrics.render(), "text/plain; version=0.0.4")
             elif self.path == "/healthz":
                 self._send(200, {"ok": True})
-            elif self.path in {"/servers", "/leases"}:
-                if not self._source_ok():
-                    return
-                now = time.time()
-                if self.path == "/servers":
-                    self._send(200, service.servers(now))
-                else:
-                    self._send(200, {"leases": service.leases.summary(now)})
+            elif self.path == "/servers":
+                # 출발지 검사를 하지 않는다: hostNetwork 라 다른 노드의 파드는 SNAT 로 노드 IP 에서 온다(읽기 전용 응답)
+                self._send(200, service.servers(time.time()))
+            elif self.path == "/leases":
+                if self._source_ok():
+                    self._send(200, {"leases": service.leases.summary(time.time())})
             else:
                 self._send(404, {"error": "없음"})
 

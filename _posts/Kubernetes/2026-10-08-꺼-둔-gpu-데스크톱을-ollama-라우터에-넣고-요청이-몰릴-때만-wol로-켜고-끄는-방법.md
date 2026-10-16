@@ -209,7 +209,8 @@ curl -fsSL https://eu4ng.github.io/assets/files/ollama/power-deployment.yaml -o 
 # 서버 등급(GET :9112/servers — PC 는 대기 서버)과 워크플로 자리 임대(POST :9112/reserve, job 마다 하나)도 맡는다.
 # wiki-papers 의 draft·quality 가 임대로 동시 처리 수를 정한다(꺼져 있어도 깨울 수 있는 PC 자리까지 친다).
 # hostNetwork: 매직 패킷을 LAN 브로드캐스트로 내보내야 한다(파드 네트워크에서는 LAN 으로 나가지 않는다). 그래서 노드 포트 9111(지표)·
-# 9112(수요 신고·임대)를 잡는다 — 겹치지 않게 Recreate. 9112 는 토큰과 출발지(파드 대역)로 막는다.
+# 9112(수요 신고·임대)를 잡는다 — 겹치지 않게 Recreate. 9112 의 POST·DELETE·/leases 는 토큰과 출발지(파드 대역)로 막는다.
+# GET /servers 는 읽기 전용이라 연다(다른 노드의 파드는 SNAT 로 노드 IP 에서 온다).
 # 토큰: Secret gpu-pc-power(gpu-pc-power-secret.sh). WOL 을 보낸 시각(부팅 판정 전까지)과 임대는 ConfigMap
 # gpu-pc-power-state 에 남긴다(저장소에 선언하지 않는다 — 운전 상태라 selfHeal 이 되돌리면 안 된다. 없으면 컨트롤러가 만든다).
 apiVersion: v1
@@ -347,7 +348,7 @@ configMapGenerator:
 - `POST /reserve` 에 `{"run": "<실행 id>", "workflow": "<이름>", "backend": "servers", "want": <원하는 수>}` 를 보냅니다. 받은 수만큼 임대 id 가 돌아옵니다.
 - job 이 시작하면 `POST /lease/<id>/activate`, 이어서 60초마다 `POST /lease/<id>/renew` 를 보냅니다. 갓 받은 임대는 30분, 시작한 임대는 갱신마다 5분 삽니다.
 - 끝나면 `DELETE /lease/<id>` 합니다.
-- 대기 서버의 상태는 `GET /servers` 로 봅니다(`wakeable` 이 `false` 면 WOL 실패 뒤 쿨다운 중이라 자리로 치지 않습니다).
+- 대기 서버의 상태는 `GET /servers` 로 봅니다(`wakeable` 이 `false` 면 WOL 실패 뒤 쿨다운 중이라 자리로 치지 않습니다). 이 조회만은 토큰도 출발지 검사도 없습니다. 컨트롤러가 hostNetwork 라 다른 노드의 파드가 부르면 출발지가 SNAT 로 노드 IP 가 되어 파드 대역 검사에 걸리기 때문입니다. 상태를 바꾸는 POST·DELETE 와 `GET /leases` 는 그대로 토큰과 파드 대역으로 막습니다.
 
 ```bash
 # 커밋하고 push
