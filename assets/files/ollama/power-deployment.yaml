@@ -5,7 +5,8 @@
 # 서버 등급(GET :9112/servers — PC 는 대기 서버)과 워크플로 자리 임대(POST :9112/reserve, job 마다 하나)도 맡는다.
 # wiki-papers 의 draft·quality 가 임대로 동시 처리 수를 정한다(꺼져 있어도 깨울 수 있는 PC 자리까지 친다).
 # hostNetwork: 매직 패킷을 LAN 브로드캐스트로 내보내야 한다(파드 네트워크에서는 LAN 으로 나가지 않는다). 그래서 노드 포트 9111(지표)·
-# 9112(수요 신고·임대)를 잡는다 — 겹치지 않게 Recreate. 9112 는 토큰과 출발지(파드 대역)로 막는다.
+# 9112(수요 신고·임대)를 잡는다 — 겹치지 않게 Recreate. 9112 의 POST·DELETE·/leases 는 토큰과 출발지(파드 대역)로 막는다.
+# GET /servers 는 읽기 전용이라 연다(다른 노드의 파드는 SNAT 로 노드 IP 에서 온다).
 # 토큰: Secret gpu-pc-power(gpu-pc-power-secret.sh). WOL 을 보낸 시각(부팅 판정 전까지)과 임대는 ConfigMap
 # gpu-pc-power-state 에 남긴다(저장소에 선언하지 않는다 — 운전 상태라 selfHeal 이 되돌리면 안 된다. 없으면 컨트롤러가 만든다).
 apiVersion: v1
