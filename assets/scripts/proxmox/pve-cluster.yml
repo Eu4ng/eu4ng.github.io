@@ -3,6 +3,8 @@
 # 노드 이름은 클러스터에 들어간 뒤에는 바꿀 수 없어, 합류 전에 scripts/pve-rename-node.sh 로 바꿉니다(게스트는 켠 채로 둬도 됩니다).
 # 호스트 CPU 주파수 정책(cpu-epp.service: governor·EPP, 값은 group_vars 의 pve_cpu_*)과 재부팅 스크립트도 둡니다.
 # 새 서버는 Proxmox 설치와 root ssh 키 등록(ssh-copy-id)만 해 두고 inventory 에 추가한 뒤 다시 실행합니다. 여러 번 실행해도 됩니다.
+# 같은 이름의 노드를 다시 설치했으면(디스크 교체) 먼저 남은 노드에서 scripts/pve-node-rebuild.sh 로 옛 기록을 지웁니다(그 스크립트가 이 플레이북도 부름).
+# 끝에서 pve-controller.yml 을 불러 모든 노드가 다른 노드를 복구할 수 있게 합니다.
 #   ansible-playbook playbooks/pve-cluster.yml
 ---
 - name: 노드 준비
@@ -140,11 +142,16 @@
           ansible.builtin.command: pvecm add {{ primary_ip }} --link0 {{ ansible_host }} --use_ssh
           register: join
           failed_when: "'successfully added node' not in join.stdout"   # 실패해도 종료 코드 0 으로 끝나는 경우가 있어 출력으로 판단합니다
+        # 같은 이름으로 다시 들어온 노드는 옛 인증서·호스트 키 기록과 새 것이 섞이지 않게 클러스터 전체 인증서 목록을 다시 만듭니다
+        - name: 인증서·호스트 키 목록 갱신
+          ansible.builtin.command: pvecm updatecerts
 
 # 원격지(서울 NAS)의 QDevice 에 닿기 위한 사설망. 인증 키는 실행 PC 의 파일에서 읽어 명령에만 넘깁니다(로그에 남기지 않음)
+# 지금은 QDevice·원격 etcd 투표자가 Tailscale 주소라 필수 경로입니다. 한 노드라도 실패하면 멈추고, 다시 실행하면 이어 갑니다
 - name: Tailscale
   hosts: proxmox
   gather_facts: false
+  any_errors_fatal: true
   tasks:
     - name: 저장소 키
       ansible.builtin.get_url:
@@ -173,11 +180,28 @@
       failed_when: false
     # DNS 는 LAN DNS 를 그대로 쓰고(--accept-dns=false), 다른 노드가 광고하는 경로도 받지 않습니다
     - name: 로그인 (안 돼 있을 때만)
-      ansible.builtin.command: >-
-        tailscale up --auth-key={{ lookup('ansible.builtin.file', tailscale_authkey_file) }}
-        --hostname={{ inventory_hostname }} --accept-dns=false --accept-routes=false
-      no_log: true
       when: (ts_status.stdout | default('{}') | from_json).BackendState | default('') != 'Running'
+      block:
+        - name: 인증 키 파일이 있는지
+          ansible.builtin.stat:
+            path: "{{ tailscale_authkey_file }}"
+          delegate_to: localhost
+          register: ts_key
+        - name: 인증 키가 없으면 멈춤
+          ansible.builtin.fail:
+            msg: "Tailscale 인증 키가 없습니다. 재사용 키(tag:homelab)를 {{ tailscale_authkey_file }} (600)에 넣고 다시 실행합니다."
+          when: not ts_key.stat.exists
+        - name: tailscale up
+          ansible.builtin.command: >-
+            tailscale up --auth-key={{ lookup('ansible.builtin.file', tailscale_authkey_file) }}
+            --hostname={{ inventory_hostname }} --accept-dns=false --accept-routes=false --timeout=60s
+          no_log: true
+      rescue:
+        - name: 로그인 실패
+          ansible.builtin.fail:
+            msg: >-
+              {{ inventory_hostname }} 의 Tailscale 로그인에 실패했습니다. 인증 키가 만료·폐기됐으면 새 재사용 키(tag:homelab)를
+              {{ tailscale_authkey_file }} 에 넣고 같은 명령을 다시 실행합니다(출력은 키가 들어 있어 숨김).
     # 두 노드가 집 LAN 을 광고해(HA 서브넷 라우터) 원격 NAS 가 LAN 의 VM 에 닿게 합니다. 경로 승인은 Tailscale 관리 화면(또는 ACL autoApprovers)
     - name: IP 포워딩
       ansible.posix.sysctl:
@@ -221,11 +245,47 @@
     - name: 결과
       ansible.builtin.debug:
         msg: "{{ inventory_hostname }} {{ ts_ip.stdout }}"
+    # 경로 검사는 경고만 냅니다. 다른 노드가 살아 있으면 그쪽 경로로 동작하기 때문입니다
+    - name: tailnet 상태
+      ansible.builtin.command: tailscale status --json
+      register: ts_now
+      changed_when: false
+    - name: 장치 이름·경로 승인 경고
+      ansible.builtin.debug:
+        msg: "{{ item.msg }}"
+      when: item.when
+      loop:
+        - when: "{{ ts_self.DNSName.split('.')[0] != inventory_hostname }}"
+          msg: >-
+            [경고] tailnet 장치 이름이 {{ ts_self.DNSName.split('.')[0] }} 입니다. 같은 이름의 옛 장치({{ inventory_hostname }})가 남아 있으면
+            Tailscale 관리 화면에서 옛 장치를 지우고 이 장치 이름을 {{ inventory_hostname }} 으로 바꿉니다.
+        - when: "{{ tailscale_lan_cidr not in ts_self.AllowedIPs | default([]) }}"
+          msg: >-
+            [경고] 광고한 경로 {{ tailscale_lan_cidr }} 가 아직 승인되지 않았습니다(Tailscale 관리 화면 → 이 장치 → Subnet routes).
+            다른 노드의 경로가 승인돼 있는 동안은 그쪽으로 동작합니다.
+      loop_control: { label: "{{ item.msg[:40] }}" }
+      vars:
+        ts_self: "{{ (ts_now.stdout | from_json).Self }}"
+    - name: qnetd(5403/tcp)에 닿는지
+      ansible.builtin.shell: timeout 5 bash -c '</dev/tcp/{{ pve_qdevice_host }}/5403'
+      register: qnetd_port
+      changed_when: false
+      failed_when: false
+    - name: qnetd 경고
+      ansible.builtin.debug:
+        msg: "[경고] {{ inventory_hostname }} 에서 qnetd {{ pve_qdevice_host }}:5403 에 닿지 않습니다. 서울 NAS 의 Tailscale·qnetd 컨테이너를 확인합니다."
+      when: qnetd_port.rc != 0
 
-# 두 노드 클러스터의 세 번째 표. 한 노드가 꺼져도 남은 노드 + QDevice 로 과반을 유지합니다
+# 두 노드 클러스터의 세 번째 표. 한 노드가 꺼져도 남은 노드 + QDevice 로 과반을 유지합니다.
+# pvecm qdevice setup 은 설정이 이미 있으면 거부하고, qdevice remove 는 모든 노드가 online 이어야 하므로 상태에 따라 나눕니다.
+#   설정 없음 → setup / 있고 모든 노드에서 corosync-qdevice 가 돎 → 그대로 / 있는데 어느 노드에서 안 돎 → 모두 online 이면 remove 뒤 setup,
+#   offline 노드가 있으면 멈춤(같은 이름 노드를 다시 넣을 때는 scripts/pve-node-rebuild.sh 가 미리 remove 해 둡니다)
 - name: QDevice
   hosts: proxmox
   gather_facts: false
+  any_errors_fatal: true
+  vars:
+    primary: "{{ groups.proxmox_primary[0] }}"
   tasks:
     - name: corosync-qdevice
       ansible.builtin.apt:
@@ -241,18 +301,47 @@
             Port {{ pve_qdevice_ssh_port }}
             User root
             StrictHostKeyChecking accept-new
-    - name: qnetd 에 ssh 가 되는지
-      ansible.builtin.command: ssh -o BatchMode=yes {{ pve_qdevice_host }} corosync-qnetd-tool -s
-      changed_when: false
-    - name: QDevice 설정 여부
-      ansible.builtin.command: grep -q 'model:\s*net' /etc/pve/corosync.conf
-      register: qdevice_conf
+    - name: 이 노드의 corosync-qdevice
+      ansible.builtin.command: systemctl is-active corosync-qdevice
+      register: qdevice_active
       changed_when: false
       failed_when: false
-      when: inventory_hostname in groups.proxmox_primary
+    - name: QDevice 설정 여부와 노드 online 상태
+      ansible.builtin.shell: |
+        grep -q 'model:\s*net' /etc/pve/corosync.conf && echo conf=yes || echo conf=no
+        cat /etc/pve/.members
+      register: qdevice_state
+      changed_when: false
+      when: inventory_hostname == primary
+    - name: 할 일 정하기
+      ansible.builtin.set_fact:
+        qdevice_action: >-
+          {%- set conf = 'conf=yes' in qdevice_state.stdout_lines -%}
+          {%- set members = (qdevice_state.stdout_lines[1:] | join('\n') | from_json).nodelist -%}
+          {%- set all_online = members.values() | map(attribute='online') | min == 1 -%}
+          {%- set all_active = ansible_play_hosts_all | map('extract', hostvars, ['qdevice_active', 'stdout']) | unique | list == ['active'] -%}
+          {%- if not conf -%}setup
+          {%- elif all_active -%}keep
+          {%- elif all_online -%}reset
+          {%- else -%}blocked{%- endif -%}
+      when: inventory_hostname == primary
+    - name: offline 노드가 있으면 멈춤
+      ansible.builtin.fail:
+        msg: >-
+          QDevice 설정은 있는데 corosync-qdevice 가 돌지 않는 노드가 있고, offline 노드가 있어 qdevice remove 를 할 수 없습니다.
+          같은 이름의 노드를 다시 설치했으면 남은 노드에서 scripts/pve-node-rebuild.sh 를 먼저 실행합니다.
+      when: inventory_hostname == primary and qdevice_action == 'blocked'
+    # remove 하기 전에 setup 이 될지(qnetd 에 ssh) 먼저 봅니다. 닿지 않는데 지우면 세 번째 표를 잃은 채로 끝납니다
+    - name: qnetd 에 ssh 가 되는지 (setup 하는 노드에서만)
+      ansible.builtin.command: ssh -o BatchMode=yes -o ConnectTimeout=10 {{ pve_qdevice_host }} corosync-qnetd-tool -s
+      changed_when: false
+      when: inventory_hostname == primary and qdevice_action in ['setup', 'reset']
+    - name: QDevice 다시 설정하기 전에 지우기
+      ansible.builtin.command: pvecm qdevice remove
+      when: inventory_hostname == primary and qdevice_action == 'reset'
     - name: QDevice 연결 (모든 노드가 온라인이어야 함)
       ansible.builtin.command: pvecm qdevice setup {{ pve_qdevice_host }}
-      when: inventory_hostname in groups.proxmox_primary and qdevice_conf.rc != 0
+      when: inventory_hostname == primary and qdevice_action in ['setup', 'reset']
 
 - name: 확인
   hosts: proxmox_primary
@@ -272,3 +361,11 @@
     - name: 상태
       ansible.builtin.debug:
         msg: "{{ status.stdout_lines }}"
+    # 설정은 있어도 qnetd 에 닿지 않으면 표가 0 입니다. 이 상태에서 노드 하나가 꺼지면 과반을 잃습니다
+    - name: QDevice 표 경고
+      ansible.builtin.debug:
+        msg: "[경고] QDevice 가 표를 내지 않습니다(qnetd {{ pve_qdevice_host }} 연결 확인). 지금 노드 하나가 꺼지면 과반을 잃습니다."
+      when: status.stdout is search('0x00000000\\s+0\\s+Qdevice')
+
+# 모든 노드가 다른 노드를 복구할 수 있게(저장소·ansible·토큰·키). 복구로 새로 들어온 노드도 여기서 같이 준비됩니다
+- import_playbook: pve-controller.yml

@@ -36,7 +36,7 @@ permalink: /posts/46/
 
 - Proxmox 두 대의 클러스터와 Tailscale 서브넷 라우터 ([Proxmox 두 대를 클러스터로 묶고 원격 NAS에 QDevice 붙이는 방법](/posts/53/)). VM 은 원격지(tailnet)로 가는 패킷을 자기 Proxmox 노드로 보냅니다.
 - `proxmox-ansible` 저장소 골격, API 토큰, 내부망 DNS 플레이북(`playbooks/lan-dns.yml`, `templates/dnsmasq-lan.conf.j2`) ([Proxmox에 Ansible로 내부망 DNS 컨테이너 만드는 방법](/posts/41/)). 클러스터 플레이북이 끝에서 내부망 DNS 플레이북을 다시 실행합니다.
-- 실행 PC 의 SSH 키(`~/.ssh/id_ed25519.pub`)가 `group_vars/all.yml` 의 `ct_ssh_pubkey` 에 들어 있어야 합니다. 이 키가 템플릿에 들어가 복제한 VM 에 Ansible 이 접속합니다.
+- 실행 PC 의 SSH 키(`~/.ssh/id_ed25519.pub`)가 `group_vars/all.yml` 의 `ct_ssh_pubkeys` 목록에 들어 있어야 합니다. 이 키가 템플릿에 들어가 복제한 VM 에 Ansible 이 접속합니다.
 - 노드마다 비어 있는 VM ID 와 고정 IP, 클러스터마다 비어 있는 [VIP](/posts/69/) 하나(LoadBalancer 서비스를 받을 엣지는 서비스 VIP 하나 더). VIP 는 공유기 DHCP 가 나눠 주지 않는 주소로 고릅니다.
 
 ## 1. 변수 채우기
@@ -91,7 +91,9 @@ k8s_clusters:
     kube_vip_services: true                   # LoadBalancer Service 에 VIP 를 줌(service_vip)
     otbr_host: true                           # OpenThread Border Router(hostNetwork)용 커널 설정
     kubeconfig: "{{ lookup('env', 'HOME') }}/.kube/k8s-daejeon.yaml"
-k8s_etcd_peer_sans: [[PVE01_TAILSCALE_IP], [PVE02_TAILSCALE_IP]]   # 원격 etcd 멤버(NAS)가 보는 우리 쪽 주소: Proxmox 노드의 Tailscale IP(마스커레이드)
+# 원격 etcd 멤버(NAS)가 보는 우리 쪽 주소: Proxmox 노드의 Tailscale IP(마스커레이드). 노드를 다시 설치하면 주소가 바뀌므로 고정하지 않고
+# 각 Proxmox 노드에서 `tailscale ip -4` 를 읽습니다(k8s-cluster.yml 의 "Proxmox 노드 Tailscale IP" 작업). Tailscale 이 없는 노드는 빠집니다
+k8s_etcd_peer_sans: "{{ groups.proxmox | map('extract', hostvars) | selectattr('pve_tailscale_ip', 'defined') | map(attribute='pve_tailscale_ip') | select | list }}"
 k8s_vm_cpuunits: 1000                         # 호스트 CPU 가 모자랄 때의 몫(기본 100). 같은 호스트의 다른 CT·VM 이 CPU 를 다 써도 etcd·kubelet 이 밀리지 않게 높게 둠
 k8s_vip_interface: eth0
 k8s_kube_vip_version: v1.2.4                  # https://github.com/kube-vip/kube-vip/releases
@@ -175,7 +177,7 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/vm-template.yml -o pla
             creates: "{{ host_key }}"
         - name: VM 에 넣을 공개키 (실행 PC 키 + 호스트 authorized_keys + 호스트 키)
           ansible.builtin.shell: |
-            { echo '{{ ct_ssh_pubkey }}'; cat /root/.ssh/authorized_keys 2>/dev/null; echo; cat {{ host_key }}.pub; } \
+            { printf '%s\n' {{ ct_ssh_pubkeys | map('quote') | join(' ') }}; cat /root/.ssh/authorized_keys 2>/dev/null; echo; cat {{ host_key }}.pub; } \
               | grep -vE '^\s*(#|$)' | awk '!seen[$0]++' > /tmp/vm-template-keys
           changed_when: false
         - name: 클라우드 이미지 내려받기
@@ -263,6 +265,22 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/tasks/kube-vip.yml -o 
 # 노드 교체: 새 노드를 목록에 더해 합류시킨 뒤, 옛 노드 항목에 retire: true 를 붙여 다시 실행하면 drain → (control plane 은 kubeadm reset 으로
 # etcd 멤버 제거) → 노드 삭제 → VM 삭제 순으로 뺍니다. 다 빠지면 목록에서 지웁니다.
 ---
+# etcd peer 인증서 SAN(group_vars 의 k8s_etcd_peer_sans)이 노드의 지금 Tailscale 주소를 쓰게 읽어 둡니다. 꺼진 노드는 건너뜁니다
+- name: Proxmox 노드 Tailscale IP
+  hosts: proxmox
+  gather_facts: false
+  ignore_unreachable: true
+  tags: [always]
+  tasks:
+    - name: tailscale ip -4
+      ansible.builtin.command: tailscale ip -4
+      register: ts_ip
+      changed_when: false
+      failed_when: false
+    - name: 기록
+      ansible.builtin.set_fact:
+        pve_tailscale_ip: "{{ ts_ip.stdout_lines[0] | default('') if ts_ip.rc == 0 else '' }}"
+
 - name: VM 만들기
   hosts: localhost
   gather_facts: false
@@ -414,6 +432,13 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/tasks/kube-vip.yml -o 
     - name: 시간대
       community.general.timezone:
         name: "{{ timezone }}"
+    # 템플릿으로 넣은 키만으로는 키를 더한 뒤 만든 VM 과 그 전 VM 이 달라집니다. 다른 Proxmox 노드에서 복구 스크립트가 붙을 수 있게 맞춥니다
+    - name: 접속 공개키 (ct_ssh_pubkeys)
+      ansible.posix.authorized_key:
+        user: "{{ ansible_user }}"
+        key: "{{ item }}"
+      loop: "{{ ct_ssh_pubkeys }}"
+      loop_control: { label: "{{ item.split(' ')[-1] }}" }
     - name: swap 끄기 (fstab)
       ansible.builtin.replace:
         path: /etc/fstab

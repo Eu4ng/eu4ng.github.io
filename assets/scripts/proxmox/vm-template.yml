@@ -51,7 +51,7 @@
             creates: "{{ host_key }}"
         - name: VM 에 넣을 공개키 (실행 PC 키 + 호스트 authorized_keys + 호스트 키)
           ansible.builtin.shell: |
-            { echo '{{ ct_ssh_pubkey }}'; cat /root/.ssh/authorized_keys 2>/dev/null; echo; cat {{ host_key }}.pub; } \
+            { printf '%s\n' {{ ct_ssh_pubkeys | map('quote') | join(' ') }}; cat /root/.ssh/authorized_keys 2>/dev/null; echo; cat {{ host_key }}.pub; } \
               | grep -vE '^\s*(#|$)' | awk '!seen[$0]++' > /tmp/vm-template-keys
           changed_when: false
         - name: 클라우드 이미지 내려받기

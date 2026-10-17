@@ -1,0 +1,483 @@
+# 같은 이름으로 다시 설치할 Proxmox 노드(디스크 교체·돌발 장애)의 옛 기록을 지웁니다. 남은 노드에서 실행하며 보통은
+# scripts/pve-node-rebuild.sh 가 점검(옛 노드 격리, offline, 게스트 목록)을 마친 뒤 부릅니다. 직접 부를 때는 그 점검을 대신하지 않습니다.
+#   ansible-playbook playbooks/node-rebuild.yml --check -e node=pve02                     지울 대상 목록만 (상태 파일 없이 지금 상태로 계산)
+#   ansible-playbook playbooks/node-rebuild.yml -e node=pve02 -e state=<상태 파일>         정리
+#   ansible-playbook playbooks/node-rebuild.yml -e node=pve02 -e state=<상태 파일> -e phase=after-join   새 VM 합류 뒤 마무리
+#
+# 정리(phase=cleanup, 기본):
+#   k8s(클러스터마다 남은 control plane 에서): 옛 control plane 의 etcd 멤버 제거, Node 삭제, 복제본이 모두 그 노드에 있던 Patroni PVC
+#   (group_vars 의 node_rebuild_recreate_pvcs, 다른 멤버가 Leader 일 때만) 삭제, Longhorn 복제본·노드 기록 삭제.
+#   Proxmox(이 노드에서): pvecm delnode → /etc/pve/nodes/<노드> 를 /root/pve-node-backup/ 으로 → 옛 root 키·호스트 키 줄 제거 →
+#   QDevice 제거(offline 노드가 있으면 remove 가 거부되므로 delnode 뒤에. 다시 합류하면 pve-cluster.yml 이 setup).
+# 마무리(phase=after-join): 새 worker 에 묶인 local-path 경로를 provisioner 와 같은 0777 로 준비하고 그 파드를 한 번 다시 띄운 뒤,
+#   해당 Patroni 멤버가 streaming 이 되는지 보고 안 되면 그 멤버만 reinit 합니다.
+#
+# 처음 실행할 때 지울 대상의 ID(etcd 멤버 ID, Node·PVC UID, Longhorn 노드·복제본 이름과 UID, 옛 키 줄)를 상태 파일의 record 에 저장하고,
+# 다시 실행하면 저장된 ID 와 같은 것만 지웁니다(다시 만든 etcd 멤버·Node 는 ID 가 달라 지우지 않음). 작업마다 done 에 완료를 남기고,
+# 저장된 옛 리소스가 이미 없으면 그 작업은 완료로 칩니다. --check 에서는 아무것도 지우거나 쓰지 않습니다.
+---
+- name: 대상 정하기
+  hosts: localhost
+  gather_facts: false
+  vars:
+    phase: cleanup
+  tasks:
+    - name: 인자 확인
+      ansible.builtin.assert:
+        that:
+          - node is defined
+          - node in groups.proxmox
+          - node not in groups.proxmox_primary
+          - phase in ['cleanup', 'after-join']
+          - phase == 'cleanup' or state is defined
+        fail_msg: >-
+          -e node=<노드> 가 필요합니다. 메인 노드({{ groups.proxmox_primary | join(',') }})는 이 절차로 다시 만들지 못합니다.
+          phase=after-join 은 상태 파일(-e state=)이 있어야 합니다.
+    - name: 상태 파일 읽기
+      ansible.builtin.set_fact:
+        rebuild_state: "{{ (lookup('ansible.builtin.file', state, errors='ignore') or '{}') | from_json if state is defined else {} }}"
+    - name: 클러스터마다 남은 control plane (kubectl 을 돌릴 곳)
+      ansible.builtin.add_host:
+        name: "{{ cp.name }}"
+        groups: [rebuild_cp]
+        ansible_host: "{{ cp.ip }}"
+        ansible_user: "{{ vm_template_user }}"
+        rebuild_cluster: "{{ item.key }}"
+        rebuild_targets: "{{ item.value.nodes | selectattr('pve', 'eq', node) | map(attribute='name') | list }}"
+        rebuild_target_cps: "{{ item.value.nodes | selectattr('pve', 'eq', node) | selectattr('role', 'eq', 'control-plane') | map(attribute='name') | list }}"
+      vars:
+        cp: "{{ item.value.nodes | rejectattr('pve', 'eq', node) | selectattr('role', 'eq', 'control-plane') | first | default({'name': '-'}) }}"
+      loop: "{{ k8s_clusters | dict2items }}"
+      loop_control: { label: "{{ item.key }} → {{ cp.name }}" }
+      when: item.value.nodes | selectattr('pve', 'eq', node) | list | length > 0
+      changed_when: false
+    - name: 남은 control plane 이 없는 클러스터가 있으면 멈춤
+      ansible.builtin.assert:
+        that: "'-' not in groups.rebuild_cp | default([])"
+        fail_msg: "{{ node }} 밖에 control plane 이 없는 클러스터가 있습니다. 이 절차로는 다시 만들 수 없습니다."
+
+- name: k8s 기록과 정리
+  hosts: rebuild_cp
+  become: true
+  gather_facts: false
+  vars:
+    phase: cleanup
+    st: "{{ hostvars.localhost.rebuild_state }}"
+    done: "{{ st.done | default({}) }}"
+    K: kubectl --kubeconfig /etc/kubernetes/admin.conf
+    etcdctl: >-
+      {{ K }} -n kube-system exec etcd-{{ inventory_hostname }} -- etcdctl --endpoints=https://127.0.0.1:2379
+      --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key
+    pat: "{{ node_rebuild_patroni }}"
+    mark: >-
+      flock {{ state | default('') }}.lock sh -c 'jq --arg k "$1" ".done[\$k] = true" {{ state | default('') }} > {{ state | default('') }}.tmp
+      && mv {{ state | default('') }}.tmp {{ state | default('') }}' sh
+  tasks:
+    - name: 이 단계만
+      ansible.builtin.meta: end_host
+      when: phase != 'cleanup'
+
+    # 이름이 아니라 ID 로 지우려고 지금 상태를 읽습니다. PVC 후보는 Longhorn 복제본을 지우기 전에(복제본 위치로) 정합니다
+    - name: 지금 상태 읽기
+      ansible.builtin.shell: |
+        python3 - {{ rebuild_targets | join(',') | quote }} {{ rebuild_target_cps | join(',') | quote }} \
+          {{ (node_rebuild_recreate_pvcs[rebuild_cluster] | default([])) | to_json | quote }} <<'PY'
+        import json, subprocess, sys
+        targets, cps = sys.argv[1].split(","), [x for x in sys.argv[2].split(",") if x]
+        recreate = json.loads(sys.argv[3])
+        K = ["kubectl", "--kubeconfig", "/etc/kubernetes/admin.conf"]
+        def get(*a, ok_missing=False):
+            r = subprocess.run(K + ["get", *a, "-o", "json"], capture_output=True, text=True)
+            if r.returncode and ok_missing:
+                return []
+            r.check_returncode()
+            return json.loads(r.stdout)["items"]
+        etcd = subprocess.run("""{{ etcdctl }} member list""", shell=True, capture_output=True, text=True, check=True).stdout
+        members = [[c.strip() for c in line.split(",")] for line in etcd.splitlines() if line.strip()]
+        lh_nodes = get("-n", "longhorn-system", "nodes.longhorn.io", ok_missing=True)
+        replicas = get("-n", "longhorn-system", "replicas.longhorn.io", ok_missing=True)
+        pvcs = {(p["metadata"]["namespace"], p["metadata"]["name"]): p for p in get("pvc", "-A")}
+        out = {
+            "etcd": [{"id": m[0], "name": m[2], "client": m[4]} for m in members if m[2] in cps],
+            "nodes": [{"name": n["metadata"]["name"], "uid": n["metadata"]["uid"]} for n in get("nodes") if n["metadata"]["name"] in targets],
+            "longhorn_nodes": [{"name": n["metadata"]["name"], "uid": n["metadata"]["uid"]} for n in lh_nodes if n["metadata"]["name"] in targets],
+            "replicas": [{"name": r["metadata"]["name"], "uid": r["metadata"]["uid"], "volume": r["spec"]["volumeName"], "node": r["spec"]["nodeID"]}
+                         for r in replicas if r["spec"].get("nodeID") in targets],
+            "pvc_candidates": [], "local_path": [],
+        }
+        # PVC UID → Longhorn 볼륨 → 복제본(이름·노드). 복제본이 하나 이상이고 모두 대상 노드에 있던 PVC 만 다시 만들 후보
+        for ref in recreate:
+            ns, name = ref.split("/")
+            p = pvcs.get((ns, name))
+            if not p or not p["spec"].get("volumeName"):
+                continue
+            vol = p["spec"]["volumeName"]
+            reps = [{"name": r["metadata"]["name"], "node": r["spec"].get("nodeID")} for r in replicas if r["spec"]["volumeName"] == vol]
+            if reps and all(r["node"] in targets for r in reps):
+                out["pvc_candidates"].append({"namespace": ns, "name": name, "uid": p["metadata"]["uid"], "volume": vol, "replicas": reps})
+        for pv in get("pv"):
+            s = pv["spec"]
+            if s.get("storageClassName") != "local-path" or not s.get("claimRef"):
+                continue
+            node = s["nodeAffinity"]["required"]["nodeSelectorTerms"][0]["matchExpressions"][0]["values"][0]
+            if node in targets:
+                ref = s["claimRef"]
+                out["local_path"].append({"pv": pv["metadata"]["name"], "node": node, "namespace": ref["namespace"], "name": ref["name"],
+                                          "uid": ref.get("uid", ""), "path": (s.get("hostPath") or s.get("local") or {}).get("path", "")})
+        print(json.dumps(out))
+        PY
+      register: current
+      changed_when: false
+      check_mode: false
+    - name: 기록 (처음 실행이면 지금 상태, 아니면 상태 파일의 것)
+      ansible.builtin.set_fact:
+        rec: "{{ st.record.clusters[rebuild_cluster] if (st.record.clusters | default({}))[rebuild_cluster] is defined else current.stdout | from_json }}"
+        rec_saved: "{{ (st.record.clusters | default({}))[rebuild_cluster] is defined }}"
+    - name: 기록을 상태 파일에 저장 (처음 한 번)
+      ansible.builtin.shell: |
+        flock {{ state }}.lock sh -c 'jq --arg c "$1" --argjson r "$2" ".record.clusters[\$c] = \$r" {{ state }} > {{ state }}.tmp && mv {{ state }}.tmp {{ state }}' \
+          sh {{ rebuild_cluster | quote }} {{ rec | to_json | quote }}
+      delegate_to: localhost
+      become: false
+      when: state is defined and not rec_saved
+    - name: 지울 대상
+      ansible.builtin.debug:
+        msg:
+          - "클러스터 {{ rebuild_cluster }} (kubectl: {{ inventory_hostname }}){{ '' if rec_saved else ' — 지금 상태로 계산' }}"
+          - "etcd 멤버: {{ rec.etcd | map(attribute='name') | zip(rec.etcd | map(attribute='id')) | map('join', ' ') | list }}"
+          - "Node: {{ rec.nodes | map(attribute='name') | zip(rec.nodes | map(attribute='uid')) | map('join', ' ') | list }}"
+          - "Longhorn 노드: {{ rec.longhorn_nodes | map(attribute='name') | list }}"
+          - "Longhorn 복제본 {{ rec.replicas | length }}개: {{ rec.replicas | map(attribute='name') | list }}"
+          - "다시 만들 PVC: {{ rec.pvc_candidates | map(attribute='namespace') | zip(rec.pvc_candidates | map(attribute='name')) | map('join', '/') | list }}"
+          - "새 노드에서 경로를 준비할 local-path PVC: {{ rec.local_path | map(attribute='namespace') | zip(rec.local_path | map(attribute='name')) | map('join', '/') | list }}"
+
+    # 살아 있는 멤버는 지우지 않습니다(옛 VM 이 실제로 꺼졌는지 한 번 더 확인)
+    - name: etcd 멤버 제거 (기록된 ID)
+      ansible.builtin.shell: |
+        {{ etcdctl }} member list | grep -q '^{{ item.id }},' || { echo GONE; exit 0; }
+        if {{ etcdctl | replace('--endpoints=https://127.0.0.1:2379', '--endpoints=' ~ item.client) }} --command-timeout=5s endpoint health >/dev/null 2>&1; then
+          echo "etcd 멤버 {{ item.name }}({{ item.id }})가 응답합니다. 옛 VM 이 아직 살아 있어 지우지 않습니다." >&2; exit 1
+        fi
+        {{ etcdctl }} member remove {{ item.id }}
+        echo CHANGED
+      loop: "{{ rec.etcd }}"
+      loop_control: { label: "{{ item.name }} {{ item.id }}" }
+      when: done['k8s/' ~ rebuild_cluster ~ '/etcd/' ~ item.id] is not defined
+      register: etcd_rm
+      changed_when: "'CHANGED' in etcd_rm.stdout"
+    - name: 완료 기록 (etcd)
+      ansible.builtin.command: "{{ mark }} k8s/{{ rebuild_cluster }}/etcd/{{ item.item.id }}"
+      delegate_to: localhost
+      become: false
+      loop: "{{ etcd_rm.results | rejectattr('skipped', 'defined') }}"
+      loop_control: { label: "{{ item.item.name }}" }
+      when: state is defined
+
+    - name: Node 삭제 (기록된 UID 이고 Ready 가 아닐 때만)
+      ansible.builtin.shell: |
+        uid=$({{ K }} get node {{ item.name }} -o jsonpath='{.metadata.uid}' 2>/dev/null || true)
+        [ "$uid" = "{{ item.uid }}" ] || { echo GONE; exit 0; }
+        ready=$({{ K }} get node {{ item.name }} -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')
+        [ "$ready" = True ] && { echo "Node {{ item.name }} 가 Ready 입니다. 옛 VM 이 살아 있어 지우지 않습니다." >&2; exit 1; }
+        {{ K }} delete node {{ item.name }} --wait=true --timeout=120s
+        echo CHANGED
+      loop: "{{ rec.nodes }}"
+      loop_control: { label: "{{ item.name }} {{ item.uid }}" }
+      when: done['k8s/' ~ rebuild_cluster ~ '/node/' ~ item.uid] is not defined
+      register: node_rm
+      changed_when: "'CHANGED' in node_rm.stdout"
+    - name: 완료 기록 (Node)
+      ansible.builtin.command: "{{ mark }} k8s/{{ rebuild_cluster }}/node/{{ item.item.uid }}"
+      delegate_to: localhost
+      become: false
+      loop: "{{ node_rm.results | rejectattr('skipped', 'defined') }}"
+      loop_control: { label: "{{ item.item.name }}" }
+      when: state is defined
+
+    # 복제본이 모두 대상 노드에 있던 Patroni PVC 는 데이터가 남아 있지 않습니다. 지우면 StatefulSet 이 새 PVC 로 다시 만들고
+    # Patroni 가 Leader 에서 다시 받습니다. 지우기 직전에 PVC UID 와 다른 멤버의 Leader·running 을 다시 봅니다. 아니면 멈춥니다
+    - name: Patroni PVC 다시 만들기 (기록된 UID, 다른 멤버가 Leader 일 때만)
+      ansible.builtin.shell: |
+        set -e
+        uid=$({{ K }} -n {{ item.namespace }} get pvc {{ item.name }} -o jsonpath='{.metadata.uid}' 2>/dev/null || true)
+        [ "$uid" = "{{ item.uid }}" ] || { echo GONE; exit 0; }
+        pod={{ item.name | regex_replace('^[^-]+-', '') }}
+        other=$({{ K }} -n {{ item.namespace }} get pods --field-selector=status.phase=Running -o name | sed 's|^pod/||' | grep -vx "$pod" | head -1)
+        [ -n "$other" ] || { echo "{{ item.namespace }} 에 다른 running 파드가 없어 {{ item.name }} 를 지우지 않습니다." >&2; exit 1; }
+        {{ K }} -n {{ item.namespace }} exec "$other" -c {{ pat.container }} -- patronictl -c {{ pat.config }} list -f json \
+          | python3 -c 'import json,sys; m=[x for x in json.load(sys.stdin) if x["Role"]=="Leader" and x["State"]=="running" and x["Member"]!=sys.argv[1]]; sys.exit(0 if m else 1)' "$pod" \
+          || { echo "$pod 말고 running 인 Patroni Leader 가 없어 {{ item.name }} 를 지우지 않습니다." >&2; exit 1; }
+        {{ K }} -n {{ item.namespace }} delete pvc {{ item.name }} --wait=false
+        {{ K }} -n {{ item.namespace }} delete pod "$pod" --ignore-not-found --grace-period=0 --force
+        echo CHANGED
+      loop: "{{ rec.pvc_candidates }}"
+      loop_control: { label: "{{ item.namespace }}/{{ item.name }}" }
+      when: done['k8s/' ~ rebuild_cluster ~ '/pvc/' ~ item.uid] is not defined
+      register: pvc_rm
+      changed_when: "'CHANGED' in pvc_rm.stdout"
+    - name: 완료 기록 (PVC)
+      ansible.builtin.command: "{{ mark }} k8s/{{ rebuild_cluster }}/pvc/{{ item.item.uid }}"
+      delegate_to: localhost
+      become: false
+      loop: "{{ pvc_rm.results | rejectattr('skipped', 'defined') }}"
+      loop_control: { label: "{{ item.item.name }}" }
+      when: state is defined
+
+    # Longhorn 은 사라진 노드의 복제본·노드 기록을 스스로 지우지 않습니다. 복제본을 지우면 남은 노드에 바로 다시 만듭니다
+    - name: Longhorn 복제본 삭제 (기록된 이름·UID)
+      ansible.builtin.shell: |
+        uid=$({{ K }} -n longhorn-system get replicas.longhorn.io {{ item.name }} -o jsonpath='{.metadata.uid}' 2>/dev/null || true)
+        [ "$uid" = "{{ item.uid }}" ] || { echo GONE; exit 0; }
+        {{ K }} -n longhorn-system delete replicas.longhorn.io {{ item.name }}
+        echo CHANGED
+      loop: "{{ rec.replicas }}"
+      loop_control: { label: "{{ item.name }}" }
+      when: done['k8s/' ~ rebuild_cluster ~ '/replica/' ~ item.uid] is not defined
+      register: rep_rm
+      changed_when: "'CHANGED' in rep_rm.stdout"
+    - name: 완료 기록 (복제본)
+      ansible.builtin.command: "{{ mark }} k8s/{{ rebuild_cluster }}/replica/{{ item.item.uid }}"
+      delegate_to: localhost
+      become: false
+      loop: "{{ rep_rm.results | rejectattr('skipped', 'defined') }}"
+      loop_control: { label: "{{ item.item.name }}" }
+      when: state is defined
+    - name: Longhorn 노드 기록 삭제 (기록된 UID)
+      ansible.builtin.shell: |
+        uid=$({{ K }} -n longhorn-system get nodes.longhorn.io {{ item.name }} -o jsonpath='{.metadata.uid}' 2>/dev/null || true)
+        [ "$uid" = "{{ item.uid }}" ] || { echo GONE; exit 0; }
+        {{ K }} -n longhorn-system patch nodes.longhorn.io {{ item.name }} --type merge -p '{"spec":{"allowScheduling":false}}'
+        {{ K }} -n longhorn-system delete nodes.longhorn.io {{ item.name }}
+        echo CHANGED
+      loop: "{{ rec.longhorn_nodes }}"
+      loop_control: { label: "{{ item.name }}" }
+      when: done['k8s/' ~ rebuild_cluster ~ '/longhorn-node/' ~ item.uid] is not defined
+      register: lhn_rm
+      changed_when: "'CHANGED' in lhn_rm.stdout"
+    - name: 완료 기록 (Longhorn 노드)
+      ansible.builtin.command: "{{ mark }} k8s/{{ rebuild_cluster }}/longhorn-node/{{ item.item.uid }}"
+      delegate_to: localhost
+      become: false
+      loop: "{{ lhn_rm.results | rejectattr('skipped', 'defined') }}"
+      loop_control: { label: "{{ item.item.name }}" }
+      when: state is defined
+
+- name: Proxmox 기록과 정리
+  hosts: localhost
+  gather_facts: false
+  vars:
+    phase: cleanup
+    st: "{{ rebuild_state }}"
+    done: "{{ st.done | default({}) }}"
+    mark: >-
+      flock {{ state | default('') }}.lock sh -c 'jq --arg k "$1" ".done[\$k] = true" {{ state | default('') }} > {{ state | default('') }}.tmp
+      && mv {{ state | default('') }}.tmp {{ state | default('') }}' sh
+  tasks:
+    - name: 이 단계만
+      ansible.builtin.meta: end_play
+      when: phase != 'cleanup'
+    - name: 지금 상태 읽기 (옛 링 주소, root 키·호스트 키 줄)
+      ansible.builtin.shell: |
+        python3 - {{ node | quote }} <<'PY'
+        import json, re, sys
+        node = sys.argv[1]
+        conf = open("/etc/pve/corosync.conf").read()
+        m = re.search(r"node\s*\{[^}]*name:\s*%s\s[^}]*\}" % re.escape(node), conf)
+        ring = re.search(r"ring0_addr:\s*(\S+)", m.group(0)).group(1) if m else ""
+        def lines(path, keep):
+            try:
+                return [l for l in open(path).read().splitlines() if l.strip() and keep(l)]
+            except FileNotFoundError:
+                return []
+        auth = lines("/etc/pve/priv/authorized_keys", lambda l: l.split()[-1] == "root@" + node)
+        known = lines("/etc/pve/priv/known_hosts", lambda l: set(l.split()[0].split(",")) & {node, ring} - {""})
+        print(json.dumps({"ring_addr": ring, "authorized_keys": auth, "known_hosts": known}))
+        PY
+      register: current
+      changed_when: false
+      check_mode: false
+    - name: 기록 (처음 실행이면 지금 상태)
+      ansible.builtin.set_fact:
+        rec: "{{ st.record.proxmox if (st.record | default({})).proxmox is defined else current.stdout | from_json }}"
+        rec_saved: "{{ (st.record | default({})).proxmox is defined }}"
+    - name: 기록을 상태 파일에 저장 (처음 한 번)
+      ansible.builtin.shell: |
+        flock {{ state }}.lock sh -c 'jq --argjson r "$1" ".record.proxmox = \$r" {{ state }} > {{ state }}.tmp && mv {{ state }}.tmp {{ state }}' \
+          sh {{ rec | to_json | quote }}
+      when: state is defined and not rec_saved
+    - name: 지울 대상
+      ansible.builtin.debug:
+        msg:
+          - "Proxmox: pvecm delnode {{ node }} (링 주소 {{ rec.ring_addr or '없음 — 이미 빠짐' }}), /etc/pve/nodes/{{ node }} → /root/pve-node-backup/, QDevice 제거"
+          - "옛 root 키 줄: {{ rec.authorized_keys | map('regex_replace', '^(\\S+ \\S{12}).* (\\S+)$', '\\1… \\2') | list }}"
+          - "옛 호스트 키 줄: {{ rec.known_hosts | map('regex_replace', '^(\\S+ \\S+).*$', '\\1') | list }}"
+
+    - name: ① pvecm delnode (offline 일 때만)
+      ansible.builtin.shell: |
+        grep -qE '^\s*name:\s*{{ node }}\s*$' /etc/pve/corosync.conf || { echo GONE; exit 0; }
+        online=$(jq -r '.nodelist["{{ node }}"].online // 0' /etc/pve/.members)
+        [ "$online" = 0 ] || { echo "{{ node }} 가 클러스터에서 online 입니다. 지우지 않습니다." >&2; exit 1; }
+        pvecm delnode {{ node }}
+        echo CHANGED
+      register: delnode
+      changed_when: "'CHANGED' in delnode.stdout"
+      when: done['pve/delnode'] is not defined
+    # 남은 노드 1 + QDevice 표로 과반을 유지해야 합니다. 아니면 /etc/pve 에 쓸 수 없으므로 기대 표를 1 로 낮춥니다
+    - name: ② 과반 확인 (아니면 pvecm expected 1)
+      ansible.builtin.shell: |
+        pvecm status | grep -qE '^Quorate:\s+Yes' && exit 0
+        pvecm expected 1
+        sleep 3
+        pvecm status | grep -qE '^Quorate:\s+Yes' || { echo "과반을 되찾지 못했습니다." >&2; exit 1; }
+        echo CHANGED
+      register: quorum
+      changed_when: "'CHANGED' in quorum.stdout"
+      when: delnode is not skipped
+    - name: 완료 기록 (delnode)
+      ansible.builtin.command: "{{ mark }} pve/delnode"
+      when: state is defined and delnode is not skipped
+    # 다시 합류한 뒤에는(corosync.conf 에 다시 있음) 그 폴더가 새 노드의 것이므로 건드리지 않습니다
+    - name: ③ /etc/pve/nodes/{{ node }} 를 /root/pve-node-backup/ 으로
+      ansible.builtin.shell: |
+        set -e
+        grep -qE '^\s*name:\s*{{ node }}\s*$' /etc/pve/corosync.conf && { echo "다시 합류한 노드라 건너뜀"; exit 0; }
+        [ -d /etc/pve/nodes/{{ node }} ] || { echo GONE; exit 0; }
+        dst=/root/pve-node-backup/{{ node }}-$(date +%Y%m%d-%H%M%S)
+        mkdir -p /root/pve-node-backup
+        cp -a /etc/pve/nodes/{{ node }} "$dst"
+        rm -rf /etc/pve/nodes/{{ node }}
+        echo "CHANGED $dst"
+      register: nodedir
+      changed_when: "'CHANGED' in nodedir.stdout"
+      when: done['pve/nodedir'] is not defined
+    - name: 완료 기록 (노드 폴더)
+      ansible.builtin.command: "{{ mark }} pve/nodedir"
+      when: state is defined and nodedir is not skipped
+    - name: ④ 옛 root 키·호스트 키 줄 제거 (기록된 줄과 똑같은 것만)
+      ansible.builtin.shell: |
+        python3 - {{ item.path }} {{ item.lines | to_json | quote }} <<'PY'
+        import json, sys
+        path, drop = sys.argv[1], set(json.loads(sys.argv[2]))
+        try:
+            old = open(path).read().splitlines()
+        except FileNotFoundError:
+            sys.exit(0)
+        new = [l for l in old if l not in drop]
+        if new != old:
+            open(path, "w").write("\n".join(new) + "\n")
+            print("CHANGED")
+        PY
+      loop:
+        - { path: /etc/pve/priv/authorized_keys, lines: "{{ rec.authorized_keys }}" }
+        - { path: /etc/pve/priv/known_hosts, lines: "{{ rec.known_hosts }}" }
+      loop_control: { label: "{{ item.path }} {{ item.lines | length }}줄" }
+      register: keys
+      changed_when: "'CHANGED' in keys.stdout"
+      when: item.lines | length > 0
+    # remove 는 모든 노드가 online 이어야 하므로 delnode 뒤에야 됩니다
+    - name: ⑤ QDevice 제거 (다시 합류하면 pve-cluster.yml 이 setup)
+      ansible.builtin.shell: |
+        grep -q 'model:\s*net' /etc/pve/corosync.conf || { echo GONE; exit 0; }
+        grep -qE '^\s*name:\s*{{ node }}\s*$' /etc/pve/corosync.conf && { echo "다시 합류한 노드라 건너뜀"; exit 0; }
+        jq -e '[.nodelist[].online] | min == 1' /etc/pve/.members >/dev/null || { echo "offline 노드가 있어 QDevice 를 지울 수 없습니다." >&2; exit 1; }
+        pvecm qdevice remove
+        echo CHANGED
+      register: qdev
+      changed_when: "'CHANGED' in qdev.stdout"
+      when: done['pve/qdevice'] is not defined
+    - name: 완료 기록 (QDevice)
+      ansible.builtin.command: "{{ mark }} pve/qdevice"
+      when: state is defined and qdev is not skipped
+    - name: 정리 뒤 클러스터
+      ansible.builtin.command: pvecm status
+      register: after
+      changed_when: false
+      check_mode: false
+    - name: 결과
+      ansible.builtin.debug:
+        msg: "{{ after.stdout_lines | select('search', 'Quorate|Expected votes|Total votes|Flags') | list }}"
+
+# 새 worker 가 같은 이름으로 합류하면 local-path PV(DirectoryOrCreate)의 경로를 kubelet 이 root 0755 로 먼저 만들어 앱이 쓰지 못합니다.
+# provisioner 의 처음 준비(mkdir -m 0777)와 같게 맞추고 그 파드를 한 번 지워 바로 다시 띄웁니다. 비어 있지 않은 경로는 건드리지 않습니다
+- name: 합류 뒤 마무리 (local-path 경로, Patroni 멤버)
+  hosts: rebuild_cp
+  become: true
+  gather_facts: false
+  vars:
+    phase: cleanup
+    st: "{{ hostvars.localhost.rebuild_state }}"
+    done: "{{ st.done | default({}) }}"
+    rec: "{{ st.record.clusters[rebuild_cluster] | default({}) }}"
+    K: kubectl --kubeconfig /etc/kubernetes/admin.conf
+    pat: "{{ node_rebuild_patroni }}"
+    mark: >-
+      flock {{ state | default('') }}.lock sh -c 'jq --arg k "$1" ".done[\$k] = true" {{ state | default('') }} > {{ state | default('') }}.tmp
+      && mv {{ state | default('') }}.tmp {{ state | default('') }}' sh
+    patroni_pods: >-
+      {{ ((rec.local_path | default([])) + (rec.pvc_candidates | default([])))
+         | selectattr('namespace', 'eq', pat.namespace) | map(attribute='name') | map('regex_replace', '^[^-]+-', '') | unique | list }}
+  tasks:
+    - name: 이 단계만
+      ansible.builtin.meta: end_host
+      when: phase != 'after-join'
+    - name: 새 노드 Ready 대기
+      ansible.builtin.command: "{{ K }} wait --for=condition=Ready node/{{ item }} --timeout=600s"
+      loop: "{{ rebuild_targets }}"
+      changed_when: false
+    - name: local-path 경로 준비 (비어 있으면 0777)
+      ansible.builtin.shell: |
+        set -e
+        p={{ item.path | quote }}
+        if [ -d "$p" ] && [ -n "$(ls -A "$p")" ]; then echo "비어 있지 않음"; exit 0; fi
+        [ -d "$p" ] && [ "$(stat -c %a "$p")" = 777 ] && exit 0
+        mkdir -p "$p"; chmod 0777 "$p"
+        echo CHANGED
+      delegate_to: "{{ item.node }}"           # inventory 의 k8s 그룹(ubuntu@<노드 IP>)
+      loop: "{{ rec.local_path | default([]) }}"
+      loop_control: { label: "{{ item.namespace }}/{{ item.name }} {{ item.node }}" }
+      when: done['k8s/' ~ rebuild_cluster ~ '/local-path/' ~ item.pv] is not defined
+      register: lp
+      changed_when: "'CHANGED' in lp.stdout"
+    - name: 그 PVC 를 쓰는 파드를 한 번 다시 띄움
+      ansible.builtin.shell: |
+        pods=$({{ K }} -n {{ item.item.namespace }} get pods -o json | python3 -c '
+        import json, sys
+        for p in json.load(sys.stdin)["items"]:
+            if any((v.get("persistentVolumeClaim") or {}).get("claimName") == sys.argv[1] for v in p["spec"].get("volumes", [])):
+                print(p["metadata"]["name"])' {{ item.item.name }})
+        for p in $pods; do {{ K }} -n {{ item.item.namespace }} delete pod "$p" --wait=false; echo "CHANGED $p"; done
+      loop: "{{ lp.results | rejectattr('skipped', 'defined') }}"
+      loop_control: { label: "{{ item.item.namespace }}/{{ item.item.name }}" }
+      register: lp_pods
+      changed_when: "'CHANGED' in lp_pods.stdout"
+      when: "'CHANGED' in item.stdout"
+    - name: 완료 기록 (local-path)
+      ansible.builtin.command: "{{ mark }} k8s/{{ rebuild_cluster }}/local-path/{{ item.item.pv }}"
+      delegate_to: localhost
+      become: false
+      loop: "{{ lp.results | rejectattr('skipped', 'defined') }}"
+      loop_control: { label: "{{ item.item.name }}" }
+
+    # 비어 있는 데이터 폴더로 시작한 멤버는 Leader 에서 기본 백업을 받아 streaming 이 됩니다. 10분 안에 안 되면 그 멤버만 reinit
+    - name: Patroni 멤버가 streaming 인지 (10분)
+      ansible.builtin.shell: |
+        for i in $(seq 60); do
+          other=$({{ K }} -n {{ pat.namespace }} get pods --field-selector=status.phase=Running -o name | sed 's|^pod/||' | grep -vx {{ item }} | head -1)
+          st=$({{ K }} -n {{ pat.namespace }} exec "$other" -c {{ pat.container }} -- patronictl -c {{ pat.config }} list -f json 2>/dev/null \
+            | python3 -c 'import json,sys; print(next((m["State"] for m in json.load(sys.stdin) if m["Member"]==sys.argv[1]), ""))' {{ item }} || true)
+          [ "$st" = streaming ] && { echo streaming; exit 0; }
+          sleep 10
+        done
+        echo "not-streaming: $st"
+      loop: "{{ patroni_pods }}"
+      register: streaming
+      changed_when: false
+    - name: streaming 이 아닌 멤버만 reinit
+      ansible.builtin.shell: |
+        other=$({{ K }} -n {{ pat.namespace }} get pods --field-selector=status.phase=Running -o name | sed 's|^pod/||' | grep -vx {{ item.item }} | head -1)
+        {{ K }} -n {{ pat.namespace }} exec "$other" -c {{ pat.container }} -- patronictl -c {{ pat.config }} reinit \
+          $({{ K }} -n {{ pat.namespace }} exec "$other" -c {{ pat.container }} -- patronictl -c {{ pat.config }} list -f json | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["Cluster"])') \
+          {{ item.item }} --force --wait
+      loop: "{{ streaming.results }}"
+      loop_control: { label: "{{ item.item }}" }
+      when: "'not-streaming' in item.stdout"
