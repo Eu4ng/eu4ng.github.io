@@ -8,6 +8,22 @@
 # 노드 교체: 새 노드를 목록에 더해 합류시킨 뒤, 옛 노드 항목에 retire: true 를 붙여 다시 실행하면 drain → (control plane 은 kubeadm reset 으로
 # etcd 멤버 제거) → 노드 삭제 → VM 삭제 순으로 뺍니다. 다 빠지면 목록에서 지웁니다.
 ---
+# etcd peer 인증서 SAN(group_vars 의 k8s_etcd_peer_sans)이 노드의 지금 Tailscale 주소를 쓰게 읽어 둡니다. 꺼진 노드는 건너뜁니다
+- name: Proxmox 노드 Tailscale IP
+  hosts: proxmox
+  gather_facts: false
+  ignore_unreachable: true
+  tags: [always]
+  tasks:
+    - name: tailscale ip -4
+      ansible.builtin.command: tailscale ip -4
+      register: ts_ip
+      changed_when: false
+      failed_when: false
+    - name: 기록
+      ansible.builtin.set_fact:
+        pve_tailscale_ip: "{{ ts_ip.stdout_lines[0] | default('') if ts_ip.rc == 0 else '' }}"
+
 - name: VM 만들기
   hosts: localhost
   gather_facts: false
@@ -27,6 +43,7 @@
       loop: "{{ active }}"
       loop_control: { label: "{{ item.name }}" }
       changed_when: false
+      tags: [always]                      # --tags node-labels 처럼 일부만 돌릴 때도 노드 그룹은 만듭니다
       when: state == 'present'            # 삭제할 때는 뒤의 플레이가 노드에 접속하지 않게 그룹을 비워 둡니다
     - name: 뺄 옛 노드
       ansible.builtin.add_host:
@@ -38,6 +55,7 @@
         node_vmid: "{{ item.vmid }}"
         node_pve: "{{ item.pve | default(proxmox_node) }}"
       loop: "{{ kc.nodes | selectattr('retire', 'defined') | list }}"
+      tags: [always]
       loop_control: { label: "{{ item.name }}" }
       changed_when: false
       when: state == 'present'
@@ -157,6 +175,13 @@
     - name: 시간대
       community.general.timezone:
         name: "{{ timezone }}"
+    # 템플릿으로 넣은 키만으로는 키를 더한 뒤 만든 VM 과 그 전 VM 이 달라집니다. 다른 Proxmox 노드에서 복구 스크립트가 붙을 수 있게 맞춥니다
+    - name: 접속 공개키 (ct_ssh_pubkeys)
+      ansible.posix.authorized_key:
+        user: "{{ ansible_user }}"
+        key: "{{ item }}"
+      loop: "{{ ct_ssh_pubkeys }}"
+      loop_control: { label: "{{ item.split(' ')[-1] }}" }
     - name: swap 끄기 (fstab)
       ansible.builtin.replace:
         path: /etc/fstab
@@ -271,6 +296,7 @@
   hosts: k8s_control_planes
   become: true
   gather_facts: false
+  tags: [always]                  # 읽기만 합니다. 뒤 플레이가 쓰는 k8s_cp 그룹을 만들므로 일부 태그만 돌릴 때도 실행
   tasks:
     - name: admin.conf 가 있는지
       ansible.builtin.stat:
@@ -622,6 +648,26 @@
         timeout: 120
       delegate_to: localhost
       become: false
+
+# 노드마다 VM 이 있는 Proxmox 노드를 라벨로 붙입니다. 배치 정책(k8s-gitops 의 Kyverno prefer-primary-host)이
+# 이 라벨로 메인 서버(pve01) 노드를 고릅니다. 이 플레이만: -e k8s_cluster=<이름> --tags node-labels
+- name: 노드 라벨 (eu4ng.com/pve)
+  hosts: k8s_cp
+  become: true
+  gather_facts: false
+  tags: [node-labels]
+  tasks:
+    - name: eu4ng.com/pve = VM 이 있는 Proxmox 노드
+      ansible.builtin.shell: |
+        K="kubectl --kubeconfig /etc/kubernetes/admin.conf"
+        cur=$($K get node {{ item.name }} -o jsonpath='{.metadata.labels.eu4ng\.com/pve}')
+        [ "$cur" = "{{ item.pve | default(proxmox_node) }}" ] && exit 0
+        $K label node {{ item.name }} eu4ng.com/pve={{ item.pve | default(proxmox_node) }} --overwrite
+        echo CHANGED
+      loop: "{{ kc.nodes | rejectattr('retire', 'defined') | list }}"
+      loop_control: { label: "{{ item.name }}" }
+      register: node_label
+      changed_when: "'CHANGED' in node_label.stdout"
 
 - name: 확인
   hosts: k8s_cp

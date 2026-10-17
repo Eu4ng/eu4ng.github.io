@@ -1,0 +1,119 @@
+# 모든 Proxmox 노드를 "다른 노드를 다시 만들 수 있는 노드"로 준비합니다. 한 노드의 디스크를 바꿔 다시 설치해도
+# 남은 노드에서 scripts/pve-node-rebuild.sh 하나로 복구하려면 그 노드에 저장소·ansible·API 토큰·접속 키가 있어야 합니다.
+#   - GitHub 계정 키(eu4ng@server, 원본은 pve_controller_key_source 의 /root/.ssh/id_ed25519)를 모든 노드에 같은 파일로 둡니다(600).
+#     이 키로 저장소를 받고, 게스트(VM·CT)에도 이 키의 공개키를 넣습니다(group_vars 의 ct_ssh_pubkeys).
+#   - 저장소를 pve_controller_dir 에 받고(이미 있으면 pull), 그 안의 .venv 에 ansible·proxmoxer·컬렉션을 설치합니다.
+#   - 노드별 API 토큰 root@pam!rebuild-<노드> 를 만들어 secret 을 pve_controller_token_file(600)에 둡니다. 파일이 있으면 API 로
+#     유효한지만 보고, 무효이거나 파일이 없는데 같은 이름 토큰이 남아 있으면 지우고 다시 만듭니다.
+#   - 실행 PC 의 Tailscale 인증 키가 있으면 같은 위치로 복사합니다(재구축 때 pve-cluster.yml 이 씀).
+#   - 노드 위 CT 의 root 계정에 ct_ssh_pubkeys 를 더합니다(VM 은 k8s-cluster.yml 이 맞춤).
+# pve-cluster.yml 이 끝에서 이 플레이북을 부르므로, 복구로 새로 들어온 노드도 자동으로 같은 준비가 됩니다. 여러 번 실행해도 됩니다.
+# 계정 키를 노드마다 두는 위험(한 노드가 뚫리면 GitHub 계정과 모든 게스트가 같이 노출)과 대안은 README 의 "노드 재구축" 절.
+#   ansible-playbook playbooks/pve-controller.yml
+---
+- name: 복구 컨트롤러 준비
+  hosts: proxmox
+  gather_facts: false
+  vars:
+    token_id: rebuild-{{ inventory_hostname }}
+  tasks:
+    - name: 패키지 (git, 가상 환경, jq)
+      ansible.builtin.apt:
+        name: [git, python3-venv, jq]
+
+    - name: GitHub 계정 키 읽기 (원본 노드)
+      ansible.builtin.slurp:
+        src: /root/.ssh/id_ed25519
+      delegate_to: "{{ pve_controller_key_source }}"
+      run_once: true
+      register: github_key
+      no_log: true
+    - name: GitHub 계정 키
+      ansible.builtin.copy:
+        dest: /root/.ssh/id_ed25519
+        content: "{{ github_key.content | b64decode }}"
+        mode: "0600"
+      no_log: true
+    - name: GitHub 계정 공개키
+      ansible.builtin.copy:
+        dest: /root/.ssh/id_ed25519.pub
+        content: "{{ ct_ssh_pubkeys | select('search', 'eu4ng@server$') | first }}\n"
+        mode: "0644"
+    - name: github.com 호스트 키 고정
+      ansible.builtin.known_hosts:
+        path: /root/.ssh/known_hosts
+        name: github.com
+        key: "{{ github_ssh_host_key }}"
+
+    - name: 저장소 (없으면 받고, 있으면 main 으로 맞춤)
+      ansible.builtin.git:
+        repo: "{{ pve_controller_repo }}"
+        dest: "{{ pve_controller_dir }}"
+        version: main
+        key_file: /root/.ssh/id_ed25519
+        accept_hostkey: false
+    - name: 가상 환경 (ansible, proxmoxer)
+      ansible.builtin.pip:
+        name: "{{ pve_controller_pip }}"
+        virtualenv: "{{ pve_controller_dir }}/.venv"
+        virtualenv_command: python3 -m venv
+    - name: 컬렉션
+      ansible.builtin.command: "{{ pve_controller_dir }}/.venv/bin/ansible-galaxy collection install -r requirements.yml"
+      args:
+        chdir: "{{ pve_controller_dir }}"
+      register: galaxy
+      changed_when: "'was installed successfully' in galaxy.stdout"
+
+    # 토큰은 /etc/pve/user.cfg 에 클러스터 전체로 남습니다. 노드를 다시 설치하면 파일만 없어지고 토큰 이름은 남아 있으므로 지우고 다시 만듭니다
+    - name: API 토큰 root@pam!{{ token_id }}
+      ansible.builtin.shell: |
+        set -e
+        f={{ pve_controller_token_file }}
+        if [ -s "$f" ]; then
+          code=$(curl -sk -o /dev/null -w '%{http_code}' -H "Authorization: PVEAPIToken=root@pam!{{ token_id }}=$(cat "$f")" \
+            https://127.0.0.1:8006/api2/json/version)
+          [ "$code" = 200 ] && exit 0
+        fi
+        if pveum user token list root@pam --output-format json | jq -e '.[] | select(.tokenid == "{{ token_id }}")' >/dev/null; then
+          pveum user token remove root@pam {{ token_id }}
+        fi
+        secret=$(pveum user token add root@pam {{ token_id }} --privsep 0 --comment 'proxmox-ansible 노드 재구축(pve-controller.yml)' \
+          --output-format json | jq -r .value)
+        install -d -m 0700 "$(dirname "$f")"
+        (umask 077; printf '%s\n' "$secret" > "$f")
+        echo CHANGED
+      register: token
+      changed_when: "'CHANGED' in token.stdout"
+
+    - name: 실행 PC 의 Tailscale 인증 키가 있는지
+      ansible.builtin.stat:
+        path: "{{ tailscale_authkey_file }}"
+      delegate_to: localhost
+      run_once: true
+      register: ts_key
+    - name: Tailscale 인증 키 디렉터리
+      ansible.builtin.file:
+        path: /root/.config/tailscale
+        state: directory
+        mode: "0700"
+      when: ts_key.stat.exists
+    - name: Tailscale 인증 키
+      ansible.builtin.copy:
+        src: "{{ tailscale_authkey_file }}"
+        dest: /root/.config/tailscale/authkey
+        mode: "0600"
+      no_log: true
+      when: ts_key.stat.exists
+
+    # inventory 에 있는 CT(내부망 DNS, 모델 서버) 중 이 노드에서 돌고 있는 것만. 꺼진 CT 는 다음 실행에서 맞춥니다
+    - name: CT root 접속 공개키 (ct_ssh_pubkeys)
+      ansible.builtin.shell: |
+        pct status {{ item.vmid }} 2>/dev/null | grep -q running || { echo SKIP; exit 0; }
+        pct exec {{ item.vmid }} -- sh -c '
+          umask 077; mkdir -p /root/.ssh; f=/root/.ssh/authorized_keys; touch "$f"
+          for k in "$@"; do grep -qxF "$k" "$f" || { printf "%s\n" "$k" >> "$f"; echo CHANGED; }; done' sh \
+          {{ ct_ssh_pubkeys | map('quote') | join(' ') }}
+      register: ct_keys
+      changed_when: "'CHANGED' in ct_keys.stdout"
+      loop: "{{ (lan_dns_instances + ollama_backends) | selectattr('pve', 'eq', inventory_hostname) }}"
+      loop_control: { label: "{{ item.name }}" }

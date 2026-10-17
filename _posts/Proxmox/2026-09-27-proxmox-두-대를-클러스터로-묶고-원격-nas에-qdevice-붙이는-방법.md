@@ -15,6 +15,7 @@ Proxmox 서버를 한 대 더 들여 클러스터로 묶습니다. 노드가 두
 4. 인벤토리와 변수 채우기
 5. 플레이북 실행
 6. 확인
+7. 노드 디스크 교체·재구축
 
 ## 사전 준비
 
@@ -232,6 +233,13 @@ pve_qdevice_host: [NAS_TAILSCALE_IP]          # QDevice(corosync-qnetd) 주소: 
 pve_qdevice_ssh_port: 2222                    # qnetd 컨테이너의 sshd (NAS 의 22 는 DSM). pvecm qdevice setup 이 이 포트로 붙음
 tailscale_lan_cidr: [LAN_CIDR]                # Proxmox 노드가 tailnet 에 광고하는 집 LAN(두 노드가 HA 서브넷 라우터). 원격 NAS 가 LAN 의 VM 에 닿는 경로
 tailscale_authkey_file: "{{ lookup('env', 'HOME') }}/.config/tailscale/authkey"   # 실행 PC 의 Tailscale 재사용 인증 키(태그 tag:homelab)
+# 모든 노드가 다른 노드를 다시 만들 수 있게 준비합니다(playbooks/pve-controller.yml, 7단계)
+pve_controller_repo: git@github.com:[GITHUB_USER]/proxmox-ansible.git   # 노드마다 받는 이 저장소
+pve_controller_dir: /root/proxmox-ansible     # 각 노드의 저장소 사본. 가상 환경은 그 안의 .venv
+pve_controller_key_source: "{{ groups.proxmox_primary[0] }}"   # GitHub 계정 키의 원본 파일이 있는 노드(/root/.ssh/id_ed25519)
+pve_controller_pip: [ansible-core==2.20.1, proxmoxer==2.2.0, requests]   # 실행 PC 와 같은 버전
+pve_controller_token_file: /root/.config/proxmox/token   # 노드별 API 토큰 root@pam!rebuild-<노드> 의 secret
+github_ssh_host_key: "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"   # https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints
 ```
 {: file="group_vars/all.yml" }
 {% endraw %}
@@ -247,7 +255,7 @@ ansible-galaxy collection install ansible.posix
 
 ## 5. 플레이북 실행
 
-플레이북은 여섯 플레이입니다. 노드 준비(구독 없는 apt 저장소, 호스트 이름, CPU 절전 정책), 클러스터 만들기, 합류, Tailscale, QDevice, 확인 순서입니다. 합류와 QDevice 는 이미 되어 있으면 건너뜁니다. CPU 절전 정책은 부팅 때 도는 systemd 유닛(`cpu-epp`)으로, amd-pstate-epp 의 governor 를 `powersave`, EPP 를 `balance_performance` 로 둡니다. 부하가 오면 클럭이 바로 오르고, 한가할 때만 내려가 유휴 전력이 줄어듭니다(값은 `group_vars/all.yml` 의 `pve_cpu_governor`·`pve_cpu_epp`).
+플레이북은 여섯 플레이와 마지막에 불러오는 `pve-controller.yml` 입니다. 노드 준비(구독 없는 apt 저장소, 호스트 이름, CPU 절전 정책), 클러스터 만들기, 합류, Tailscale, QDevice, 확인 순서이고, `pve-controller.yml` 은 모든 노드를 다른 노드를 다시 만들 수 있는 노드로 준비합니다(7단계). 합류와 QDevice 는 이미 되어 있으면 건너뜁니다. Tailscale 로그인에 실패하면 한 노드라도 거기서 멈추고, 다시 실행하면 이어 갑니다. CPU 절전 정책은 부팅 때 도는 systemd 유닛(`cpu-epp`)으로, amd-pstate-epp 의 governor 를 `powersave`, EPP 를 `balance_performance` 로 둡니다. 부하가 오면 클럭이 바로 오르고, 한가할 때만 내려가 유휴 전력이 줄어듭니다(값은 `group_vars/all.yml` 의 `pve_cpu_governor`·`pve_cpu_epp`).
 
 Tailscale 플레이는 로그인 뒤 두 노드를 서브넷 라우터로 만듭니다. IP 포워딩을 켜고 `tailscale set --advertise-routes` 로 집 LAN 을 광고합니다. 두 노드가 같은 대역을 광고하면 Tailscale 은 한 노드를 주 라우터로 쓰고 다른 노드를 대기로 둡니다. 원격 노드는 LAN 대역으로 가는 응답을 주 라우터로만 보내므로, VM 이 tailnet 으로 보내는 패킷은 자기 Proxmox 노드의 Tailscale IP 로 바꿔([마스커레이드](/posts/68/)) 내보냅니다. 이 규칙은 부팅 때 `tailscaled` 뒤에 적용되도록 systemd 유닛(`tailscale-lan-masquerade`)으로 둡니다.
 
@@ -255,6 +263,7 @@ Tailscale 플레이는 로그인 뒤 두 노드를 서브넷 라우터로 만듭
 # 플레이북과 이름 바꾸기·재부팅 스크립트 내려받기
 mkdir -p scripts
 curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/pve-cluster.yml -o playbooks/pve-cluster.yml
+curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/pve-controller.yml -o playbooks/pve-controller.yml
 curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/pve-rename-node.sh -o scripts/pve-rename-node.sh
 curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/pve-reboot.sh -o scripts/pve-reboot.sh
 
@@ -272,6 +281,8 @@ ansible-playbook playbooks/pve-cluster.yml
 # 노드 이름은 클러스터에 들어간 뒤에는 바꿀 수 없어, 합류 전에 scripts/pve-rename-node.sh 로 바꿉니다(게스트는 켠 채로 둬도 됩니다).
 # 호스트 CPU 주파수 정책(cpu-epp.service: governor·EPP, 값은 group_vars 의 pve_cpu_*)과 재부팅 스크립트도 둡니다.
 # 새 서버는 Proxmox 설치와 root ssh 키 등록(ssh-copy-id)만 해 두고 inventory 에 추가한 뒤 다시 실행합니다. 여러 번 실행해도 됩니다.
+# 같은 이름의 노드를 다시 설치했으면(디스크 교체) 먼저 남은 노드에서 scripts/pve-node-rebuild.sh 로 옛 기록을 지웁니다(그 스크립트가 이 플레이북도 부름).
+# 끝에서 pve-controller.yml 을 불러 모든 노드가 다른 노드를 복구할 수 있게 합니다.
 #   ansible-playbook playbooks/pve-cluster.yml
 ---
 - name: 노드 준비
@@ -409,11 +420,16 @@ ansible-playbook playbooks/pve-cluster.yml
           ansible.builtin.command: pvecm add {{ primary_ip }} --link0 {{ ansible_host }} --use_ssh
           register: join
           failed_when: "'successfully added node' not in join.stdout"   # 실패해도 종료 코드 0 으로 끝나는 경우가 있어 출력으로 판단합니다
+        # 같은 이름으로 다시 들어온 노드는 옛 인증서·호스트 키 기록과 새 것이 섞이지 않게 클러스터 전체 인증서 목록을 다시 만듭니다
+        - name: 인증서·호스트 키 목록 갱신
+          ansible.builtin.command: pvecm updatecerts
 
 # 원격지(서울 NAS)의 QDevice 에 닿기 위한 사설망. 인증 키는 실행 PC 의 파일에서 읽어 명령에만 넘깁니다(로그에 남기지 않음)
+# 지금은 QDevice·원격 etcd 투표자가 Tailscale 주소라 필수 경로입니다. 한 노드라도 실패하면 멈추고, 다시 실행하면 이어 갑니다
 - name: Tailscale
   hosts: proxmox
   gather_facts: false
+  any_errors_fatal: true
   tasks:
     - name: 저장소 키
       ansible.builtin.get_url:
@@ -442,11 +458,28 @@ ansible-playbook playbooks/pve-cluster.yml
       failed_when: false
     # DNS 는 LAN DNS 를 그대로 쓰고(--accept-dns=false), 다른 노드가 광고하는 경로도 받지 않습니다
     - name: 로그인 (안 돼 있을 때만)
-      ansible.builtin.command: >-
-        tailscale up --auth-key={{ lookup('ansible.builtin.file', tailscale_authkey_file) }}
-        --hostname={{ inventory_hostname }} --accept-dns=false --accept-routes=false
-      no_log: true
       when: (ts_status.stdout | default('{}') | from_json).BackendState | default('') != 'Running'
+      block:
+        - name: 인증 키 파일이 있는지
+          ansible.builtin.stat:
+            path: "{{ tailscale_authkey_file }}"
+          delegate_to: localhost
+          register: ts_key
+        - name: 인증 키가 없으면 멈춤
+          ansible.builtin.fail:
+            msg: "Tailscale 인증 키가 없습니다. 재사용 키(tag:homelab)를 {{ tailscale_authkey_file }} (600)에 넣고 다시 실행합니다."
+          when: not ts_key.stat.exists
+        - name: tailscale up
+          ansible.builtin.command: >-
+            tailscale up --auth-key={{ lookup('ansible.builtin.file', tailscale_authkey_file) }}
+            --hostname={{ inventory_hostname }} --accept-dns=false --accept-routes=false --timeout=60s
+          no_log: true
+      rescue:
+        - name: 로그인 실패
+          ansible.builtin.fail:
+            msg: >-
+              {{ inventory_hostname }} 의 Tailscale 로그인에 실패했습니다. 인증 키가 만료·폐기됐으면 새 재사용 키(tag:homelab)를
+              {{ tailscale_authkey_file }} 에 넣고 같은 명령을 다시 실행합니다(출력은 키가 들어 있어 숨김).
     # 두 노드가 집 LAN 을 광고해(HA 서브넷 라우터) 원격 NAS 가 LAN 의 VM 에 닿게 합니다. 경로 승인은 Tailscale 관리 화면(또는 ACL autoApprovers)
     - name: IP 포워딩
       ansible.posix.sysctl:
@@ -490,11 +523,47 @@ ansible-playbook playbooks/pve-cluster.yml
     - name: 결과
       ansible.builtin.debug:
         msg: "{{ inventory_hostname }} {{ ts_ip.stdout }}"
+    # 경로 검사는 경고만 냅니다. 다른 노드가 살아 있으면 그쪽 경로로 동작하기 때문입니다
+    - name: tailnet 상태
+      ansible.builtin.command: tailscale status --json
+      register: ts_now
+      changed_when: false
+    - name: 장치 이름·경로 승인 경고
+      ansible.builtin.debug:
+        msg: "{{ item.msg }}"
+      when: item.when
+      loop:
+        - when: "{{ ts_self.DNSName.split('.')[0] != inventory_hostname }}"
+          msg: >-
+            [경고] tailnet 장치 이름이 {{ ts_self.DNSName.split('.')[0] }} 입니다. 같은 이름의 옛 장치({{ inventory_hostname }})가 남아 있으면
+            Tailscale 관리 화면에서 옛 장치를 지우고 이 장치 이름을 {{ inventory_hostname }} 으로 바꿉니다.
+        - when: "{{ tailscale_lan_cidr not in ts_self.AllowedIPs | default([]) }}"
+          msg: >-
+            [경고] 광고한 경로 {{ tailscale_lan_cidr }} 가 아직 승인되지 않았습니다(Tailscale 관리 화면 → 이 장치 → Subnet routes).
+            다른 노드의 경로가 승인돼 있는 동안은 그쪽으로 동작합니다.
+      loop_control: { label: "{{ item.msg[:40] }}" }
+      vars:
+        ts_self: "{{ (ts_now.stdout | from_json).Self }}"
+    - name: qnetd(5403/tcp)에 닿는지
+      ansible.builtin.shell: timeout 5 bash -c '</dev/tcp/{{ pve_qdevice_host }}/5403'
+      register: qnetd_port
+      changed_when: false
+      failed_when: false
+    - name: qnetd 경고
+      ansible.builtin.debug:
+        msg: "[경고] {{ inventory_hostname }} 에서 qnetd {{ pve_qdevice_host }}:5403 에 닿지 않습니다. 서울 NAS 의 Tailscale·qnetd 컨테이너를 확인합니다."
+      when: qnetd_port.rc != 0
 
-# 두 노드 클러스터의 세 번째 표. 한 노드가 꺼져도 남은 노드 + QDevice 로 과반을 유지합니다
+# 두 노드 클러스터의 세 번째 표. 한 노드가 꺼져도 남은 노드 + QDevice 로 과반을 유지합니다.
+# pvecm qdevice setup 은 설정이 이미 있으면 거부하고, qdevice remove 는 모든 노드가 online 이어야 하므로 상태에 따라 나눕니다.
+#   설정 없음 → setup / 있고 모든 노드에서 corosync-qdevice 가 돎 → 그대로 / 있는데 어느 노드에서 안 돎 → 모두 online 이면 remove 뒤 setup,
+#   offline 노드가 있으면 멈춤(같은 이름 노드를 다시 넣을 때는 scripts/pve-node-rebuild.sh 가 미리 remove 해 둡니다)
 - name: QDevice
   hosts: proxmox
   gather_facts: false
+  any_errors_fatal: true
+  vars:
+    primary: "{{ groups.proxmox_primary[0] }}"
   tasks:
     - name: corosync-qdevice
       ansible.builtin.apt:
@@ -510,18 +579,47 @@ ansible-playbook playbooks/pve-cluster.yml
             Port {{ pve_qdevice_ssh_port }}
             User root
             StrictHostKeyChecking accept-new
-    - name: qnetd 에 ssh 가 되는지
-      ansible.builtin.command: ssh -o BatchMode=yes {{ pve_qdevice_host }} corosync-qnetd-tool -s
-      changed_when: false
-    - name: QDevice 설정 여부
-      ansible.builtin.command: grep -q 'model:\s*net' /etc/pve/corosync.conf
-      register: qdevice_conf
+    - name: 이 노드의 corosync-qdevice
+      ansible.builtin.command: systemctl is-active corosync-qdevice
+      register: qdevice_active
       changed_when: false
       failed_when: false
-      when: inventory_hostname in groups.proxmox_primary
+    - name: QDevice 설정 여부와 노드 online 상태
+      ansible.builtin.shell: |
+        grep -q 'model:\s*net' /etc/pve/corosync.conf && echo conf=yes || echo conf=no
+        cat /etc/pve/.members
+      register: qdevice_state
+      changed_when: false
+      when: inventory_hostname == primary
+    - name: 할 일 정하기
+      ansible.builtin.set_fact:
+        qdevice_action: >-
+          {%- set conf = 'conf=yes' in qdevice_state.stdout_lines -%}
+          {%- set members = (qdevice_state.stdout_lines[1:] | join('\n') | from_json).nodelist -%}
+          {%- set all_online = members.values() | map(attribute='online') | min == 1 -%}
+          {%- set all_active = ansible_play_hosts_all | map('extract', hostvars, ['qdevice_active', 'stdout']) | unique | list == ['active'] -%}
+          {%- if not conf -%}setup
+          {%- elif all_active -%}keep
+          {%- elif all_online -%}reset
+          {%- else -%}blocked{%- endif -%}
+      when: inventory_hostname == primary
+    - name: offline 노드가 있으면 멈춤
+      ansible.builtin.fail:
+        msg: >-
+          QDevice 설정은 있는데 corosync-qdevice 가 돌지 않는 노드가 있고, offline 노드가 있어 qdevice remove 를 할 수 없습니다.
+          같은 이름의 노드를 다시 설치했으면 남은 노드에서 scripts/pve-node-rebuild.sh 를 먼저 실행합니다.
+      when: inventory_hostname == primary and qdevice_action == 'blocked'
+    # remove 하기 전에 setup 이 될지(qnetd 에 ssh) 먼저 봅니다. 닿지 않는데 지우면 세 번째 표를 잃은 채로 끝납니다
+    - name: qnetd 에 ssh 가 되는지 (setup 하는 노드에서만)
+      ansible.builtin.command: ssh -o BatchMode=yes -o ConnectTimeout=10 {{ pve_qdevice_host }} corosync-qnetd-tool -s
+      changed_when: false
+      when: inventory_hostname == primary and qdevice_action in ['setup', 'reset']
+    - name: QDevice 다시 설정하기 전에 지우기
+      ansible.builtin.command: pvecm qdevice remove
+      when: inventory_hostname == primary and qdevice_action == 'reset'
     - name: QDevice 연결 (모든 노드가 온라인이어야 함)
       ansible.builtin.command: pvecm qdevice setup {{ pve_qdevice_host }}
-      when: inventory_hostname in groups.proxmox_primary and qdevice_conf.rc != 0
+      when: inventory_hostname == primary and qdevice_action in ['setup', 'reset']
 
 - name: 확인
   hosts: proxmox_primary
@@ -541,6 +639,14 @@ ansible-playbook playbooks/pve-cluster.yml
     - name: 상태
       ansible.builtin.debug:
         msg: "{{ status.stdout_lines }}"
+    # 설정은 있어도 qnetd 에 닿지 않으면 표가 0 입니다. 이 상태에서 노드 하나가 꺼지면 과반을 잃습니다
+    - name: QDevice 표 경고
+      ansible.builtin.debug:
+        msg: "[경고] QDevice 가 표를 내지 않습니다(qnetd {{ pve_qdevice_host }} 연결 확인). 지금 노드 하나가 꺼지면 과반을 잃습니다."
+      when: status.stdout is search('0x00000000\\s+0\\s+Qdevice')
+
+# 모든 노드가 다른 노드를 복구할 수 있게(저장소·ansible·토큰·키). 복구로 새로 들어온 노드도 여기서 같이 준비됩니다
+- import_playbook: pve-controller.yml
 ```
 {: file="playbooks/pve-cluster.yml" }
 {% endraw %}
@@ -804,6 +910,140 @@ timeout 3 bash -c '</dev/tcp/[PVE02_IP]/22' && echo open
 
 QDevice 가 멈췄을 때도 확인해 둡니다. Portainer 에서 qnetd 서비스의 복제본을 0 으로 줄이면 `pvecm status` 가 `Total votes: 2` 로 바뀌지만 `Quorate` 는 유지되고, VM 을 시작·정지할 수 있습니다. 다시 1로 늘리면 인증서가 볼륨에 남아 있어 따로 설정하지 않아도 `Total votes: 3` 으로 돌아옵니다.
 
+## 7. 노드 디스크 교체·재구축
+
+메인이 아닌 노드(pve02)의 OS 디스크를 바꾸거나 기계가 죽어 Proxmox 를 다시 설치했을 때, 남은 노드(pve01)에서 스크립트 하나로 원래 이름·IP·게스트·쿠버네티스 노드로 되돌립니다. 메인 노드는 API 주소와 공유 저장소 원본이 고정이라 이 절차의 범위 밖입니다.
+
+시작하기 전에 원격 NAS 의 qnetd 와 etcd 세 번째 투표자([쿠버네티스 etcd 세 번째 투표자를 원격 NAS 컨테이너로 붙이는 방법](/posts/55/))가 살아 있어야 합니다. 노드 하나를 클러스터에서 빼는 순간 남은 표는 이 둘이 채우므로, 없으면 Proxmox 와 쿠버네티스 클러스터가 과반을 잃습니다.
+
+재구축에 쓰는 변수를 `group_vars/all.yml` 에 더합니다. `ct_ssh_pubkeys` 에는 [내부망 DNS 글](/posts/41/)의 실행 PC 키와 함께, 노드가 저장소를 받고 게스트에 접속할 GitHub 계정 공개키를 넣습니다. `pve-controller.yml` 은 주석이 `eu4ng@server` 로 끝나는 줄을 이 키로 찾으므로, 키 주석을 바꾸면 플레이북의 검색어도 같이 바꿉니다.
+
+{% raw %}
+```yaml
+ct_ssh_pubkeys:                               # CT root·VM 접속 계정에 넣는 공개키. server: Proxmox 노드의 /root/.ssh/id_ed25519(pve-controller.yml)
+  - "[DESKTOP_SSH_PUBLIC_KEY]"
+  - "ssh-ed25519 [SERVER_SSH_PUBLIC_KEY] eu4ng@server"
+# 같은 이름 노드를 다시 만들 때 지우고 새로 받을 PVC(복제본이 모두 그 노드에 있던 것만). Patroni 멤버라 다른 멤버가 Leader 일 때만 지웁니다
+node_rebuild_recreate_pvcs:
+  daejeon: [timescaledb/pgdata-timescaledb-0, timescaledb/pgdata-timescaledb-1]
+node_rebuild_patroni: { namespace: timescaledb, container: timescaledb, config: /etc/patroni/patroni.yml }   # 위 PVC 의 Patroni(멤버 이름 = 파드 이름)
+k8s_clusters:                                 # 기존 클러스터 항목에 한 줄씩 더합니다
+  hub:
+    etcd_witness_peer: "{{ pve_qdevice_host }}:2380"    # 원격 etcd 투표자 peer 주소. 재구축 뒤 경로 확인에 씀
+  daejeon:
+    etcd_witness_peer: "{{ pve_qdevice_host }}:12380"
+```
+{: file="group_vars/all.yml" }
+{% endraw %}
+
+스크립트와 정리 플레이북은 저장소의 `scripts/`·`playbooks/` 에 둡니다. 5단계를 다시 실행하면 `pve-controller.yml` 이 모든 노드의 `/root/proxmox-ansible` 에 이 저장소를 받아 둡니다.
+
+```bash
+# 재구축 스크립트와 정리 플레이북 내려받기
+curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/pve-node-rebuild.sh -o scripts/pve-node-rebuild.sh
+curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/node-rebuild.yml -o playbooks/node-rebuild.yml
+chmod +x scripts/pve-node-rebuild.sh
+```
+
+디스크를 바꾼 뒤에는 아래 세 가지만 합니다.
+
+1. 새 디스크에 Proxmox VE 를 설치합니다. IP 와 이름은 아무것이나 써도 스크립트가 inventory 값으로 맞춥니다.
+2. 새 노드 콘솔에서 GitHub 계정 공개키를 root 에 넣습니다. 끝에 이 노드의 IP 와 다음 명령을 보여 줍니다.
+
+   ```bash
+   # 새 노드 콘솔(root)
+   curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/pve-bootstrap.sh | bash
+   ```
+
+3. 남은 노드에서 재구축 스크립트를 실행합니다. 먼저 `--dry-run` 으로 점검 결과와 지울 대상만 봅니다.
+
+   ```bash
+   # pve01 에서: 점검과 지울 대상만 보기
+   /root/proxmox-ansible/scripts/pve-node-rebuild.sh [NEW_IP] pve02 --reason disk-replaced --dry-run
+
+   # 재구축
+   /root/proxmox-ansible/scripts/pve-node-rebuild.sh [NEW_IP] pve02 --reason disk-replaced
+   ```
+
+   디스크를 바꾼 것이 아니라 기계가 갑자기 죽었다면, 옛 기계의 전원이나 디스크를 끊은 뒤 `--reason failed --fenced` 로 실행합니다.
+
+<details markdown="1">
+<summary>scripts/pve-bootstrap.sh 전문</summary>
+
+```bash
+#!/usr/bin/env bash
+#
+# 새로 설치한 Proxmox 노드의 콘솔에서 한 번 실행합니다. GitHub 계정(eu4ng)에 등록된 ssh 공개키를 root 의
+# authorized_keys 에 더해, 남은 Proxmox 노드(복구 스크립트)와 작업 PC 가 바로 접속할 수 있게 합니다.
+# 비밀값은 없고, 이미 있는 줄은 다시 넣지 않습니다(여러 번 실행해도 됨). 끝에 이 노드의 IP 와 다음에 할 명령을 보여 줍니다.
+#
+# 사용법(새 노드 콘솔, root):
+#   curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/pve-bootstrap.sh | bash
+#   GITHUB_USER=<계정> 으로 다른 계정의 키를 받을 수 있습니다.
+
+set -euo pipefail
+die() { echo "[오류] $*" >&2; exit 1; }
+
+GITHUB_USER=${GITHUB_USER:-eu4ng}
+[ "$(id -u)" = 0 ] || die "root 로 실행합니다."
+
+keys=$(curl -fsSL --retry 3 "https://github.com/${GITHUB_USER}.keys") || die "https://github.com/${GITHUB_USER}.keys 를 받지 못했습니다(네트워크·DNS 확인)."
+[ -n "$keys" ] || die "${GITHUB_USER} 계정에 등록된 공개키가 없습니다."
+
+# Proxmox 는 클러스터에 들어가면 /root/.ssh/authorized_keys 를 /etc/pve/priv/authorized_keys 로 바꿉니다. 링크면 링크 대상에 씁니다
+umask 077
+mkdir -p /root/.ssh
+f=/root/.ssh/authorized_keys
+touch "$f"
+added=0
+while IFS= read -r k; do
+  [ -n "$k" ] || continue
+  if ! grep -qF "$k" "$f"; then
+    printf '%s %s@github\n' "$k" "$GITHUB_USER" >> "$f"
+    added=$((added + 1))
+  fi
+done <<< "$keys"
+[ -L "$f" ] || chmod 600 "$f"
+echo "==> 공개키 $(grep -c . <<< "$keys")개 중 ${added}개를 더했습니다($f)."
+
+# 기본 경로의 출발 주소(LAN). 첫 global 주소는 Tailscale 주소일 수 있습니다
+ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit } }')
+echo "==> 이 노드: $(hostname -f) ${ip:-<IP 를 찾지 못함>}"
+echo
+echo "다음: 남은 Proxmox 노드에서 이 노드를 원래 이름으로 다시 만듭니다."
+echo "  /root/proxmox-ansible/scripts/pve-node-rebuild.sh ${ip:-<이 노드 IP>} <노드 이름> --reason disk-replaced"
+```
+{: file="scripts/pve-bootstrap.sh" }
+
+</details>
+
+스크립트가 하는 일은 다음과 같습니다.
+
+- **점검:** 과반이 있는지, 옛 노드가 offline 인지, 옛 기계가 격리됐는지(옛 링 주소가 응답하지 않거나, 다른 호스트 키를 가진 기계에 `corosync.conf` 가 없음), 새 기계가 게스트 없는 빈 Proxmox 인지, 남은 etcd 멤버가 건강한지 봅니다. 하나라도 어긋나면 시작하지 않습니다.
+- **계속 실행:** 점검을 통과하면 systemd 유닛 `pve-node-rebuild-<노드>` 로 다시 떠서 ssh 가 끊겨도 계속합니다. 로그는 `/root/pve-rebuild/<시각>.log` 입니다.
+- **순서:** 신원 맞추기(호스트 이름·IP 를 inventory 값으로) → `node-rebuild.yml`(옛 기록 정리) → `pve-cluster` → `vm-template` → `lan-dns` → `ollama` → `k8s-cluster`(클러스터마다) → 합류 뒤 마무리(local-path 경로 권한, Patroni 멤버 reinit) → 호스트 지표·시간대 → 검증 요약입니다.
+- **이어 가기:** 상태 파일 `/root/pve-rebuild/<노드>.state` 에 새 기계의 호스트 키 지문·machine-id 와 끝낸 단계를 적습니다. 실패하면 원인을 고친 뒤 같은 명령으로 이어 가고, 다른 기계로는 이어 가지 않습니다.
+- **정리 범위:** 처음 실행할 때 지울 대상의 ID(etcd 멤버 ID, Node·PVC UID, Longhorn 노드·복제본, 옛 root 키·호스트 키 줄)를 상태 파일에 적고, 다시 실행하면 그 ID 와 같은 것만 지웁니다. 다시 만든 etcd 멤버와 Node 는 ID 가 달라 지우지 않습니다.
+- **노드 준비:** `pve-cluster.yml` 끝의 `pve-controller.yml` 이 모든 노드에 저장소와 가상 환경(ansible·proxmoxer·컬렉션), 노드별 API 토큰 `root@pam!rebuild-<노드>`, GitHub 계정 키, 실행 PC 의 Tailscale 인증 키를 둡니다. 재구축으로 들어온 노드도 같이 준비되어, 다음에는 그 노드가 다른 노드를 다시 만들 수 있습니다.
+
+스크립트는 이 저장소의 다른 플레이북(`host-metrics.yml`, `timezone.yml` 등)과 클러스터 이름(`hub`, `daejeon`)을 그대로 부르므로, 구성이 다르면 스크립트의 플레이북 목록을 맞춰 고칩니다.
+
+> 저장소를 받고 게스트에 접속하려고 같은 GitHub 계정 키를 모든 Proxmox 노드에 둡니다. 노드 하나가 뚫리면 GitHub 계정(모든 저장소 쓰기 권한)과 이 키를 받는 모든 VM·CT 가 함께 노출됩니다. 줄이려면 노드마다 키를 따로 만들어 `ct_ssh_pubkeys` 에 각각 넣고, 저장소는 계정 키 대신 이 저장소 전용 읽기 전용 deploy key 로 받게 `pve_controller_repo` 와 키 경로를 바꿉니다.
+{: .prompt-danger }
+
+- **확인:** 마지막 `검증 요약` 에 `Quorate: Yes`, 재구축한 노드의 게스트 목록이 예상 vmid 와 같고, 쿠버네티스 노드가 `Ready`, etcd 멤버가 모두 `is healthy` 로 보입니다. 끝에 `끝: pve02 재구축` 이 출력됩니다.
+
+<details markdown="1">
+<summary>scripts/pve-node-rebuild.sh·playbooks/node-rebuild.yml·playbooks/pve-controller.yml</summary>
+
+세 파일은 길어 전문 대신 링크로 둡니다.
+
+- [scripts/pve-node-rebuild.sh](/assets/scripts/proxmox/pve-node-rebuild.sh)
+- [playbooks/node-rebuild.yml](/assets/scripts/proxmox/node-rebuild.yml)
+- [playbooks/pve-controller.yml](/assets/scripts/proxmox/pve-controller.yml)
+
+</details>
+
 ## 트러블슈팅
 
 <details markdown="1">
@@ -824,7 +1064,7 @@ QDevice 가 멈췄을 때도 확인해 둡니다. Portainer 에서 qnetd 서비�
 
 ## 마무리
 
-Proxmox 서버 두 대를 클러스터로 묶고 원격 NAS 의 qnetd 로 세 번째 표를 주어, 한 대가 꺼지거나 NAS 가 멈춰도 남은 쪽이 과반을 유지하게 했습니다. 두 노드는 집 LAN 을 tailnet 에 광고하는 서브넷 라우터가 되어, 원격 NAS 와 LAN 의 VM 이 Tailscale 로 서로 닿습니다. 새 서버를 더할 때는 인벤토리에 추가하고 같은 플레이북을 다시 실행합니다. 이 글은 Proxmox 관리 기능의 과반만 다룹니다. 노드마다 로컬 디스크를 쓰므로 게스트를 다른 노드로 자동으로 옮기는 Proxmox HA 는 설정하지 않았습니다.
+Proxmox 서버 두 대를 클러스터로 묶고 원격 NAS 의 qnetd 로 세 번째 표를 주어, 한 대가 꺼지거나 NAS 가 멈춰도 남은 쪽이 과반을 유지하게 했습니다. 두 노드는 집 LAN 을 tailnet 에 광고하는 서브넷 라우터가 되어, 원격 NAS 와 LAN 의 VM 이 Tailscale 로 서로 닿습니다. 새 서버를 더할 때는 인벤토리에 추가하고 같은 플레이북을 다시 실행합니다. 메인이 아닌 노드의 디스크를 바꾸면 남은 노드에서 재구축 스크립트 하나로 원래 상태로 되돌립니다. 이 글은 Proxmox 관리 기능의 과반만 다룹니다. 노드마다 로컬 디스크를 쓰므로 게스트를 다른 노드로 자동으로 옮기는 Proxmox HA 는 설정하지 않았습니다.
 
 ## 참고 자료
 

@@ -123,7 +123,8 @@ ct_template_storage: local                    # CT 템플릿을 두는 스토리
 ct_disk_storage: local-lvm                    # CT 디스크를 두는 스토리지
 ct_bridge: vmbr0
 ct_gateway: [GATEWAY_IP]
-ct_ssh_pubkey: "[SSH_PUBLIC_KEY]"             # ~/.ssh/id_ed25519.pub 의 내용
+ct_ssh_pubkeys:                               # CT root·VM 접속 계정에 넣는 공개키 목록(~/.ssh/id_ed25519.pub 의 내용)
+  - "[SSH_PUBLIC_KEY]"
 timezone: Asia/Seoul                          # 모든 호스트·CT·VM 의 시간대
 
 # ---- lan-dns: 내부망 DNS ----
@@ -261,7 +262,7 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/dnsmasq-lan.conf.j2 -o
         features: [nesting=1]         # Debian 13(systemd 257)은 nesting 없이는 tmp·run-lock 마운트가 실패합니다. 바꾸면 CT 를 다시 시작해야 적용
         onboot: true
         unprivileged: true
-        pubkey: "{{ ct_ssh_pubkey }}"
+        pubkey: "{{ ct_ssh_pubkeys | join('\n') }}"
         state: present
       loop: "{{ lan_dns_instances }}"
       loop_control: { label: "{{ item.name }}" }
@@ -361,20 +362,20 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/dnsmasq-lan.conf.j2 -o
         echo "AAAA  {{ first_name }} -> $(dig +short +time=2 @{{ item.ip }} {{ first_name }} AAAA | tr '\n' ' ')(비어 있어야 함)"
         echo "공개  www.{{ lan_dns_domain }} -> $(dig +short +time=2 @{{ item.ip }} www.{{ lan_dns_domain }} A | tr '\n' ' ')"
         echo "외부  github.com -> $(dig +short +time=2 @{{ item.ip }} github.com A | tr '\n' ' ')"
-      register: lookup
+      register: dns_check            # lookup 은 예약어라 쓰지 않음(인벤토리의 lookup() 을 가림)
       changed_when: false
       loop: "{{ lan_dns_instances }}"
       loop_control: { label: "{{ item.name }}" }
     - name: 결과
       ansible.builtin.debug:
         msg: "{{ item.item.name }}: {{ item.stdout_lines }}"
-      loop: "{{ lookup.results }}"
+      loop: "{{ dns_check.results }}"
       loop_control: { label: "{{ item.item.name }}" }
     - name: 노드 IP 로 답하는지
       ansible.builtin.assert:
         that: lan_dns_targets[0] in item.stdout_lines[0]
         fail_msg: "{{ item.item.name }}: {{ first_name }} 이 노드 IP 로 풀리지 않습니다"
-      loop: "{{ lookup.results }}"
+      loop: "{{ dns_check.results }}"
       loop_control: { label: "{{ item.item.name }}" }
 
 - name: 내부망 DNS 를 쓰는 CT (inventory 밖, 호스트에서 pct 로 설정)

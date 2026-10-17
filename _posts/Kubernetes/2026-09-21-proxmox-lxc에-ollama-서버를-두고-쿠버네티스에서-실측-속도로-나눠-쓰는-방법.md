@@ -123,7 +123,7 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/ollama.yml -o playbook
         features: [nesting=1]
         onboot: true
         unprivileged: true
-        pubkey: "{{ ct_ssh_pubkey }}"
+        pubkey: "{{ ct_ssh_pubkeys | join('\n') }}"
         state: present
       loop: "{{ ollama_backends }}"
       loop_control: { label: "{{ item.name }}" }
@@ -132,11 +132,13 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/ollama.yml -o playbook
   hosts: proxmox
   gather_facts: false
   tasks:
-    # 장치는 CT 가 시작할 때 붙으므로, 새로 넣었으면 돌고 있는 CT 를 다시 시작합니다
+    # 장치는 CT 가 시작할 때 붙으므로, 새로 넣었으면 돌고 있는 CT 를 다시 시작합니다.
+    # CT 안 장치의 그룹은 호스트 render 그룹 번호로 맞춥니다(호스트를 다시 설치하면 바뀔 수 있어 고정하지 않음)
     - name: /dev/dri/renderD128 (gpu CT 만)
       ansible.builtin.shell: |
-        pct config {{ item.vmid }} | grep -q '^dev0: /dev/dri/renderD128' && exit 0
-        pct set {{ item.vmid }} --dev0 /dev/dri/renderD128,gid=993
+        gid=$(stat -c %g /dev/dri/renderD128)
+        pct config {{ item.vmid }} | grep -qx "dev0: /dev/dri/renderD128,gid=$gid" && exit 0
+        pct set {{ item.vmid }} --dev0 /dev/dri/renderD128,gid=$gid
         pct status {{ item.vmid }} | grep -q running && pct reboot {{ item.vmid }}
         echo CHANGED
       register: dri
