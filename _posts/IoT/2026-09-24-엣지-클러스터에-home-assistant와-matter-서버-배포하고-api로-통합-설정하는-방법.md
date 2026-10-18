@@ -35,12 +35,12 @@ permalink: /posts/48/
 
 - 엣지 클러스터의 Mosquitto·Telegraf 와 허브 TimescaleDB, 시크릿 스크립트가 만든 브로커 계정 `homeassistant` ([엣지 Mosquitto와 Telegraf 디스크 버퍼로 중앙 TimescaleDB에 유실 없이 IoT 데이터 모으는 방법](/posts/43/))
 - 허브 Traefik 과 oauth2-proxy 로 서비스를 밖에 여는 구성 ([쿠버네티스 서비스를 VPN 없이 외부에서 HTTPS로 접속하는 방법](/posts/40/))
-- LoadBalancer Service 에 서비스 VIP 를 주는 kube-vip 가 있는 엣지 클러스터와 허브 control plane 에 복사한 엣지 kubeconfig `~/k8s-[SITE].yaml` ([Proxmox에 Ansible로 kubeadm 엣지 클러스터 만들고 Argo CD 원격 클러스터로 등록하는 방법](/posts/42/))
+- control plane 의 keepalived 가 서비스 VIP 를 가진 엣지 클러스터와 허브 control plane 에 복사한 엣지 kubeconfig `~/k8s-[SITE].yaml` ([Proxmox에 Ansible로 kubeadm 엣지 클러스터 만들고 Argo CD 원격 클러스터로 등록하는 방법](/posts/42/))
 - Thread 기기를 쓸 경우 엣지 클러스터의 OpenThread Border Router. 없으면 3단계에서 `OTBR_URL` 을 비웁니다.
 
 ## 1. 매니페스트 추가와 배포
 
-HA 와 Matter 서버는 기기 탐색(mDNS)과 IPv6 로 LAN 의 기기와 직접 통신해야 해서 `hostNetwork` 로 띄웁니다. 파드 네트워크(Flannel)는 IPv4 만 다루기 때문입니다. HA 는 Matter 서버와 OTBR 에 `127.0.0.1` 로 붙으므로 세 파드가 한 worker 에 모여야 합니다. Matter 서버와 OTBR 은 `podAffinity` 의 `required` 규칙으로 HA 를 따라가고, HA 는 `preferred` 규칙으로 Matter 서버 쪽을 선호합니다. 파드가 어느 worker 에 떠도 같은 주소로 열리도록 LAN 쪽 접속은 노드 IP 대신 LoadBalancer Service 로 받고, 엣지의 kube-vip 가 지역 오버레이에 적은 **서비스 VIP** 를 붙입니다. HA 는 `configuration.yaml` 을 스스로 만들고 고치므로 PVC 에 두고, initContainer 가 자동화 파일을 복사하고 그 파일을 읽는 줄만 한 번 덧붙입니다. 파일에는 자동화가 두 개 있습니다. `matter_statestream` 은 **Matter 통합에 속한 엔티티**(`integration_entities('matter')`)의 상태나 속성이 바뀔 때 발행하고, `control_events` 는 기기로 간 명령과 자동화 실행을 누가 했는지와 함께 발행합니다(4단계). Zigbee 기기도 HA 에 보이지만 MQTT 통합 소속이고 이미 Zigbee2MQTT 경로로 수집되므로 걸리지 않습니다. 기기 이름과 무관하게 거르므로 Matter 기기를 등록할 때 이름 규칙을 지킬 필요가 없습니다.
+HA 와 Matter 서버는 기기 탐색(mDNS)과 IPv6 로 LAN 의 기기와 직접 통신해야 해서 `hostNetwork` 로 띄웁니다. 파드 네트워크(Flannel)는 IPv4 만 다루기 때문입니다. HA 는 Matter 서버와 OTBR 에 `127.0.0.1` 로 붙으므로 세 파드가 한 worker 에 모여야 합니다. Matter 서버와 OTBR 은 `podAffinity` 의 `required` 규칙으로 HA 를 따라가고, HA 는 `preferred` 규칙으로 Matter 서버 쪽을 선호합니다. 파드가 어느 worker 에 떠도 같은 주소로 열리도록 LAN 쪽 접속은 노드 IP 대신 Service 로 받습니다. 지역 오버레이가 Service 의 `spec.externalIPs` 에 **서비스 VIP** 를 적고, 엣지 control plane 의 keepalived 가 가진 그 주소로 들어온 요청을 kube-proxy 가 파드로 넘깁니다. HA 는 `configuration.yaml` 을 스스로 만들고 고치므로 PVC 에 두고, initContainer 가 자동화 파일을 복사하고 그 파일을 읽는 줄만 한 번 덧붙입니다. 파일에는 자동화가 두 개 있습니다. `matter_statestream` 은 **Matter 통합에 속한 엔티티**(`integration_entities('matter')`)의 상태나 속성이 바뀔 때 발행하고, `control_events` 는 기기로 간 명령과 자동화 실행을 누가 했는지와 함께 발행합니다(4단계). Zigbee 기기도 HA 에 보이지만 MQTT 통합 소속이고 이미 Zigbee2MQTT 경로로 수집되므로 걸리지 않습니다. 기기 이름과 무관하게 거르므로 Matter 기기를 등록할 때 이름 규칙을 지킬 필요가 없습니다.
 
 > HA 의 `mqtt_statestream` 도 같은 토픽 형식으로 발행하지만 도메인·엔티티 이름으로만 거를 수 있고 통합 단위로는 거르지 못합니다. 그래서 `matter_*` 같은 이름 규칙이 필요해지고, 기기 이름에서 자동으로 만들어진 엔티티는 빠집니다.
 {: .prompt-info }
@@ -324,7 +324,7 @@ spec:
       affinity:                            # Matter 서버·OTBR 에 127.0.0.1 로 붙으므로 그 파드들과 같은 노드에 둡니다(그쪽이 HA 를 따라옴)
         podAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
-            # 메인 서버(pve01) 선호(Kyverno prefer-primary-host, essential 100)보다 낮게 둡니다. 같으면 HA 가 Matter 가 남은 pve02 에
+            # 상시 서비스 서버(pve03) 선호(Kyverno prefer-role-host, essential 100)보다 낮게 둡니다. 같으면 HA 가 Matter 가 남은 다른 서버에
             # 붙어 돌아오지 못합니다. HA 를 옮긴 뒤에는 Matter·OTBR 을 바로 재시작해 따라오게 합니다(필수 동거라 HA 노드에 뜸)
             - weight: 50
               podAffinityTerm:
@@ -383,14 +383,14 @@ spec:
 `priorityClassName: essential` 과 `tolerations` 는 서버 한 대가 죽었을 때를 위한 설정입니다. 남은 worker 에 자리가 모자라면 이 파드를 먼저 살리고, 죽은 노드를 기본 300초 대신 30초만 기다린 뒤 다른 노드에서 다시 띄웁니다. 등급은 [쿠버네티스에 Longhorn과 Patroni로 볼륨과 TimescaleDB 이중화하는 방법](/posts/54/)의 6단계에서 만들고, 등급이 없으면 파드가 만들어지지 않습니다.
 
 ```yaml
-# HA 는 hostNetwork 라 노드 IP:8123 에 뜹니다. 어느 노드에 떠도 같은 주소로 붙도록 LoadBalancer VIP(kube-vip)로 엽니다.
-# VIP 주소는 지역 오버레이가 annotation kube-vip.io/loadbalancerIPs 로 줍니다(같은 VIP 를 Mosquitto·Z2M·Matter 가 함께 씀).
+# HA 는 hostNetwork 라 노드 IP:8123 에 뜹니다. 어느 노드에 떠도 같은 주소로 붙도록 지역 서비스 VIP 로 엽니다.
+# VIP 는 지역 오버레이가 spec.externalIPs 로 줍니다(control plane 의 keepalived 가 가진 주소를 kube-proxy 가 받아 넘김). 같은 VIP 를 Mosquitto·Z2M·Matter·Grafana 가 함께 씁니다.
 apiVersion: v1
 kind: Service
 metadata:
   name: home-assistant
 spec:
-  type: LoadBalancer
+  type: ClusterIP
   selector: { app: home-assistant }
   ports:
     - { name: http, port: 8123, targetPort: 8123 }
@@ -484,13 +484,13 @@ spec:
 
 ```yaml
 # Matter 서버 대시보드·WebSocket(5580). HA 는 같은 노드에서 127.0.0.1 로 붙고, 이 Service 는 LAN·허브(matter-[SITE_CODE])용입니다.
-# VIP 주소는 지역 오버레이가 annotation kube-vip.io/loadbalancerIPs 로 줍니다.
+# VIP 는 지역 오버레이가 spec.externalIPs 로 줍니다(control plane 의 keepalived 가 가진 주소를 kube-proxy 가 받아 넘김).
 apiVersion: v1
 kind: Service
 metadata:
   name: matter-server
 spec:
-  type: LoadBalancer
+  type: ClusterIP
   selector: { app: matter-server }
   ports:
     - { name: http, port: 5580, targetPort: 5580 }
@@ -519,14 +519,14 @@ spec:
 resources:
   - ../../../edge/home-assistant
 patches:
-  # [SITE] 엣지의 서비스 VIP(kube-vip). HA·Z2M·Matter·Mosquitto 가 포트만 달리해 같은 주소를 씁니다(LAN 기기·허브가 이 주소로 붙음)
+  # [SITE] 엣지의 서비스 VIP(proxmox-ansible 의 service_vip, control plane 의 keepalived 가 가짐. API 가 멈춰도 kube-proxy 규칙으로 계속 받음). HA·Z2M·Matter·Mosquitto 가 포트만 달리해 같은 주소를 씁니다(LAN 기기·허브가 이 주소로 붙음)
   - patch: |
       apiVersion: v1
       kind: Service
       metadata:
         name: home-assistant
-        annotations:
-          kube-vip.io/loadbalancerIPs: "[EDGE_SERVICE_VIP]"
+      spec:
+        externalIPs: [[EDGE_SERVICE_VIP]]
 ```
 {: file="iot/clusters/[SITE]/home-assistant/kustomization.yaml" }
 
@@ -535,14 +535,14 @@ patches:
 resources:
   - ../../../edge/matter
 patches:
-  # [SITE] 엣지의 서비스 VIP(kube-vip). HA·Z2M·Matter·Mosquitto 가 포트만 달리해 같은 주소를 씁니다(LAN 기기·허브가 이 주소로 붙음)
+  # [SITE] 엣지의 서비스 VIP(proxmox-ansible 의 service_vip, control plane 의 keepalived 가 가짐. API 가 멈춰도 kube-proxy 규칙으로 계속 받음). HA·Z2M·Matter·Mosquitto 가 포트만 달리해 같은 주소를 씁니다(LAN 기기·허브가 이 주소로 붙음)
   - patch: |
       apiVersion: v1
       kind: Service
       metadata:
         name: matter-server
-        annotations:
-          kube-vip.io/loadbalancerIPs: "[EDGE_SERVICE_VIP]"
+      spec:
+        externalIPs: [[EDGE_SERVICE_VIP]]
 ```
 {: file="iot/clusters/[SITE]/matter/kustomization.yaml" }
 
@@ -610,9 +610,9 @@ OTBR_URL=http://127.0.0.1:8081                      # 같은 노드의 hostNetwo
 # Cloudflare 프록시 대역(https://www.cloudflare.com/ips-v4). 밖에서 Cloudflare 를 거쳐 오면 이 대역까지 신뢰해야 HA 가 실제 접속자 IP 를 보고,
 # 로그인 실패 차단도 Cloudflare 주소가 아니라 그 접속자에게 겁니다.
 CLOUDFLARE_IPV4="173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22"
-# HA 가 보는 요청 출처(프록시) 주소와 Cloudflare. 비우면 HTTP 설정 생략. 엣지 HA 를 서비스 VIP(kube-vip LoadBalancer)로 받으면 요청이
-# VIP 를 가진 엣지 control plane 주소로 SNAT 되어 오므로 그 주소들을, hostNetwork 노드 주소로 직접 받으면 허브 노드 주소들을 적습니다.
-TRUSTED_PROXIES="[PROXY_IP_1] [PROXY_IP_2] $CLOUDFLARE_IPV4"
+# HA 가 보는 요청 출처(프록시) 주소와 Cloudflare. 비우면 HTTP 설정 생략. 엣지 HA 를 서비스 VIP(keepalived, externalIPs)로 받으면 요청이
+# VIP 를 가진 엣지 control plane 주소로 SNAT 되어 오므로 control plane 노드 주소 모두를, hostNetwork 노드 주소로 직접 받으면 허브 노드 주소 모두를 적습니다.
+TRUSTED_PROXIES="[PROXY_IP_1] [PROXY_IP_2] [PROXY_IP_3] $CLOUDFLARE_IPV4"
 LOGIN_ATTEMPTS=5                                    # 로그인 실패가 이 횟수면 그 IP 를 차단
 HA_TOKEN_SECRET=home-assistant/ha-api-token         # 토큰을 담은 Secret (네임스페이스/이름, 키 token)
 KUBECTL="kubectl --kubeconfig $HOME/k8s-[SITE].yaml"   # 이 HA 가 있는 클러스터에 접근하는 kubectl
@@ -854,7 +854,7 @@ log "완료. 상태가 loaded 가 아니면 HA 로그를 확인합니다."
 
 </details>
 
-스크립트 위쪽의 `TRUSTED_PROXIES` 에 HA 가 요청의 출처로 보는 프록시 주소를 넣습니다. 5단계의 허브 Traefik 과 지역 Traefik 은 모두 서비스 VIP 로 HA 에 붙고, 서비스 VIP 를 거친 요청은 VIP 를 가진 엣지 control plane 의 주소로 바뀌어([SNAT](/posts/59/)) HA 에 도착하므로 `[PROXY_IP_1] [PROXY_IP_2]` 자리에 엣지 control plane 노드 IP 들을 적습니다. VIP 는 control plane 사이를 옮겨 다니므로 모든 control plane 을 적습니다. 밖에서 오는 요청은 그 앞에 Cloudflare 를 거치므로, 기본값처럼 스크립트의 Cloudflare 대역(`$CLOUDFLARE_IPV4`)도 남겨 둡니다. 빼면 HA 가 Cloudflare 주소를 접속자로 보고 로그인 실패 차단도 그 주소에 겁니다. `KUBECTL` 에는 엣지 kubeconfig(`$HOME/k8s-[SITE].yaml`)를 적습니다.
+스크립트 위쪽의 `TRUSTED_PROXIES` 에 HA 가 요청의 출처로 보는 프록시 주소를 넣습니다. 5단계의 허브 Traefik 과 지역 Traefik 은 모두 서비스 VIP 로 HA 에 붙고, 서비스 VIP 를 거친 요청은 VIP 를 가진 엣지 control plane 의 주소로 바뀌어([SNAT](/posts/59/)) HA 에 도착하므로 `[PROXY_IP_1] [PROXY_IP_2] [PROXY_IP_3]` 자리에 엣지 control plane 노드 주소를 모두 적습니다(control plane 이 세 대면 세 개). VIP 는 control plane 사이를 옮겨 다니므로 하나라도 빠지면 그 노드가 VIP 를 가진 동안 HA 가 프록시를 접속자로 봅니다. 밖에서 오는 요청은 그 앞에 Cloudflare 를 거치므로, 기본값처럼 스크립트의 Cloudflare 대역(`$CLOUDFLARE_IPV4`)도 남겨 둡니다. 빼면 HA 가 Cloudflare 주소를 접속자로 보고 로그인 실패 차단도 그 주소에 겁니다. `KUBECTL` 에는 엣지 kubeconfig(`$HOME/k8s-[SITE].yaml`)를 적습니다.
 
 ```bash
 # 실행. MQTT 비밀번호(homeassistant 계정)는 실행 중 입력합니다
@@ -959,8 +959,8 @@ Telegraf 는 기기 이름이 `<방>-<종류>[-<기준>][번호]` 규칙(칸은 
 지역 서비스는 `<서비스>-<지역약자>.[DOMAIN]` 으로 엽니다. 무료 Cloudflare 인증서가 한 단계 하위 도메인만 덮기 때문에 `ha.[SITE].[DOMAIN]` 같은 계층 대신 평면 이름을 씁니다. 엣지는 허브와 같은 LAN 에 있으므로 밖에서 온 요청은 허브 Traefik 이 엣지 서비스 VIP 로 중계합니다. 내부망에서는 내부망 DNS 가 이 이름들을 지역 서비스 VIP 로 답하고 엣지의 지역 Traefik 이 받으므로, 허브나 인터넷이 끊겨도 같은 이름으로 열립니다(지역 Traefik 은 [지역 엣지에 TimescaleDB와 Grafana를 두어 인터넷 없이도 기록하고 보는 방법](/posts/56/)에서 다룹니다). Zigbee2MQTT 와 Matter 대시보드는 다른 관리 화면처럼 밖에서 Google 로그인(oauth2-proxy)을 거치게 하고, HA 는 휴대폰 앱이 로그인 페이지 리디렉트를 처리하지 못하므로 oauth2-proxy 없이 HA 자체 로그인과 2단계 인증으로 보호합니다.
 
 ```yaml
-# 지역 엣지 클러스터([SITE])의 웹 UI 를 허브 Traefik 뒤에 둡니다. 허브와 엣지가 같은 LAN 이라 엣지 서비스 VIP([EDGE_SERVICE_VIP], kube-vip)로 바로 붙습니다.
-# 엣지 쪽 포트는 LoadBalancer 서비스 포트입니다: HA 8123, Z2M 30083, Matter 5580, Grafana 3000. (EndpointSlice 는 Argo CD 가 무시하므로 ExternalName 을 씁니다)
+# 지역 엣지 클러스터([SITE])의 웹 UI 를 허브 Traefik 뒤에 둡니다. 허브와 엣지가 같은 LAN 이라 엣지 서비스 VIP([EDGE_SERVICE_VIP], 엣지 control plane 의 keepalived)로 바로 붙습니다.
+# 엣지 쪽 포트는 Service 포트(externalIPs)입니다: HA 8123, Z2M 30083, Matter 5580, Grafana 3000. (EndpointSlice 는 Argo CD 가 무시하므로 ExternalName 을 씁니다)
 # VIP 를 거친 요청은 엣지 control plane 주소로 SNAT 되어 도착하므로, 엣지 HA 의 신뢰 프록시는 엣지 control plane 주소입니다.
 apiVersion: v1
 kind: Service

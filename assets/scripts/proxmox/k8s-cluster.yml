@@ -1,7 +1,7 @@
 # kubeadm 쿠버네티스 클러스터(control plane N + worker N). group_vars 의 k8s_clusters 에서 -e k8s_cluster=<이름>(기본 hub)으로 고릅니다.
-# 노드마다 정한 Proxmox 노드의 템플릿(vm-template.yml)을 복제해 VM 을 만들고, containerd·kubeadm 을 설치해 VIP(kube-vip) 엔드포인트로
+# 노드마다 정한 Proxmox 노드의 템플릿(vm-template.yml)을 복제해 VM 을 만들고, containerd·kubeadm 을 설치해 VIP(keepalived) 엔드포인트로
 # 클러스터를 구성한 뒤 kubeconfig 를 실행 PC 로 가져옵니다. 허브(hub)와 지역 엣지(daejeon 등)가 같은 절차로 만들어집니다.
-# etcd 세 번째 멤버(서울 NAS)는 k8s-gitops 의 scripts/etcd-witness-certs.sh 와 stacks/seoul/etcd-witness* 로 붙입니다.
+# etcd 는 세 Proxmox 노드에 하나씩 둔 control plane 3멤버입니다.
 # VIP 없이 만든 기존 클러스터는 먼저 scripts/k8s-control-plane-endpoint.sh 로 옮깁니다. 그 다음은 Argo CD 설치·등록부터 GitOps 입니다.
 #   ansible-playbook playbooks/k8s-cluster.yml [-e k8s_cluster=daejeon]                    만들기 (여러 번 실행해도 됨)
 #   ansible-playbook playbooks/k8s-cluster.yml [-e k8s_cluster=...] -e k8s_state=absent    VM 삭제 (ID 와 이름이 모두 맞는 VM 만, yes 입력 후)
@@ -113,16 +113,19 @@
       loop: "{{ clones.results }}"
       loop_control: { label: "{{ item.item.name }}" }
       when: item.changed
+    # longhorn_storage 가 NFS(nas_vm_storage)면 qcow2(파일), lvmthin 이면 raw 입니다. HDD 위 NFS 디스크에는 ssd 표시를 붙이지 않습니다
     - name: Longhorn 디스크 (scsi1, 없을 때만. 켜진 VM 에 핫플러그)
       community.proxmox.proxmox_disk:
         vmid: "{{ item.vmid }}"
         disk: scsi1
-        storage: "{{ vm_disk_storage }}"
+        storage: "{{ lh_storage }}"
         size: "{{ item.longhorn_disk }}"
-        format: raw
+        format: "{{ 'qcow2' if lh_storage == nas_vm_storage.name else 'raw' }}"
         discard: "on"
-        ssd: true
+        ssd: "{{ lh_storage != nas_vm_storage.name }}"
         state: present
+      vars:
+        lh_storage: "{{ item.longhorn_storage | default(vm_disk_storage) }}"
       loop: "{{ active | selectattr('longhorn_disk', 'defined') }}"
       loop_control: { label: "{{ item.name }}" }
     - name: Longhorn 디스크 늘리기 (longhorn_disk 를 키웠을 때. 켠 채로 늘리고, 줄이지는 못함)
@@ -133,7 +136,7 @@
         state: resized
       loop: "{{ active | selectattr('longhorn_disk', 'defined') }}"
       loop_control: { label: "{{ item.name }}" }
-    - name: VM 설정 맞추기 (코어·메모리·CPU 우선순위·IP·DNS·자동 시작. 모듈 특성상 매번 changed 로 보고됨. 코어·메모리는 VM 을 껐다 켜야 적용)
+    - name: VM 설정 맞추기 (코어·메모리·CPU 우선순위·IP·DNS·자동 시작·부팅 순서. 모듈 특성상 매번 changed 로 보고됨. 코어·메모리는 VM 을 껐다 켜야 적용)
       community.proxmox.proxmox_kvm:
         node: "{{ item.pve | default(proxmox_node) }}"
         vmid: "{{ item.vmid }}"
@@ -142,6 +145,7 @@
         memory: "{{ item.memory }}"
         cpuunits: "{{ k8s_vm_cpuunits }}"
         onboot: true
+        startup: "{{ item.startup | default(omit) }}"   # 부팅 순서(group_vars 의 startup 설명)
         ipconfig: { ipconfig0: "ip={{ item.ip }}/24,gw={{ ct_gateway }}" }
         nameservers: "{{ k8s_nameservers }}"
         update: true
@@ -205,8 +209,8 @@
         value: "1"
         sysctl_file: /etc/sysctl.d/k8s.conf
       loop: [net.bridge.bridge-nf-call-iptables, net.bridge.bridge-nf-call-ip6tables, net.ipv4.ip_forward]
-    # 원격지(서울 NAS)의 etcd 투표자·DB 복제본은 tailnet 에 있습니다. VM 이 있는 Proxmox 노드가 Tailscale 서브넷 라우터이므로
-    # tailnet 대역을 그 노드로 보냅니다. VM 은 자기 노드와 함께 죽고 살므로 이 경로에는 이중화가 필요 없습니다
+    # 원격지(tailnet)의 장치·DB 복제본에 닿는 경로입니다(옛 서울 NAS etcd 투표자도 이 경로였음). VM 이 있는 Proxmox 노드가 Tailscale 서브넷
+    # 라우터이므로 tailnet 대역을 그 노드로 보냅니다. VM 은 자기 노드와 함께 죽고 살므로 이 경로에는 이중화가 필요 없습니다
     - name: tailnet 경로 (netplan)
       ansible.builtin.copy:
         dest: /etc/netplan/60-tailnet.yaml
@@ -334,11 +338,14 @@
       ansible.builtin.stat:
         path: /etc/kubernetes/admin.conf
       register: admin_conf
-    # 새 클러스터는 VIP 엔드포인트로 만듭니다. kube-vip 은 init 중에는 super-admin.conf 로 로컬 apiserver 에 붙어 VIP 를 잡습니다
-    - name: kube-vip (init 용)
-      ansible.builtin.include_tasks: tasks/kube-vip.yml
-      vars: { kube_vip_kubeconfig: /etc/kubernetes/super-admin.conf }
+    # 새 클러스터는 VIP 엔드포인트로 만듭니다. keepalived 는 API 없이 VIP 를 잡으므로 init 전에 켜 둡니다(apiserver 가 아직 없어 응답은 기다리지 않음)
+    - name: keepalived (init 용)
+      ansible.builtin.include_tasks:
+        file: tasks/keepalived.yml
+        apply: { tags: [vip] }
+      vars: { keepalived_wait_api: false }
       when: not admin_conf.stat.exists
+      tags: [vip]
     - name: kubeadm init (처음 한 번)
       ansible.builtin.command: >-
         kubeadm init --control-plane-endpoint={{ kc.vip }}:6443 --upload-certs
@@ -346,8 +353,11 @@
         --pod-network-cidr={{ k8s_pod_cidr }} --apiserver-advertise-address={{ ansible_host }}
       args:
         creates: /etc/kubernetes/admin.conf
-    - name: kube-vip
-      ansible.builtin.include_tasks: tasks/kube-vip.yml
+    - name: keepalived (VIP)
+      ansible.builtin.include_tasks:
+        file: tasks/keepalived.yml
+        apply: { tags: [vip] }
+      tags: [vip]
     - name: ubuntu 계정 kubeconfig
       ansible.builtin.shell: |
         install -d -o {{ ansible_user }} -g {{ ansible_user }} /home/{{ ansible_user }}/.kube
@@ -365,8 +375,9 @@
       register: untaint
       changed_when: "'untainted' in untaint.stdout"
       when: kc.control_plane_workloads | default(false)
-    # 원격 etcd 멤버는 우리 쪽 연결을 NAT 뒤 주소(Proxmox 노드의 Tailscale IP)로 봅니다. 그 주소를 peer 인증서 SAN 에 넣어
-    # SAN 검사를 켠 채로 연결되게 합니다. 합류하는 control plane 은 kubeadm-config 의 이 값으로 인증서를 만듭니다
+    # 원격(tailnet) etcd 멤버는 우리 쪽 연결을 NAT 뒤 주소(Proxmox 노드의 Tailscale IP)로 봅니다. 그 주소를 peer 인증서 SAN 에 넣어
+    # SAN 검사를 켠 채로 연결되게 합니다. 합류하는 control plane 은 kubeadm-config 의 이 값으로 인증서를 만듭니다.
+    # 지금은 원격 멤버가 없지만 원격 멤버를 다시 붙일 수 있게 둡니다
     - name: etcd peer 인증서 SAN (kubeadm-config)
       ansible.builtin.shell: |
         set -e
@@ -436,8 +447,11 @@
         --apiserver-advertise-address {{ ansible_host }}
       args:
         creates: /etc/kubernetes/kubelet.conf
-    - name: kube-vip
-      ansible.builtin.include_tasks: tasks/kube-vip.yml
+    - name: keepalived (VIP)
+      ansible.builtin.include_tasks:
+        file: tasks/keepalived.yml
+        apply: { tags: [vip] }
+      tags: [vip]
     - name: ubuntu 계정 kubeconfig
       ansible.builtin.shell: |
         install -d -o {{ ansible_user }} -g {{ ansible_user }} /home/{{ ansible_user }}/.kube
@@ -649,8 +663,8 @@
       delegate_to: localhost
       become: false
 
-# 노드마다 VM 이 있는 Proxmox 노드를 라벨로 붙입니다. 배치 정책(k8s-gitops 의 Kyverno prefer-primary-host)이
-# 이 라벨로 메인 서버(pve01) 노드를 고릅니다. 이 플레이만: -e k8s_cluster=<이름> --tags node-labels
+# 노드마다 VM 이 있는 Proxmox 노드를 라벨로 붙입니다. 배치 정책(k8s-gitops 의 Kyverno prefer-role-host)이
+# 이 라벨로 역할별 서버(CPU 작업 pve01, GPU 작업 pve02, 그 밖 pve03)를 고릅니다. 이 플레이만: -e k8s_cluster=<이름> --tags node-labels
 - name: 노드 라벨 (eu4ng.com/pve)
   hosts: k8s_cp
   become: true
@@ -668,6 +682,58 @@
       loop_control: { label: "{{ item.name }}" }
       register: node_label
       changed_when: "'CHANGED' in node_label.stdout"
+
+# CoreDNS 를 노드마다 하나씩 두고 kube-dns 가 같은 노드의 CoreDNS 를 먼저 쓰게 합니다. etcd 과반이 깨져 API 가 멈추면 엔드포인트가
+# 갱신되지 않아, 죽은 노드의 CoreDNS 로 가는 조회가 실패합니다(2벌이면 절반). 같은 노드의 CoreDNS 는 마지막으로 받은 레코드로 계속 답합니다.
+# kubeadm upgrade 가 CoreDNS 설정을 되돌리므로 업그레이드 뒤 다시 실행합니다: -e k8s_cluster=<이름> --tags dns
+- name: CoreDNS 노드마다 하나
+  hosts: k8s_cp
+  become: true
+  gather_facts: false
+  tags: [dns]
+  tasks:
+    # cordon 한 노드는 받을 수 없으므로 빼고 셉니다(넣으면 남는 파드가 Pending 이고 롤아웃이 멈춤). 노드를 다시 들이면 다시 실행합니다
+    - name: CoreDNS 를 받을 수 있는 노드 수
+      ansible.builtin.shell: >-
+        kubectl --kubeconfig=/etc/kubernetes/admin.conf get nodes -o jsonpath='{range .items[*]}{.spec.unschedulable}{"\n"}{end}'
+        | grep -vc true
+      register: dns_nodes
+      changed_when: false
+    - name: coredns Deployment (노드마다 하나, control plane 에도)
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig=/etc/kubernetes/admin.conf
+          - -n=kube-system
+          - patch
+          - deployment/coredns
+          - --type=strategic
+          - -p
+          - "{{ patch | to_json }}"
+      vars:
+        patch:
+          spec:
+            replicas: "{{ dns_nodes.stdout | int }}"
+            # 한 노드에 하나만 두므로 새 파드가 들어갈 빈 노드가 없습니다. 옛 파드를 먼저 하나씩 내립니다
+            strategy: { rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } }
+            template:
+              spec:
+                affinity:
+                  podAntiAffinity:
+                    requiredDuringSchedulingIgnoredDuringExecution:
+                      - labelSelector: { matchLabels: { k8s-app: kube-dns } }
+                        topologyKey: kubernetes.io/hostname
+                tolerations:
+                  - { key: CriticalAddonsOnly, operator: Exists }
+                  - { key: node-role.kubernetes.io/control-plane, operator: Exists, effect: NoSchedule }
+      register: coredns_patch
+      changed_when: "'(no change)' not in coredns_patch.stdout"
+    - name: kube-dns 가 같은 노드의 CoreDNS 를 먼저 씀
+      ansible.builtin.command: >-
+        kubectl --kubeconfig=/etc/kubernetes/admin.conf -n kube-system patch service/kube-dns --type=merge
+        -p '{"spec":{"trafficDistribution":"PreferSameNode"}}'
+      register: kube_dns_patch
+      changed_when: "'(no change)' not in kube_dns_patch.stdout"
 
 - name: 확인
   hosts: k8s_cp

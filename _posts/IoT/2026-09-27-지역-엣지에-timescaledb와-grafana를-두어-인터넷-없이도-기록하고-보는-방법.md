@@ -87,6 +87,7 @@ bash create-iot-secrets.sh k8s-[SITE].yaml
 
 - **멤버 두 개:** worker 마다 하나씩 StatefulSet 파드로 둡니다(`podAntiAffinity`). 리더 선출은 Patroni 가 쿠버네티스 API(DCS)로 하므로, 멤버가 둘뿐이어도 판정은 엣지 etcd 의 과반이 맡습니다.
 - **동기 복제, 엄격하지 않게:** 쓰기는 다른 멤버가 받아야 완료되지만(`synchronous_mode`), 그 멤버가 죽으면 멈추지 않고 비동기로 이어 씁니다(`synchronous_mode_strict: false`).
+- **API 가 멈춰도 주 DB 유지:** 엣지 etcd 가 과반을 잃어 쿠버네티스 API 가 멈추면 리더 잠금을 갱신하지 못합니다. `failsafe_mode: true` 를 켜 두면 리더가 마지막으로 기록한 멤버 모두가 Patroni REST API 에 답하는 동안 주 DB 로 남아 지역 수집이 끊기지 않습니다. 연락 안 되는 멤버가 하나라도 있으면 그때는 읽기 전용으로 내려갑니다.
 - **접속 주소:** selector 가 없는 Service `timescaledb` 의 Endpoints 에 Patroni 가 지금 주 DB 의 파드 주소를 적습니다. Telegraf 와 Grafana 는 `timescaledb.timescaledb.svc.cluster.local:5432` 로 붙습니다.
 - **스토리지 `longhorn-local`:** [DB 는 스스로 복제하므로](/posts/72/) Longhorn 볼륨은 한 벌만 두고, 파드가 있는 노드에 복제본을 둡니다(`dataLocality: best-effort`). 기본 StorageClass(2벌)에 두면 같은 데이터를 네 번 쓰게 됩니다.
 - **계정:** 처음 만들 때 bootstrap 스크립트가 허브와 같은 역할(`iot` 소유자, `grafana` 읽기 전용)과 권한을 만듭니다. 테이블은 Telegraf 가 첫 행을 쓸 때 허브와 같은 정의로 만듭니다.
@@ -257,7 +258,7 @@ spec:
         accessModes: [ReadWriteOnce]
         storageClassName: longhorn-local            # storageclass.yaml. 한 벌만 두고 이중화는 DB 복제가 맡습니다
         volumeMode: Filesystem
-        resources: { requests: { storage: 5Gi } }   # Longhorn 은 온라인으로 늘릴 수 있습니다
+        resources: { requests: { storage: 20Gi } }  # 템플릿은 바꿀 수 없어, 늘릴 때는 PVC 를 patch(Longhorn 온라인 확장)하고 StatefulSet 을 --cascade=orphan 으로 지워 다시 만들게 합니다
       status: { phase: Pending }
 ```
 {: file="iot/edge/timescaledb/statefulset.yaml" }
@@ -291,6 +292,9 @@ bootstrap:
     synchronous_mode: true
     synchronous_node_count: 1
     synchronous_mode_strict: false
+    # DCS(쿠버네티스 API)가 멈춰도(etcd 과반 상실) 리더가 마지막으로 기록한 멤버 모두와 Patroni REST 로 연락되면 주 DB 를 유지합니다.
+    # 끄면 리더 잠금을 갱신하지 못한 ttl 뒤에 읽기 전용으로 내려가 수집이 끊깁니다. 연락 안 되는 멤버가 하나라도 있으면 그때는 내려갑니다
+    failsafe_mode: true
     postgresql:
       use_pg_rewind: true
       use_slots: true
@@ -547,13 +551,13 @@ spec:
 {: file="iot/edge/grafana/pvc.yaml" }
 
 ```yaml
-# 지역 오버레이가 kube-vip.io/loadbalancerIPs 로 지역 서비스 VIP 를 줍니다(HA·Z2M 과 같은 주소, 포트 3000).
+# 지역 오버레이가 spec.externalIPs 로 지역 서비스 VIP 를 줍니다(HA·Z2M 과 같은 주소, 포트 3000. 주소는 control plane 의 keepalived 가 가짐).
 apiVersion: v1
 kind: Service
 metadata:
   name: grafana
 spec:
-  type: LoadBalancer
+  type: ClusterIP
   selector: { app: grafana }
   ports:
     - { name: http, port: 3000, targetPort: 3000 }
@@ -597,14 +601,14 @@ providers:
 resources:
   - ../../../edge/grafana
 patches:
-  # [SITE] 엣지의 서비스 VIP(kube-vip). HA·Z2M·Matter·Mosquitto 와 포트만 달리해 같은 주소를 씁니다
+  # [SITE] 엣지의 서비스 VIP(proxmox-ansible 의 service_vip, control plane 의 keepalived 가 가짐. API 가 멈춰도 kube-proxy 규칙으로 계속 받음). HA·Z2M·Matter·Mosquitto 와 포트만 달리해 같은 주소를 씁니다
   - patch: |
       apiVersion: v1
       kind: Service
       metadata:
         name: grafana
-        annotations:
-          kube-vip.io/loadbalancerIPs: "[EDGE_SERVICE_VIP]"
+      spec:
+        externalIPs: [[EDGE_SERVICE_VIP]]
   - patch: |
       apiVersion: apps/v1
       kind: Deployment
@@ -634,7 +638,7 @@ git push
 밖에서 오는 지역 서비스 접속은 허브 Traefik 이 Google 로그인 뒤 지역으로 넘기지만, 인터넷이나 허브가 끊기면 그 경로도 끊깁니다. 내부망에서는 같은 이름(`grafana-[SITE_SHORT].[DOMAIN]` 등)으로 허브를 거치지 않고 붙도록 지역에 Traefik 과 cert-manager 를 둡니다. 흐름은 다음과 같습니다.
 
 - 내부망 DNS 가 `lan_dns_names` 의 이름을 지역 서비스 VIP 로 답합니다(엣지 글 1~2단계).
-- 서비스 VIP 는 kube-vip 리더인 control plane 한 대가 가집니다. Traefik 을 control plane 두 대에 DaemonSet 으로 두고 `hostPort` 443 으로 받으므로, VIP 를 가진 노드의 Traefik 이 요청을 받습니다.
+- 서비스 VIP 는 keepalived 가 정한 control plane 한 대가 가집니다. Traefik 을 control plane 두 대에 DaemonSet 으로 두고 `hostPort` 443 으로 받으므로, VIP 를 가진 노드의 Traefik 이 요청을 받습니다.
 - Traefik 은 내부망 대역이 아닌 접속을 403 으로 막고, 이름별로 각 네임스페이스의 Service 로 넘깁니다. 인증은 앱 자체 로그인만 씁니다.
 - 와일드카드 인증서는 지역 cert-manager 가 [DNS-01](/posts/57/) 로 직접 발급·갱신합니다. 인터넷은 갱신할 때만 필요하고, 90일짜리 인증서를 60일째에 갱신하므로 인터넷이 끊겨도 약 30일은 그대로 씁니다.
 
@@ -869,4 +873,4 @@ curl -s -u "$AU:$PW" -H 'Content-Type: application/json' $G/api/ds/query \
 - [Grafana - Data source HTTP API](https://grafana.com/docs/grafana/latest/developers/http_api/data_source/)
 - [Traefik - Kubernetes IngressRoute](https://doc.traefik.io/traefik/routing/providers/kubernetes-crd/)
 - [cert-manager - Cloudflare DNS-01](https://cert-manager.io/docs/configuration/acme/dns01/cloudflare/)
-- [kube-vip - Kubernetes Services](https://kube-vip.io/docs/usage/kubernetes-services/)
+- [Kubernetes - Service (External IPs)](https://kubernetes.io/docs/concepts/services-networking/service/#external-ips)

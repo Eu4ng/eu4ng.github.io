@@ -1,13 +1,13 @@
 ---
 layout: post
 title: Proxmox에 Ansible로 kubeadm 쿠버네티스 클러스터 만드는 방법
-description: control plane 두 대와 worker 두 대를 Proxmox 두 노드에 나눠 두고 API 주소를 kube-vip VIP 로 받는 kubeadm 클러스터를, Ansible 플레이북 하나로 만들고 노드를 교체하고 지우는 방법을 정리했습니다.
+description: control plane 세 대와 worker 세 대를 Proxmox 세 노드에 하나씩 나눠 두고 API 주소를 keepalived VIP 로 받는 kubeadm 클러스터를, Ansible 플레이북 하나로 만들고 노드를 교체하고 지우는 방법을 정리했습니다.
 author: Eu4ng
-tags: [proxmox, ansible, kubernetes, kubeadm, kube-vip, longhorn, cloud-init, homelab]
+tags: [proxmox, ansible, kubernetes, kubeadm, keepalived, longhorn, cloud-init, homelab]
 permalink: /posts/46/
 ---
 
-[템플릿 스크립트](/posts/33/)와 [클러스터 스크립트](/posts/32/)로 하던 일을 Ansible 플레이북으로 옮겨, CT·VM 을 만드는 모든 절차를 `proxmox-ansible` 저장소 하나에 모읍니다. 템플릿 플레이북이 Proxmox 노드마다 Ubuntu 24.04 클라우드 이미지로 VM 템플릿을 만들고, 클러스터 플레이북이 그 템플릿을 복제해 노드 VM 을 만든 뒤 [kubeadm](/posts/60/) 클러스터를 구성합니다. control plane 과 worker 를 두 대씩 두 Proxmox 노드에 나눠 두고, API 주소는 **kube-vip** 이 ARP 로 띄우는 VIP 로 받아 control plane 한 대가 꺼져도 같은 주소로 붙습니다. 클러스터 정의는 변수 파일에 목록으로 두고 `-e k8s_cluster=<이름>` 으로 골라, 중앙 허브와 지역 엣지를 같은 플레이북으로 만듭니다. 여러 번 실행해도 결과가 같고, 노드 교체와 삭제도 같은 플레이북으로 합니다.
+[템플릿 스크립트](/posts/33/)와 [클러스터 스크립트](/posts/32/)로 하던 일을 Ansible 플레이북으로 옮겨, CT·VM 을 만드는 모든 절차를 `proxmox-ansible` 저장소 하나에 모읍니다. 템플릿 플레이북이 Proxmox 노드마다 Ubuntu 24.04 클라우드 이미지로 VM 템플릿을 만들고, 클러스터 플레이북이 그 템플릿을 복제해 노드 VM 을 만든 뒤 [kubeadm](/posts/60/) 클러스터를 구성합니다. control plane 과 worker 를 세 Proxmox 노드에 하나씩 나눠 두어 etcd 가 control plane 3멤버가 되고 서버 한 대가 죽어도 과반이 남습니다. API 주소는 control plane 마다 둔 **keepalived** 가 VRRP 로 주인을 정해 ARP 로 알리는 VIP 로 받아 control plane 한 대가 꺼져도 같은 주소로 붙습니다. 클러스터 정의는 변수 파일에 목록으로 두고 `-e k8s_cluster=<이름>` 으로 골라, 중앙 허브와 지역 엣지를 같은 플레이북으로 만듭니다. 여러 번 실행해도 결과가 같고, 노드 교체와 삭제도 같은 플레이북으로 합니다.
 
 1. 변수 채우기
 2. 템플릿 만들기
@@ -25,23 +25,23 @@ permalink: /posts/46/
 
 | 항목 | 버전 |
 | :--- | :--- |
-| Proxmox VE | `9.2` (두 노드) |
+| Proxmox VE | `9.2` (세 노드) |
 | Ansible | `13.1` (ansible-core `2.20`, community.proxmox `1.4`) |
 | Kubernetes | `v1.37.0` (kubeadm, containerd `2.2`) |
-| kube-vip | `v1.2.4` |
+| keepalived | `2.2.8` (Ubuntu 24.04 패키지) |
 | Flannel | `v0.28.9` |
 | 작성 기준일 | `2026-09-28` |
 
 다음 항목이 준비되어 있어야 합니다.
 
-- Proxmox 두 대의 클러스터와 Tailscale 서브넷 라우터 ([Proxmox 두 대를 클러스터로 묶고 원격 NAS에 QDevice 붙이는 방법](/posts/53/)). VM 은 원격지(tailnet)로 가는 패킷을 자기 Proxmox 노드로 보냅니다.
+- Proxmox 세 대의 클러스터와 Tailscale 서브넷 라우터 ([Proxmox 두 대를 클러스터로 묶고 원격 NAS에 QDevice 붙이는 방법](/posts/53/)). VM 은 원격지(tailnet)로 가는 패킷을 자기 Proxmox 노드로 보냅니다.
 - `proxmox-ansible` 저장소 골격, API 토큰, 내부망 DNS 플레이북(`playbooks/lan-dns.yml`, `templates/dnsmasq-lan.conf.j2`) ([Proxmox에 Ansible로 내부망 DNS 컨테이너 만드는 방법](/posts/41/)). 클러스터 플레이북이 끝에서 내부망 DNS 플레이북을 다시 실행합니다.
 - 실행 PC 의 SSH 키(`~/.ssh/id_ed25519.pub`)가 `group_vars/all.yml` 의 `ct_ssh_pubkeys` 목록에 들어 있어야 합니다. 이 키가 템플릿에 들어가 복제한 VM 에 Ansible 이 접속합니다.
-- 노드마다 비어 있는 VM ID 와 고정 IP, 클러스터마다 비어 있는 [VIP](/posts/69/) 하나(LoadBalancer 서비스를 받을 엣지는 서비스 VIP 하나 더). VIP 는 공유기 DHCP 가 나눠 주지 않는 주소로 고릅니다.
+- 노드마다 비어 있는 VM ID 와 고정 IP, 클러스터마다 비어 있는 [VIP](/posts/69/) 하나(서비스 VIP 를 쓰는 엣지는 하나 더). VIP 는 공유기 DHCP 가 나눠 주지 않는 주소로 고릅니다.
 
 ## 1. 변수 채우기
 
-`group_vars/all.yml` 에 템플릿과 클러스터 값을 추가합니다. `k8s_clusters` 아래에 클러스터마다 노드 목록을 두고, 노드마다 VM 을 둘 Proxmox 노드(`pve`)와 역할(`role`)을 적습니다. `role: control-plane` 인 첫 노드에서 클러스터를 만들고 나머지 control plane 과 worker 가 합류합니다. `longhorn_disk` 가 있는 노드에는 Longhorn 이 복제 볼륨을 두는 전용 디스크를 붙입니다. [내부망 DNS 글](/posts/41/)에서 허브 VIP 만 넣어 둔 `k8s_clusters` 는 이 목록으로 바꿉니다.
+`group_vars/all.yml` 에 템플릿과 클러스터 값을 추가합니다. `k8s_clusters` 아래에 클러스터마다 노드 목록을 두고, 노드마다 VM 을 둘 Proxmox 노드(`pve`)와 역할(`role`)을 적습니다. `role: control-plane` 인 첫 노드에서 클러스터를 만들고 나머지 control plane 과 worker 가 합류합니다. `longhorn_disk` 가 있는 노드에는 Longhorn 이 복제 볼륨을 두는 전용 디스크를 붙이고, `longhorn_storage` 로 그 디스크를 둘 Proxmox 저장소를 고릅니다(기본 `vm_disk_storage`). NVMe 가 넉넉하지 않은 세 번째 서버의 worker 는 NAS HDD 의 NFS 저장소(`nas_vm_storage`)에 두고, `startup` 으로 NAS VM 이 뜬 뒤에 켜지게 합니다. [내부망 DNS 글](/posts/41/)에서 허브 VIP 만 넣어 둔 `k8s_clusters` 는 이 목록으로 바꿉니다.
 
 {% raw %}
 ```yaml
@@ -51,18 +51,24 @@ vm_template_image_url: https://cloud-images.ubuntu.com/noble/current/noble-serve
 vm_template_user: ubuntu                      # 복제한 VM 의 접속 계정 (cloud-init)
 vm_snippet_storage: local                     # cloud-init vendor 스니펫을 둘 디렉터리형 스토리지
 vm_disk_storage: local-lvm                    # VM 디스크를 두는 스토리지 (lvmthin 이라 포맷은 raw)
+nas_vm_storage: { name: nas, server: [NAS_IP], export: [NFS_EXPORT] }   # NAS 의 NFS 저장소. longhorn_storage 가 이 이름이면 qcow2 로 만들고 ssd 표시를 붙이지 않음
 vm_bridge: vmbr0
 tailscale_cidr: 100.64.0.0/10                 # tailnet 주소 대역. 쿠버네티스 VM 은 이 대역을 자기 Proxmox 호스트로 보냄(k8s-cluster.yml)
 
 # ---- k8s-cluster: kubeadm 쿠버네티스 클러스터 (허브와 지역 엣지) ----
 # playbooks/k8s-cluster.yml -e k8s_cluster=<이름> 으로 k8s_clusters 의 한 클러스터를 만듭니다(기본 hub).
 # 노드마다 pve(VM 을 둘 Proxmox 노드), role(control-plane|worker)을 둡니다. role 이 control-plane 인 첫 항목에서 클러스터를 만들고
-# 나머지 control-plane 은 합류합니다. 두 Proxmox 노드에 나눠 한 대가 죽어도 버티고, etcd 세 번째 멤버는 원격 NAS 컨테이너가 맡습니다.
+# 나머지 control-plane 은 합류합니다. 세 Proxmox 노드(pve01·pve02·pve03)에 cp 와 worker 를 하나씩 둡니다. etcd 는 cp 3멤버라
+# 서버 한 대가 죽어도 과반이 남습니다.
 # 크기 기준: 허브는 코어 1 : 메모리 2GiB. 엣지는 IoT 전용이라 IoT 서비스가 도는 만큼만 주고 나머지는 허브에 둡니다.
 #   엣지 worker-1 은 NVR(재실 감지)이 CPU 를 다 써서 6코어, worker-2 는 NVR 이 넘어올 수 있는 최소인 4코어.
 #   control plane 은 etcd 가 밀리지 않게 2코어를 유지합니다(엣지는 2GiB 로 충분).
 # longhorn_disk(GB): Longhorn 이 복제 볼륨을 두는 전용 디스크(scsi1, /var/lib/longhorn). 키우면 켠 채로 늘립니다(줄이지는 못함).
 #   엣지는 NVR 영상 버퍼(18Gi, 2벌)까지 담으려고 40.
+# longhorn_storage: 그 디스크를 둘 Proxmox 저장소(기본 vm_disk_storage). NFS(nas_vm_storage)면 qcow2 이고 ssd 표시를 붙이지 않습니다.
+#   DB 는 NVMe 인 worker-1·2 에만 둡니다(배치 정책의 nodeAffinity).
+# startup: Proxmox 부팅 순서(qm --startup). nas 디스크를 쓰는 worker-3 은 NAS VM(order=1, up 으로 NFS 를 기다림) 다음 order=2,
+#   cp-3 은 NAS 를 기다리지 않게 order=1. 지정하지 않은 VM 은 순서 있는 VM 다음에 켭니다.
 k8s_cluster_name: "{{ k8s_cluster | default('hub') }}"
 kc: "{{ k8s_clusters[k8s_cluster_name] }}"   # 지금 다루는 클러스터
 k8s_clusters:
@@ -70,33 +76,37 @@ k8s_clusters:
     nodes:
       - { name: k8s-hub-cp-1, pve: pve01, role: control-plane, vmid: 121, ip: [HUB_CP_1_IP], cores: 2,  memory: 4096,  disk: 32G }
       - { name: k8s-hub-cp-2, pve: pve02, role: control-plane, vmid: 122, ip: [HUB_CP_2_IP], cores: 2,  memory: 4096,  disk: 32G }
+      - { name: k8s-hub-cp-3, pve: pve03, role: control-plane, vmid: 125, ip: [HUB_CP_3_IP], cores: 2,  memory: 4096,  disk: 32G, startup: "order=1" }
       - { name: k8s-hub-worker-1, pve: pve01, role: worker,    vmid: 123, ip: [HUB_WORKER_1_IP], cores: 12, memory: 24576, disk: 100G, longhorn_disk: 20 }
       - { name: k8s-hub-worker-2, pve: pve02, role: worker,    vmid: 124, ip: [HUB_WORKER_2_IP], cores: 8,  memory: 16384, disk: 60G,  longhorn_disk: 20 }
+      - { name: k8s-hub-worker-3, pve: pve03, role: worker,    vmid: 126, ip: [HUB_WORKER_3_IP], cores: 6,  memory: 12288, disk: 40G,  longhorn_disk: 100, longhorn_storage: nas, startup: "order=2" }
     dns_name: hub                             # 내부망 DNS 역할 이름 k8s-hub(VIP), kubectl-hub(kubectl 을 돌릴 control plane). templates/dnsmasq-lan.conf.j2
-    vip: [HUB_VIP]                            # API 엔드포인트(kube-vip, ARP). control plane 중 한 대가 가짐
+    vip: [HUB_VIP]                            # API 엔드포인트(keepalived VRRP, playbooks/tasks/keepalived.yml). control plane 중 한 대가 가짐
+    vrrp_id: 100                              # keepalived virtual_router_id. 같은 LAN 의 클러스터마다 달라야 함
     control_plane_workloads: false            # control plane 에 일반 파드를 두지 않음(taint 유지)
-    kube_vip_services: false
     kubeconfig: "{{ lookup('env', 'HOME') }}/.kube/k8s-hub.yaml"   # 실행 PC 에 저장할 kubeconfig
   daejeon:                                    # 지역 엣지. 허브 없이 혼자 돕니다
     nodes:
       - { name: k8s-dj-cp-1,     pve: pve01, role: control-plane, vmid: 131, ip: [EDGE_CP_1_IP], cores: 2, memory: 2048, disk: 32G }
       - { name: k8s-dj-cp-2,     pve: pve02, role: control-plane, vmid: 132, ip: [EDGE_CP_2_IP], cores: 2, memory: 2048, disk: 32G }
+      - { name: k8s-dj-cp-3,     pve: pve03, role: control-plane, vmid: 135, ip: [EDGE_CP_3_IP], cores: 2, memory: 2048, disk: 32G, startup: "order=1" }
       - { name: k8s-dj-worker-1, pve: pve01, role: worker,        vmid: 133, ip: [EDGE_WORKER_1_IP], cores: 6, memory: 8192, disk: 40G, longhorn_disk: 40 }
       - { name: k8s-dj-worker-2, pve: pve02, role: worker,        vmid: 134, ip: [EDGE_WORKER_2_IP], cores: 4, memory: 8192, disk: 40G, longhorn_disk: 40 }
+      - { name: k8s-dj-worker-3, pve: pve03, role: worker,        vmid: 136, ip: [EDGE_WORKER_3_IP], cores: 6, memory: 12288, disk: 40G, longhorn_disk: 200, longhorn_storage: nas, startup: "order=2" }
     dns_name: dj                              # 내부망 DNS 역할 이름 k8s-dj, kubectl-dj, iot-dj(서비스 VIP)
     vip: [EDGE_VIP]
-    service_vip: [EDGE_SERVICE_VIP]           # LoadBalancer 서비스 VIP. 서비스의 kube-vip.io/loadbalancerIPs 와 같아야 함
+    vrrp_id: 130
+    service_vip: [EDGE_SERVICE_VIP]           # 서비스 VIP(keepalived 가 API VIP 와 함께 가짐). 서비스의 spec.externalIPs 와 같아야 함
     lan_dns_names: [ha-dj, z2m-dj, matter-dj, grafana-dj]   # 내부망에서 service_vip(지역 Traefik)로 답할 지역 서비스 이름
     control_plane_workloads: false
-    kube_vip_services: true                   # LoadBalancer Service 에 VIP 를 줌(service_vip)
     otbr_host: true                           # OpenThread Border Router(hostNetwork)용 커널 설정
     kubeconfig: "{{ lookup('env', 'HOME') }}/.kube/k8s-daejeon.yaml"
-# 원격 etcd 멤버(NAS)가 보는 우리 쪽 주소: Proxmox 노드의 Tailscale IP(마스커레이드). 노드를 다시 설치하면 주소가 바뀌므로 고정하지 않고
+# 원격 etcd 멤버를 붙일 때 그 멤버가 보는 우리 쪽 주소: Proxmox 노드의 Tailscale IP(마스커레이드). 노드를 다시 설치하면 주소가 바뀌므로 고정하지 않고
 # 각 Proxmox 노드에서 `tailscale ip -4` 를 읽습니다(k8s-cluster.yml 의 "Proxmox 노드 Tailscale IP" 작업). Tailscale 이 없는 노드는 빠집니다
 k8s_etcd_peer_sans: "{{ groups.proxmox | map('extract', hostvars) | selectattr('pve_tailscale_ip', 'defined') | map(attribute='pve_tailscale_ip') | select | list }}"
 k8s_vm_cpuunits: 1000                         # 호스트 CPU 가 모자랄 때의 몫(기본 100). 같은 호스트의 다른 CT·VM 이 CPU 를 다 써도 etcd·kubelet 이 밀리지 않게 높게 둠
 k8s_vip_interface: eth0
-k8s_kube_vip_version: v1.2.4                  # https://github.com/kube-vip/kube-vip/releases
+keepalived_vips: "{{ [kc.vip] + ([kc.service_vip] if kc.service_vip is defined else []) }}"   # control plane 의 keepalived 가 함께 가질 VIP
 k8s_nameservers: [[LAN_DNS_IP], [LAN_DNS_2_IP]]
 k8s_version: v1.37                            # pkgs.k8s.io 저장소의 마이너 버전
 k8s_package_version: 1.37.0-1.1               # kubelet·kubeadm·kubectl 버전, 새 클러스터의 control plane 버전(kubeadm init --kubernetes-version). kubelet 이 apiserver 보다 새로우면 안 됨
@@ -112,7 +122,7 @@ k8s_flannel_version: v0.28.9                  # https://github.com/flannel-io/fl
 
 ## 2. 템플릿 만들기
 
-템플릿 플레이북은 Proxmox 노드마다 클라우드 이미지를 내려받아 VM 을 만들고 템플릿으로 바꿉니다. VM ID 는 클러스터 전체에서 하나라, 두 번째 노드의 템플릿 번호는 inventory 의 `vm_template_vmid`(예: `9001`)로 따로 줍니다([Proxmox 클러스터 글](/posts/53/)의 4단계). 모든 복제 VM 에 적용할 cloud-init vendor 스니펫(qemu-guest-agent 설치, SSH 호스트 키 유지)을 호스트의 스니펫 스토리지에 두고, VM 에 넣을 공개키로는 실행 PC 키와 호스트의 `authorized_keys`, 호스트 키를 합쳐 넣습니다. 같은 ID 의 템플릿이 이미 있으면 아무것도 하지 않고, 같은 ID 가 템플릿이 아닌 VM 이면 멈춥니다.
+템플릿 플레이북은 Proxmox 노드마다 클라우드 이미지를 내려받아 VM 을 만들고 템플릿으로 바꿉니다. VM ID 는 클러스터 전체에서 하나라, 두 번째·세 번째 노드의 템플릿 번호는 inventory 의 `vm_template_vmid`(예: `9001`, `9002`)로 따로 줍니다([Proxmox 클러스터 글](/posts/53/)의 4단계). 모든 복제 VM 에 적용할 cloud-init vendor 스니펫(qemu-guest-agent 설치, SSH 호스트 키 유지)을 호스트의 스니펫 스토리지에 두고, VM 에 넣을 공개키로는 실행 PC 키와 호스트의 `authorized_keys`, 호스트 키를 합쳐 넣습니다. 같은 ID 의 템플릿이 이미 있으면 아무것도 하지 않고, 같은 ID 가 템플릿이 아닌 VM 이면 멈춥니다.
 
 ```bash
 # 플레이북 내려받기
@@ -217,37 +227,43 @@ export PROXMOX_HOST=[PROXMOX_IP] PROXMOX_USER=root@pam PROXMOX_TOKEN_ID=ansible 
 ansible-playbook playbooks/vm-template.yml
 ```
 
-- **확인:** `PLAY RECAP` 에 `failed=0`, 첫 번째 노드에서 `qm config 9000`, 두 번째 노드에서 `qm config 9001` 에 `template: 1`, `sshkeys:`, `cicustom: vendor=local:snippets/ubuntu-cloud-vendor.yaml` 이 보입니다. 한 번 더 실행하면 `changed=0` 입니다.
+- **확인:** `PLAY RECAP` 에 `failed=0`, 첫 번째 노드에서 `qm config 9000`, 두 번째·세 번째 노드에서 `qm config 9001`·`qm config 9002` 에 `template: 1`, `sshkeys:`, `cicustom: vendor=local:snippets/ubuntu-cloud-vendor.yaml` 이 보입니다. 한 번 더 실행하면 `changed=0` 입니다.
 
 ## 3. 클러스터 만들기
 
 클러스터 플레이북은 아래 순서로 진행합니다.
 
-- VM 만들기: 노드 목록을 인벤토리 그룹으로, 노드마다 정한 Proxmox 노드의 템플릿 복제, 디스크 늘리기(복제 직후 한 번), Longhorn 디스크(`scsi1`) 추가와 늘리기(`longhorn_disk` 를 키웠을 때), 코어·메모리·CPU 우선순위(`cpuunits`)·IP·DNS 설정, 시작
+- VM 만들기: 노드 목록을 인벤토리 그룹으로, 노드마다 정한 Proxmox 노드의 템플릿 복제, 디스크 늘리기(복제 직후 한 번), Longhorn 디스크(`scsi1`, `longhorn_storage` 의 저장소) 추가와 늘리기(`longhorn_disk` 를 키웠을 때), 코어·메모리·CPU 우선순위(`cpuunits`)·IP·DNS·부팅 순서(`startup`) 설정, 시작
 - 노드 공통: 시간대, swap 끄기, 커널 모듈·설정, tailnet 경로, 엣지의 OpenThread Border Router 커널 설정, containerd 와 `k8s_package_version` 으로 고정한 kubelet·kubeadm·kubectl
 - control plane 기준 노드 고르기: `admin.conf` 가 있는 control plane 을 기준으로 삼고, 클러스터가 없는데 VIP 가 이미 응답하면 멈춤
-- control plane: kube-vip, `kubeadm init --control-plane-endpoint=<VIP>:6443 --kubernetes-version=...`(처음 한 번), Flannel, etcd peer 인증서 SAN, join 명령, kubeconfig 를 실행 PC 로
-- control plane 합류: 한 대씩 `kubeadm join --control-plane`, kube-vip
+- control plane: keepalived(처음 만들 때는 init 전에), `kubeadm init --control-plane-endpoint=<VIP>:6443 --kubernetes-version=...`(처음 한 번), Flannel, etcd peer 인증서 SAN, join 명령, kubeconfig 를 실행 PC 로
+- control plane 합류: 한 대씩 `kubeadm join --control-plane`, keepalived
 - worker 합류: `kubeadm join`, kubelet 이 VIP 로 붙게
 - Longhorn 준비: `open-iscsi`·`nfs-common`, `iscsi_tcp` 모듈, multipath 에서 `sd` 장치 제외, 전용 디스크를 ext4 로 `/var/lib/longhorn` 에 마운트, 디스크를 늘렸으면 파일시스템도 그 크기로
-- etcd 리더 감시: control plane 마다 `etcd-leader-guard` 서비스. 원격 투표자가 etcd 리더가 되면 자기 노드로 리더를 되돌림
+- etcd 리더 감시: control plane 마다 `etcd-leader-guard` 서비스. 원격 투표자를 붙인 클러스터에서 그 멤버가 etcd 리더가 되면 자기 노드로 리더를 되돌림
 - 옛 노드 빼기: `retire: true` 가 붙은 노드(5단계)
 - 노드 라벨: 노드마다 VM 이 있는 Proxmox 노드를 `eu4ng.com/pve` 라벨로 붙임. 이것만 다시 맞출 때는 `--tags node-labels`
+- CoreDNS: 받을 수 있는 노드마다 하나씩 두고 kube-dns 가 같은 노드의 CoreDNS 를 먼저 쓰게 함. 이것만 다시 맞출 때는 `--tags dns`
 - 확인: 모든 노드 Ready, 노드 수
 - 내부망 DNS: `lan-dns.yml` 을 다시 실행해 노드·역할 이름을 새로 만듦
 
-kube-vip 은 control plane 마다 static pod 로 뜨고, 리더로 뽑힌 한 대가 VIP 를 ARP 로 알립니다. 클러스터를 처음 만들 때는 `admin.conf` 에 아직 권한이 없어 `super-admin.conf` 로 붙습니다. 엣지처럼 `kube_vip_services: true` 인 클러스터는 LoadBalancer 서비스의 VIP 도 같은 리더가 가집니다. control plane 버전은 `--kubernetes-version` 으로 설치한 kubelet·kubeadm 과 같은 버전에 고정합니다. `kubeadm init` 과 `join` 은 결과 파일(`/etc/kubernetes/admin.conf`, `kubelet.conf`)이 있으면 건너뛰므로 다시 실행해도 클러스터를 새로 만들지 않습니다.
+keepalived 는 control plane 마다 systemd 서비스로 뜨고, control plane 끼리 VRRP 광고를 unicast 로 주고받아 우선순위가 가장 높은 한 대가 VIP 를 가집니다. 평소에는 첫 번째 Proxmox 노드 쪽 control plane(우선순위 110, 나머지는 100)이 가지고, 그 노드의 apiserver 가 `6443` 에서 연결을 받지 않으면 우선순위가 20 내려가 다른 control plane 으로 넘어갑니다. 돌아오면 다시 가져갑니다(첫 control plane 의 keepalived 를 멈추면 1초 안에 VIP 가 두 번째로 넘어가고, 다시 켜면 4초 안에 돌아옵니다). 쿠버네티스 API 없이 주인을 정하므로 etcd 과반을 잃어 API 가 멈춰도 살아 있는 control plane 이 VIP 를 계속 가집니다. apiserver 검사가 실패해도 VIP 를 놓지 않고 우선순위만 내리는 것도 같은 이유입니다. API 리스로 리더를 뽑는 방식이 이때 VIP 를 놓는 이유는 [가상 IP(VIP)와 ARP로 서버 장애를 넘기는 원리](/posts/69/)에 정리했습니다. 클러스터를 처음 만들 때는 apiserver 가 아직 없으므로 `kubeadm init` 전에 keepalived 를 켜 두고 응답은 기다리지 않습니다. 엣지처럼 `service_vip` 가 있는 클러스터는 같은 keepalived 가 서비스 VIP 도 함께 가집니다. `vrrp_id` 는 VRRP 의 `virtual_router_id` 라 같은 LAN 의 클러스터마다 다르게 둡니다. 예전에 kube-vip 으로 만든 클러스터는 첫 작업이 kube-vip static pod 를 모든 control plane 에서 먼저 내리고 keepalived 로 바꿉니다. VIP 만 다시 맞출 때는 `--tags vip` 로 실행합니다.
 
-tailnet 경로는 원격 NAS 에 둔 etcd 세 번째 투표자와 DB 복제본에 닿기 위한 것입니다. VM 은 tailnet 대역(`100.64.0.0/10`)을 자기 Proxmox 노드로 보내고, 그 노드가 Tailscale IP 로 바꿔 내보냅니다. 원격 etcd 멤버는 우리 쪽 연결을 이 주소로 보므로 `k8s_etcd_peer_sans` 를 etcd peer 인증서 SAN 에 넣습니다.
+CoreDNS 는 kubeadm 기본값(2벌)이면 API 가 멈췄을 때 엔드포인트가 갱신되지 않아, 죽은 노드의 CoreDNS 로 가는 조회가 실패합니다. 플레이북은 CoreDNS 를 cordon 하지 않은 노드 수만큼 두고, 한 노드에 하나씩만 뜨게(`podAntiAffinity`, control plane taint 허용) 한 뒤 kube-dns Service 에 `trafficDistribution: PreferSameNode` 를 걸어 같은 노드의 CoreDNS 를 먼저 쓰게 합니다. `kubeadm upgrade` 가 이 설정을 되돌리므로 업그레이드 뒤와 cordon 한 노드를 다시 들인 뒤에 `--tags dns` 로 다시 실행합니다.
 
-etcd 리더 감시는 플레이북이 `scripts/etcd-leader-guard.sh` 를 control plane 에 복사해 systemd 서비스로 띄우는 것이라, 스크립트도 함께 내려받습니다. 리더가 `etcd-witness` 로 시작하는 이름의 멤버일 때만 움직이므로 원격 투표자가 없는 클러스터에서는 아무 일도 하지 않습니다. 스크립트의 내용과 필요한 이유는 [쿠버네티스 etcd 세 번째 투표자를 원격 NAS 컨테이너로 붙이는 방법](/posts/55/)에 정리했습니다.
+control plane 버전은 `--kubernetes-version` 으로 설치한 kubelet·kubeadm 과 같은 버전에 고정합니다. `kubeadm init` 과 `join` 은 결과 파일(`/etc/kubernetes/admin.conf`, `kubelet.conf`)이 있으면 건너뛰므로 다시 실행해도 클러스터를 새로 만들지 않습니다.
+
+tailnet 경로는 원격지(tailnet)의 장치와 DB 복제본에 닿기 위한 것입니다. VM 은 tailnet 대역(`100.64.0.0/10`)을 자기 Proxmox 노드로 보내고, 그 노드가 Tailscale IP 로 바꿔 내보냅니다. 원격 etcd 멤버를 붙이면 그 멤버가 우리 쪽 연결을 이 주소로 보므로 `k8s_etcd_peer_sans` 를 etcd peer 인증서 SAN 에 넣어 둡니다. control plane 3멤버만 쓰는 지금 구성에서는 쓰이지 않지만, 원격 멤버를 다시 붙일 수 있게 남겨 둡니다.
+
+etcd 리더 감시는 플레이북이 `scripts/etcd-leader-guard.sh` 를 control plane 에 복사해 systemd 서비스로 띄우는 것이라, 스크립트도 함께 내려받습니다. 리더가 `etcd-witness` 로 시작하는 이름의 멤버일 때만 움직이므로, 이 글처럼 control plane 3멤버만 둔 클러스터에서는 아무 일도 하지 않습니다. 스크립트의 내용과 필요한 이유는 [쿠버네티스 etcd 세 번째 투표자를 원격 NAS 컨테이너로 붙이는 방법](/posts/55/)에 정리했습니다.
 
 ```bash
 # 플레이북 내려받기 (lan-dns.yml 과 dnsmasq 템플릿은 내부망 DNS 글에서 받은 것을 씁니다)
-mkdir -p playbooks/tasks scripts
+mkdir -p playbooks/tasks scripts templates/keepalived
 curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/k8s-cluster.yml -o playbooks/k8s-cluster.yml
 curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/etcd-leader-guard.sh -o scripts/etcd-leader-guard.sh
-curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/tasks/kube-vip.yml -o playbooks/tasks/kube-vip.yml
+curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/tasks/keepalived.yml -o playbooks/tasks/keepalived.yml
+curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/templates/keepalived/keepalived.conf.j2 -o templates/keepalived/keepalived.conf.j2
 ```
 
 <details markdown="1">
@@ -256,9 +272,9 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/tasks/kube-vip.yml -o 
 {% raw %}
 ```yaml
 # kubeadm 쿠버네티스 클러스터(control plane N + worker N). group_vars 의 k8s_clusters 에서 -e k8s_cluster=<이름>(기본 hub)으로 고릅니다.
-# 노드마다 정한 Proxmox 노드의 템플릿(vm-template.yml)을 복제해 VM 을 만들고, containerd·kubeadm 을 설치해 VIP(kube-vip) 엔드포인트로
+# 노드마다 정한 Proxmox 노드의 템플릿(vm-template.yml)을 복제해 VM 을 만들고, containerd·kubeadm 을 설치해 VIP(keepalived) 엔드포인트로
 # 클러스터를 구성한 뒤 kubeconfig 를 실행 PC 로 가져옵니다. 허브(hub)와 지역 엣지(daejeon 등)가 같은 절차로 만들어집니다.
-# etcd 세 번째 멤버(서울 NAS)는 k8s-gitops 의 scripts/etcd-witness-certs.sh 와 stacks/seoul/etcd-witness* 로 붙입니다.
+# etcd 는 세 Proxmox 노드에 하나씩 둔 control plane 3멤버입니다.
 # VIP 없이 만든 기존 클러스터는 먼저 scripts/k8s-control-plane-endpoint.sh 로 옮깁니다. 그 다음은 Argo CD 설치·등록부터 GitOps 입니다.
 #   ansible-playbook playbooks/k8s-cluster.yml [-e k8s_cluster=daejeon]                    만들기 (여러 번 실행해도 됨)
 #   ansible-playbook playbooks/k8s-cluster.yml [-e k8s_cluster=...] -e k8s_state=absent    VM 삭제 (ID 와 이름이 모두 맞는 VM 만, yes 입력 후)
@@ -370,16 +386,19 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/tasks/kube-vip.yml -o 
       loop: "{{ clones.results }}"
       loop_control: { label: "{{ item.item.name }}" }
       when: item.changed
+    # longhorn_storage 가 NFS(nas_vm_storage)면 qcow2(파일), lvmthin 이면 raw 입니다. HDD 위 NFS 디스크에는 ssd 표시를 붙이지 않습니다
     - name: Longhorn 디스크 (scsi1, 없을 때만. 켜진 VM 에 핫플러그)
       community.proxmox.proxmox_disk:
         vmid: "{{ item.vmid }}"
         disk: scsi1
-        storage: "{{ vm_disk_storage }}"
+        storage: "{{ lh_storage }}"
         size: "{{ item.longhorn_disk }}"
-        format: raw
+        format: "{{ 'qcow2' if lh_storage == nas_vm_storage.name else 'raw' }}"
         discard: "on"
-        ssd: true
+        ssd: "{{ lh_storage != nas_vm_storage.name }}"
         state: present
+      vars:
+        lh_storage: "{{ item.longhorn_storage | default(vm_disk_storage) }}"
       loop: "{{ active | selectattr('longhorn_disk', 'defined') }}"
       loop_control: { label: "{{ item.name }}" }
     - name: Longhorn 디스크 늘리기 (longhorn_disk 를 키웠을 때. 켠 채로 늘리고, 줄이지는 못함)
@@ -390,7 +409,7 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/tasks/kube-vip.yml -o 
         state: resized
       loop: "{{ active | selectattr('longhorn_disk', 'defined') }}"
       loop_control: { label: "{{ item.name }}" }
-    - name: VM 설정 맞추기 (코어·메모리·CPU 우선순위·IP·DNS·자동 시작. 모듈 특성상 매번 changed 로 보고됨. 코어·메모리는 VM 을 껐다 켜야 적용)
+    - name: VM 설정 맞추기 (코어·메모리·CPU 우선순위·IP·DNS·자동 시작·부팅 순서. 모듈 특성상 매번 changed 로 보고됨. 코어·메모리는 VM 을 껐다 켜야 적용)
       community.proxmox.proxmox_kvm:
         node: "{{ item.pve | default(proxmox_node) }}"
         vmid: "{{ item.vmid }}"
@@ -399,6 +418,7 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/tasks/kube-vip.yml -o 
         memory: "{{ item.memory }}"
         cpuunits: "{{ k8s_vm_cpuunits }}"
         onboot: true
+        startup: "{{ item.startup | default(omit) }}"   # 부팅 순서(group_vars 의 startup 설명)
         ipconfig: { ipconfig0: "ip={{ item.ip }}/24,gw={{ ct_gateway }}" }
         nameservers: "{{ k8s_nameservers }}"
         update: true
@@ -462,8 +482,8 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/tasks/kube-vip.yml -o 
         value: "1"
         sysctl_file: /etc/sysctl.d/k8s.conf
       loop: [net.bridge.bridge-nf-call-iptables, net.bridge.bridge-nf-call-ip6tables, net.ipv4.ip_forward]
-    # 원격지(서울 NAS)의 etcd 투표자·DB 복제본은 tailnet 에 있습니다. VM 이 있는 Proxmox 노드가 Tailscale 서브넷 라우터이므로
-    # tailnet 대역을 그 노드로 보냅니다. VM 은 자기 노드와 함께 죽고 살므로 이 경로에는 이중화가 필요 없습니다
+    # 원격지(tailnet)의 장치·DB 복제본에 닿는 경로입니다(옛 서울 NAS etcd 투표자도 이 경로였음). VM 이 있는 Proxmox 노드가 Tailscale 서브넷
+    # 라우터이므로 tailnet 대역을 그 노드로 보냅니다. VM 은 자기 노드와 함께 죽고 살므로 이 경로에는 이중화가 필요 없습니다
     - name: tailnet 경로 (netplan)
       ansible.builtin.copy:
         dest: /etc/netplan/60-tailnet.yaml
@@ -591,11 +611,14 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/tasks/kube-vip.yml -o 
       ansible.builtin.stat:
         path: /etc/kubernetes/admin.conf
       register: admin_conf
-    # 새 클러스터는 VIP 엔드포인트로 만듭니다. kube-vip 은 init 중에는 super-admin.conf 로 로컬 apiserver 에 붙어 VIP 를 잡습니다
-    - name: kube-vip (init 용)
-      ansible.builtin.include_tasks: tasks/kube-vip.yml
-      vars: { kube_vip_kubeconfig: /etc/kubernetes/super-admin.conf }
+    # 새 클러스터는 VIP 엔드포인트로 만듭니다. keepalived 는 API 없이 VIP 를 잡으므로 init 전에 켜 둡니다(apiserver 가 아직 없어 응답은 기다리지 않음)
+    - name: keepalived (init 용)
+      ansible.builtin.include_tasks:
+        file: tasks/keepalived.yml
+        apply: { tags: [vip] }
+      vars: { keepalived_wait_api: false }
       when: not admin_conf.stat.exists
+      tags: [vip]
     - name: kubeadm init (처음 한 번)
       ansible.builtin.command: >-
         kubeadm init --control-plane-endpoint={{ kc.vip }}:6443 --upload-certs
@@ -603,8 +626,11 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/tasks/kube-vip.yml -o 
         --pod-network-cidr={{ k8s_pod_cidr }} --apiserver-advertise-address={{ ansible_host }}
       args:
         creates: /etc/kubernetes/admin.conf
-    - name: kube-vip
-      ansible.builtin.include_tasks: tasks/kube-vip.yml
+    - name: keepalived (VIP)
+      ansible.builtin.include_tasks:
+        file: tasks/keepalived.yml
+        apply: { tags: [vip] }
+      tags: [vip]
     - name: ubuntu 계정 kubeconfig
       ansible.builtin.shell: |
         install -d -o {{ ansible_user }} -g {{ ansible_user }} /home/{{ ansible_user }}/.kube
@@ -622,8 +648,9 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/tasks/kube-vip.yml -o 
       register: untaint
       changed_when: "'untainted' in untaint.stdout"
       when: kc.control_plane_workloads | default(false)
-    # 원격 etcd 멤버는 우리 쪽 연결을 NAT 뒤 주소(Proxmox 노드의 Tailscale IP)로 봅니다. 그 주소를 peer 인증서 SAN 에 넣어
-    # SAN 검사를 켠 채로 연결되게 합니다. 합류하는 control plane 은 kubeadm-config 의 이 값으로 인증서를 만듭니다
+    # 원격(tailnet) etcd 멤버는 우리 쪽 연결을 NAT 뒤 주소(Proxmox 노드의 Tailscale IP)로 봅니다. 그 주소를 peer 인증서 SAN 에 넣어
+    # SAN 검사를 켠 채로 연결되게 합니다. 합류하는 control plane 은 kubeadm-config 의 이 값으로 인증서를 만듭니다.
+    # 지금은 원격 멤버가 없지만 원격 멤버를 다시 붙일 수 있게 둡니다
     - name: etcd peer 인증서 SAN (kubeadm-config)
       ansible.builtin.shell: |
         set -e
@@ -693,8 +720,11 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/tasks/kube-vip.yml -o 
         --apiserver-advertise-address {{ ansible_host }}
       args:
         creates: /etc/kubernetes/kubelet.conf
-    - name: kube-vip
-      ansible.builtin.include_tasks: tasks/kube-vip.yml
+    - name: keepalived (VIP)
+      ansible.builtin.include_tasks:
+        file: tasks/keepalived.yml
+        apply: { tags: [vip] }
+      tags: [vip]
     - name: ubuntu 계정 kubeconfig
       ansible.builtin.shell: |
         install -d -o {{ ansible_user }} -g {{ ansible_user }} /home/{{ ansible_user }}/.kube
@@ -906,8 +936,8 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/tasks/kube-vip.yml -o 
       delegate_to: localhost
       become: false
 
-# 노드마다 VM 이 있는 Proxmox 노드를 라벨로 붙입니다. 배치 정책(k8s-gitops 의 Kyverno prefer-primary-host)이
-# 이 라벨로 메인 서버(pve01) 노드를 고릅니다. 이 플레이만: -e k8s_cluster=<이름> --tags node-labels
+# 노드마다 VM 이 있는 Proxmox 노드를 라벨로 붙입니다. 배치 정책(k8s-gitops 의 Kyverno prefer-role-host)이
+# 이 라벨로 역할별 서버(CPU 작업 pve01, GPU 작업 pve02, 그 밖 pve03)를 고릅니다. 이 플레이만: -e k8s_cluster=<이름> --tags node-labels
 - name: 노드 라벨 (eu4ng.com/pve)
   hosts: k8s_cp
   become: true
@@ -925,6 +955,58 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/tasks/kube-vip.yml -o 
       loop_control: { label: "{{ item.name }}" }
       register: node_label
       changed_when: "'CHANGED' in node_label.stdout"
+
+# CoreDNS 를 노드마다 하나씩 두고 kube-dns 가 같은 노드의 CoreDNS 를 먼저 쓰게 합니다. etcd 과반이 깨져 API 가 멈추면 엔드포인트가
+# 갱신되지 않아, 죽은 노드의 CoreDNS 로 가는 조회가 실패합니다(2벌이면 절반). 같은 노드의 CoreDNS 는 마지막으로 받은 레코드로 계속 답합니다.
+# kubeadm upgrade 가 CoreDNS 설정을 되돌리므로 업그레이드 뒤 다시 실행합니다: -e k8s_cluster=<이름> --tags dns
+- name: CoreDNS 노드마다 하나
+  hosts: k8s_cp
+  become: true
+  gather_facts: false
+  tags: [dns]
+  tasks:
+    # cordon 한 노드는 받을 수 없으므로 빼고 셉니다(넣으면 남는 파드가 Pending 이고 롤아웃이 멈춤). 노드를 다시 들이면 다시 실행합니다
+    - name: CoreDNS 를 받을 수 있는 노드 수
+      ansible.builtin.shell: >-
+        kubectl --kubeconfig=/etc/kubernetes/admin.conf get nodes -o jsonpath='{range .items[*]}{.spec.unschedulable}{"\n"}{end}'
+        | grep -vc true
+      register: dns_nodes
+      changed_when: false
+    - name: coredns Deployment (노드마다 하나, control plane 에도)
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig=/etc/kubernetes/admin.conf
+          - -n=kube-system
+          - patch
+          - deployment/coredns
+          - --type=strategic
+          - -p
+          - "{{ patch | to_json }}"
+      vars:
+        patch:
+          spec:
+            replicas: "{{ dns_nodes.stdout | int }}"
+            # 한 노드에 하나만 두므로 새 파드가 들어갈 빈 노드가 없습니다. 옛 파드를 먼저 하나씩 내립니다
+            strategy: { rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } }
+            template:
+              spec:
+                affinity:
+                  podAntiAffinity:
+                    requiredDuringSchedulingIgnoredDuringExecution:
+                      - labelSelector: { matchLabels: { k8s-app: kube-dns } }
+                        topologyKey: kubernetes.io/hostname
+                tolerations:
+                  - { key: CriticalAddonsOnly, operator: Exists }
+                  - { key: node-role.kubernetes.io/control-plane, operator: Exists, effect: NoSchedule }
+      register: coredns_patch
+      changed_when: "'(no change)' not in coredns_patch.stdout"
+    - name: kube-dns 가 같은 노드의 CoreDNS 를 먼저 씀
+      ansible.builtin.command: >-
+        kubectl --kubeconfig=/etc/kubernetes/admin.conf -n kube-system patch service/kube-dns --type=merge
+        -p '{"spec":{"trafficDistribution":"PreferSameNode"}}'
+      register: kube_dns_patch
+      changed_when: "'(no change)' not in kube_dns_patch.stdout"
 
 - name: 확인
   hosts: k8s_cp
@@ -954,41 +1036,57 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/tasks/kube-vip.yml -o 
 </details>
 
 <details markdown="1">
-<summary>playbooks/tasks/kube-vip.yml 전문</summary>
+<summary>playbooks/tasks/keepalived.yml 전문</summary>
 
 {% raw %}
 ```yaml
-# control plane 노드의 kube-vip static pod. k8s-cluster.yml 이 include 합니다. kube_vip_services 가 켜진 클러스터는 LoadBalancer Service 에도 VIP 를 줍니다.
-# 서비스 VIP 는 control plane VIP 와 같은 리더 한 대가 모두 가집니다(--servicesElection 을 쓰지 않음). 서비스마다 리더를 뽑으면 여러 서비스가
-# 한 IP 를 나눠 쓸 때 그 IP 가 두 노드에 동시에 붙어 ARP 가 엇갈리고 연결이 끊깁니다.
-# kube-vip 은 매니페스트의 hostAliases(kubernetes → 127.0.0.1)로 자기 노드의 apiserver 에 붙어 리더를 뽑고, 리더가 VIP 를 ARP 로 알립니다.
-# kube_vip_kubeconfig: 기본은 admin.conf 사본(kube-vip.conf). 클러스터를 처음 만들 때만 super-admin.conf
-- name: kube-vip 용 kubeconfig (admin.conf 사본, API 주소는 이 노드의 apiserver)
+# control plane 노드의 keepalived(VRRP). k8s-cluster.yml 이 include 합니다. API VIP(kc.vip)와, service_vip 가 있는 클러스터는 서비스 VIP 도 가집니다.
+# kube-vip 은 리더를 쿠버네티스 API 리스로 뽑아서 etcd 과반이 깨져 API 가 멈추면 VIP 를 놓았습니다(살아 있는 노드의 서비스까지 끊김).
+# keepalived 는 API 없이 control plane 끼리 VRRP unicast 로 정합니다. 평소에는 메인 서버(proxmox_node, pve01) 쪽 control plane(우선순위 110)이 가지고, 그 노드의
+# apiserver(6443)가 응답하지 않으면 우선순위가 20 내려가 다른 control plane 으로 넘어갑니다. 모두 응답하지 않으면(과반을 잃어 apiserver 가
+# 재시작을 반복) 살아 있는 노드가 VIP 를 계속 가집니다 — 검사 실패를 FAULT 가 아니라 우선순위 감점으로 두는 이유입니다.
+# 서비스 VIP 로 들어온 요청은 kube-proxy 가 Service 의 externalIPs 규칙으로 받습니다(k8s-gitops iot/clusters/<지역>).
+- name: kube-vip 내리기 (같은 클러스터의 모든 control plane 에서 먼저. 두 방식이 한 VIP 를 동시에 갖지 않게)
   ansible.builtin.shell: |
     set -e
-    umask 077
-    sed "s#server: https://.*:6443#server: https://{{ ansible_host }}:6443#" /etc/kubernetes/admin.conf > /etc/kubernetes/kube-vip.conf.new
-    if cmp -s /etc/kubernetes/kube-vip.conf.new /etc/kubernetes/kube-vip.conf; then rm /etc/kubernetes/kube-vip.conf.new
-    else mv /etc/kubernetes/kube-vip.conf.new /etc/kubernetes/kube-vip.conf; echo CHANGED; fi
-  register: kube_vip_conf
-  changed_when: "'CHANGED' in kube_vip_conf.stdout"
-  when: kube_vip_kubeconfig is not defined
-- name: kube-vip 매니페스트 만들기
-  ansible.builtin.shell: |
-    set -e
-    IMG=ghcr.io/kube-vip/kube-vip:{{ k8s_kube_vip_version }}
-    ctr -n k8s.io image pull "$IMG" >/dev/null
-    ctr -n k8s.io run --rm --net-host "$IMG" kube-vip-manifest-$$ /kube-vip manifest pod \
-      --interface {{ k8s_vip_interface }} --address {{ kc.vip }} --controlplane --arp --leaderElection \
-      {{ '--services' if kc.kube_vip_services | default(false) else '' }} \
-      --k8sConfigPath {{ kube_vip_kubeconfig | default('/etc/kubernetes/kube-vip.conf') }} </dev/null
-  register: kube_vip_manifest
-  changed_when: false
-- name: kube-vip static pod
+    M=/etc/kubernetes/manifests/kube-vip.yaml
+    [ -e $M ] || [ -e /etc/kubernetes/kube-vip.conf ] || exit 0
+    rm -f $M
+    for i in $(seq 60); do pgrep -x kube-vip >/dev/null || break; sleep 2; done
+    if pgrep -x kube-vip >/dev/null; then echo "kube-vip 이 내려가지 않음" >&2; exit 1; fi
+    rm -f /etc/kubernetes/kube-vip.conf
+    # kube-vip 이 내려가며 놓지 못한 VIP 를 지웁니다(keepalived 를 켜기 전이라 이 노드에 남은 것은 kube-vip 것)
+    for ip in {{ keepalived_vips | join(' ') }}; do ip -4 addr del "$ip/32" dev {{ k8s_vip_interface }} 2>/dev/null || true; done
+    echo CHANGED
+  register: kube_vip_down
+  changed_when: "'CHANGED' in kube_vip_down.stdout"
+  delegate_to: "{{ item }}"
+  loop: "{{ groups.k8s_control_planes }}"
+  run_once: true
+- name: keepalived 설치
+  ansible.builtin.apt:
+    name: keepalived
+    state: present
+- name: apiserver 검사 스크립트
   ansible.builtin.copy:
-    dest: /etc/kubernetes/manifests/kube-vip.yaml
-    content: "{{ kube_vip_manifest.stdout }}\n"
-    mode: "0600"
+    dest: /etc/keepalived/check-apiserver.sh
+    mode: "0755"
+    content: |
+      #!/bin/bash
+      # 이 노드의 apiserver 가 6443 에서 연결을 받는지(keepalived track_script, 실패하면 우선순위 감점)
+      exec timeout 2 bash -c '</dev/tcp/127.0.0.1/6443'
+- name: keepalived 설정
+  ansible.builtin.template:
+    src: ../templates/keepalived/keepalived.conf.j2
+    dest: /etc/keepalived/keepalived.conf
+    mode: "0644"
+  register: keepalived_conf
+- name: keepalived 켜기
+  ansible.builtin.systemd:
+    name: keepalived
+    enabled: true
+    state: "{{ 'restarted' if keepalived_conf.changed else 'started' }}"
+  ignore_errors: "{{ ansible_check_mode }}"   # --check 에서는 패키지가 아직 없을 수 있음
 - name: VIP 응답 대기
   ansible.builtin.uri:
     url: https://{{ kc.vip }}:6443/livez
@@ -998,14 +1096,67 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/tasks/kube-vip.yml -o 
   until: vip_live.status == 200
   retries: 60
   delay: 3
-  when: kube_vip_kubeconfig is not defined
+  when: not ansible_check_mode and keepalived_wait_api | default(true)
 ```
-{: file="playbooks/tasks/kube-vip.yml" }
+{: file="playbooks/tasks/keepalived.yml" }
 {% endraw %}
 
 </details>
 
-> VIP 없이(`--control-plane-endpoint` 없이) 만든 클러스터에는 control plane 을 더할 수 없습니다. [클러스터 스크립트](/posts/32/)나 예전 플레이북으로 만든 클러스터라면 먼저 첫 control plane 에서 [`k8s-control-plane-endpoint.sh`](/assets/scripts/proxmox/k8s-control-plane-endpoint.sh) 를 `sudo bash k8s-control-plane-endpoint.sh [VIP] eth0` 으로 실행해 VIP 엔드포인트로 옮깁니다. worker 의 kubelet 주소는 플레이북이 VIP 로 바꿉니다.
+<details markdown="1">
+<summary>templates/keepalived/keepalived.conf.j2 전문</summary>
+
+{% raw %}
+```text
+# {{ ansible_managed }} — proxmox-ansible playbooks/tasks/keepalived.yml
+{% set me = kc.nodes | selectattr('name', 'equalto', inventory_hostname) | first %}
+{% set peers = kc.nodes | rejectattr('retire', 'defined') | selectattr('role', 'equalto', 'control-plane') | rejectattr('name', 'equalto', inventory_hostname) | map(attribute='ip') | list %}
+global_defs {
+    router_id {{ inventory_hostname }}
+    script_user root
+    enable_script_security
+}
+
+# 이 노드의 apiserver 가 응답하지 않으면 우선순위를 20 내립니다. FAULT 로 VIP 를 놓지 않습니다(모든 control plane 이 실패해도 누군가는 가짐)
+vrrp_script apiserver {
+    script "/etc/keepalived/check-apiserver.sh"
+    interval 2
+    timeout 3
+    fall 3
+    rise 2
+    weight -20
+}
+
+vrrp_instance k8s_{{ k8s_cluster_name }} {
+    state BACKUP
+    interface {{ k8s_vip_interface }}
+    virtual_router_id {{ kc.vrrp_id }}
+    # 메인 서버(proxmox_node, pve01) 쪽 control plane 이 평소 VIP 를 가집니다. 돌아오면 다시 가져갑니다(preempt 기본)
+    priority {{ 110 if me.pve | default(proxmox_node) == proxmox_node else 100 }}
+    advert_int 1
+    # 멀티캐스트 대신 상대 control plane 에 직접 보냅니다
+    unicast_src_ip {{ me.ip }}
+    unicast_peer {
+{% for ip in peers %}
+        {{ ip }}
+{% endfor %}
+    }
+    virtual_ipaddress {
+{% for ip in keepalived_vips %}
+        {{ ip }}/32 dev {{ k8s_vip_interface }}
+{% endfor %}
+    }
+    track_script {
+        apiserver
+    }
+}
+```
+{: file="templates/keepalived/keepalived.conf.j2" }
+{% endraw %}
+
+</details>
+
+> VIP 없이(`--control-plane-endpoint` 없이) 만든 클러스터에는 control plane 을 더할 수 없습니다. [클러스터 스크립트](/posts/32/)나 예전 플레이북으로 만든 클러스터라면 먼저 첫 control plane 에서 [`k8s-control-plane-endpoint.sh`](/assets/scripts/proxmox/k8s-control-plane-endpoint.sh) 를 `sudo bash k8s-control-plane-endpoint.sh [VIP] eth0` 으로 실행해 VIP 엔드포인트로 옮깁니다. 스크립트는 이 노드 하나만 둔 keepalived 로 VIP 를 띄우고(맨 위 `VRRP_ID` 를 클러스터의 `vrrp_id` 와 맞춥니다), 상대 control plane 과 worker 의 kubelet 주소는 플레이북이 맞춥니다.
 {: .prompt-info }
 
 ```bash
@@ -1019,7 +1170,7 @@ ansible-playbook playbooks/k8s-cluster.yml -e k8s_cluster=daejeon
 
 - **확인:** `결과` 태스크에 목록의 노드가 모두 `Ready` 로 보이고, `노드 수가 맞는지` 가 통과하며, `PLAY RECAP` 에 `failed=0` 입니다. 실행 PC 에 `~/.kube/k8s-hub.yaml`(엣지는 `k8s-daejeon.yaml`)이 생깁니다.
 
-> control plane 이 두 대면 etcd 멤버도 두 개라, 한 대가 꺼지면 [과반](/posts/61/)을 잃어 API 가 멈춥니다. 세 번째 투표자는 [쿠버네티스 etcd 세 번째 투표자를 원격 NAS 컨테이너로 붙이는 방법](/posts/55/)으로 붙입니다.
+> control plane 이 두 대면 etcd 멤버도 두 개라, 한 대가 꺼지면 [과반](/posts/61/)을 잃어 API 가 멈춥니다. 그래서 Proxmox 노드마다 control plane 을 하나씩 두어 3멤버로 만듭니다. 세 번째 서버가 없을 때는 [쿠버네티스 etcd 세 번째 투표자를 원격 NAS 컨테이너로 붙이는 방법](/posts/55/)으로 세 번째 표를 채울 수 있습니다.
 {: .prompt-warning }
 
 ## 4. 확인
@@ -1027,9 +1178,12 @@ ansible-playbook playbooks/k8s-cluster.yml -e k8s_cluster=daejeon
 실행 PC 로 가져온 kubeconfig 는 API 주소가 VIP 입니다.
 
 ```bash
-# 노드와 kube-vip (실행 PC 에 kubectl 이 없다면 ssh ubuntu@kubectl-hub.[DOMAIN] 에서 kubectl 만 실행)
+# 노드와 CoreDNS (실행 PC 에 kubectl 이 없다면 ssh ubuntu@kubectl-hub.[DOMAIN] 에서 kubectl 만 실행)
 kubectl --kubeconfig ~/.kube/k8s-hub.yaml get nodes -o wide
-kubectl --kubeconfig ~/.kube/k8s-hub.yaml -n kube-system get pods -o wide | grep kube-vip
+kubectl --kubeconfig ~/.kube/k8s-hub.yaml -n kube-system get pods -l k8s-app=kube-dns -o wide
+
+# keepalived 와 VIP 를 가진 control plane
+for h in k8s-hub-cp-1 k8s-hub-cp-2 k8s-hub-cp-3; do ssh ubuntu@$h.[DOMAIN] "systemctl is-active keepalived; ip -br addr show eth0"; done
 
 # VIP 응답
 curl -k https://[HUB_VIP]:6443/livez
@@ -1038,7 +1192,7 @@ curl -k https://[HUB_VIP]:6443/livez
 ssh ubuntu@k8s-hub-worker-1.[DOMAIN] findmnt /var/lib/longhorn
 ```
 
-- **확인:** 노드 네 대가 `Ready` 이고 `VERSION` 이 `v1.37.0`, kube-vip 파드가 control plane 마다 `Running`, `livez` 가 `ok`, `findmnt` 에 두 번째 디스크(`/dev/sdb`)가 `/var/lib/longhorn` 에 ext4 로 마운트되어 보입니다.
+- **확인:** 노드 여섯 대가 `Ready` 이고 `VERSION` 이 `v1.37.0`, CoreDNS 파드가 노드마다 하나씩 `Running`, keepalived 가 세 control plane 에서 `active` 이고 VIP(`[HUB_VIP]/32`)는 `k8s-hub-cp-1` 의 `eth0` 에만 보이며, `livez` 가 `ok`, `findmnt` 에 두 번째 디스크(`/dev/sdb`)가 `/var/lib/longhorn` 에 ext4 로 마운트되어 보입니다.
 
 다음은 [쿠버네티스에 Argo CD 설치하고 GitOps로 서비스 추가하는 방법](/posts/36/)부터 이어집니다. 지역 엣지는 허브 Argo CD 에 원격 클러스터로 등록합니다([Proxmox에 Ansible로 kubeadm 엣지 클러스터 만들고 Argo CD 원격 클러스터로 등록하는 방법](/posts/42/)). Longhorn 과 DB 이중화는 [쿠버네티스에 Longhorn과 Patroni로 볼륨과 TimescaleDB 이중화하는 방법](/posts/54/)에 정리했습니다.
 
@@ -1051,7 +1205,7 @@ ssh ubuntu@k8s-hub-worker-1.[DOMAIN] findmnt /var/lib/longhorn
       - { name: k8s-hub-cp-1, pve: pve01, role: control-plane, vmid: 121, ip: [HUB_CP_1_IP], cores: 2, memory: 4096, disk: 32G, retire: true }
       # (나머지 노드는 그대로)
       # 1. 새 노드를 목록에 더하고 실행해 합류시킵니다
-      - { name: k8s-hub-cp-3, pve: pve01, role: control-plane, vmid: 125, ip: [NEW_NODE_IP], cores: 2, memory: 4096, disk: 32G }
+      - { name: k8s-hub-cp-4, pve: pve01, role: control-plane, vmid: 127, ip: [NEW_NODE_IP], cores: 2, memory: 4096, disk: 32G }
 ```
 {: file="group_vars/all.yml" }
 
@@ -1079,18 +1233,19 @@ ansible-playbook playbooks/k8s-cluster.yml -e k8s_cluster=[CLUSTER] -e k8s_state
 > 운영 중인 클러스터를 지우면 노드의 PVC 데이터도 함께 사라집니다. 먼저 백업이 있는지 확인합니다.
 {: .prompt-danger }
 
-- **확인:** 두 노드의 `qm list` 에서 목록의 VM 이 사라지고 다른 VM 은 그대로입니다.
+- **확인:** 모든 노드의 `qm list` 에서 목록의 VM 이 사라지고 다른 VM 은 그대로입니다.
 
 ## 마무리
 
-VM 템플릿과 kubeadm 클러스터를 Ansible 플레이북 두 개로 옮겨, 새 Proxmox 서버에서도 `pve-cluster.yml` → `vm-template.yml` → `k8s-cluster.yml` 순서로 같은 클러스터를 다시 만들 수 있게 했습니다. control plane 두 대와 worker 두 대가 두 Proxmox 노드에 나뉘어 있고, API 는 kube-vip VIP 로 받으며, 허브와 지역 엣지를 `-e k8s_cluster` 만 바꿔 같은 플레이북으로 만들고 노드를 교체합니다.
+VM 템플릿과 kubeadm 클러스터를 Ansible 플레이북 두 개로 옮겨, 새 Proxmox 서버에서도 `pve-cluster.yml` → `vm-template.yml` → `k8s-cluster.yml` 순서로 같은 클러스터를 다시 만들 수 있게 했습니다. control plane 세 대와 worker 세 대가 세 Proxmox 노드에 하나씩 나뉘어 etcd 가 3멤버이고, API 는 keepalived VIP 로 받으며, 허브와 지역 엣지를 `-e k8s_cluster` 만 바꿔 같은 플레이북으로 만들고 노드를 교체합니다.
 
 ## 참고 자료
 
 - [Kubernetes - Creating Highly Available Clusters with kubeadm](https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/high-availability/)
 - [Kubernetes - Creating a cluster with kubeadm](https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/create-cluster-kubeadm/)
 - [Kubernetes - Installing kubeadm](https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/install-kubeadm/)
-- [kube-vip - Static Pods](https://kube-vip.io/docs/installation/static/)
+- [Keepalived - User Guide](https://keepalived.readthedocs.io/en/latest/)
+- [Kubernetes - Service: Traffic distribution](https://kubernetes.io/docs/concepts/services-networking/service/#traffic-distribution)
 - [Longhorn - Installation Requirements](https://longhorn.io/docs/latest/deploy/install/#installation-requirements)
 - [flannel-io/flannel](https://github.com/flannel-io/flannel)
 - [community.proxmox.proxmox_kvm module](https://docs.ansible.com/ansible/latest/collections/community/proxmox/proxmox_kvm_module.html)

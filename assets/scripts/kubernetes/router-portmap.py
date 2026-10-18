@@ -7,7 +7,7 @@
 대상은 --internal-ip 로 줍니다(control plane VIP. VIP 를 가진 control plane 에도 Traefik 이 떠 있습니다). 없으면 이 호스트입니다.
 공유기(MiniUPnPd)는 요청한 주소로만 매핑을 허용하므로, 대상 주소가 이 호스트에 붙어 있으면(VIP 를 가진 control plane)
 그 주소에서 요청을 보냅니다. 기존 매핑을 바꾸기 전에 임시 포트로 먼저 시험해, 거부되면 아무것도 바꾸지 않습니다.
-VIP 를 가진 control plane 에서 실행합니다(kubectl -n kube-system get lease plndr-cp-lock 의 holderIdentity):
+VIP 를 가진 control plane 에서 실행합니다(keepalived 가 정함. 확인은 각 control plane 에서 ip -br addr | grep [HUB_VIP]):
 
     ssh ubuntu@<VIP 를 가진 control plane> python3 - --internal-ip [HUB_VIP] < router-portmap.py   # 걸기 (이미 있으면 그대로 둠)
     ssh ubuntu@<VIP 를 가진 control plane> python3 - --delete < router-portmap.py                      # 지우기

@@ -26,7 +26,7 @@ ipTIME C500GS IP 카메라를 공유기 방화벽으로 외부 인터넷과 완�
 | 항목 | 버전 / 사양 |
 | :--- | :--- |
 | IP 카메라 | ipTIME C500GS (5MP, H.265, Wi-Fi) |
-| 엣지 Kubernetes | `v1.37` (kubeadm, k8s-dj-worker-1: 6 vCPU / 8GiB, k8s-dj-worker-2: 4 vCPU / 8GiB) |
+| 엣지 Kubernetes | `v1.37` (kubeadm, k8s-dj-worker-1: 6 vCPU / 8GiB, k8s-dj-worker-2: 4 vCPU / 8GiB, k8s-dj-worker-3: 6 vCPU / 12GiB) |
 | 스트리밍 중계기 | `alexxit/go2rtc:latest` |
 | 수집기 / 딥러닝 | `ultralytics/ultralytics:latest-cpu` (YOLOv8n + ByteTrack, PyAV) |
 | 시계열 DB | TimescaleDB `2.30.1-pg17` |
@@ -247,7 +247,7 @@ NVR 은 상시 무중단 녹화를 담당하는 **녹화 파드(`nvr`)**와, 알
    - 연결 상태는 `nvr/bedroom2-camera/availability` 에 유지 메시지(`{"state": "online"}`)로 냅니다. 발행을 시작하면 `online`, 카메라 프레임이 60초 동안 없거나 수집기가 멈추면 `offline` 이고, 수집기가 끊기면 브로커가 Last Will 로 `offline` 을 냅니다. HA 센서는 이 토픽을 따라 `사용할 수 없음` 이 되고, DB 에는 속성 `availability` 행으로 남습니다.
    - 칸은 동시에 감지된 최대 인원만큼 생기고, 사람이 없는 칸의 **감지** 센서는 `감지되지 않음` 이 됩니다.
    - 실시간 감지 당시의 판단 결과(박스, 인원수)를 사후에 직접 눈으로 비교·검증할 수 있도록, 추적한 프레임마다 초록 박스를 그린 **실시간 측정 영상**(`_live`)을 날짜마다 MKV 로 씁니다. 보조 스트림 해상도를 그대로 쓰므로 초당 2ms 내외로 가볍게 저장됩니다.
-   - `podAffinity` 로 녹화 파드와 동일한 워커 노드에 배치되어 `/mnt/nvr` 볼륨을 공유하며, 두 파드 모두 `priorityClassName: essential` 과 30초 축출 toleration 이 적용되어 pve01 다운 시 pve02 로 함께 자동 이전됩니다.
+   - `podAffinity` 로 녹화 파드와 동일한 워커 노드에 배치되어 `/mnt/nvr` 볼륨을 공유하며, 두 파드 모두 `priorityClassName: essential` 과 30초 축출 toleration 이 적용되어 평소 있는 서버(상시 서비스를 맡는 pve03)가 죽으면 다른 서버의 워커로 함께 자동 이전됩니다.
 
 GitOps 저장소(`k8s-gitops`)의 `iot/edge/nvr/`에 베이스 매니페스트와 스크립트를 두고, `iot/clusters/daejeon/nvr/`에 오버레이를 둡니다.
 
@@ -276,7 +276,7 @@ Deployment 는 이 PVC 를 `/mnt/nvr` 에 붙입니다. 특정 워커에 고정�
       tolerations:                              # 노드가 죽으면 30초 뒤 다른 노드에서 다시 띄웁니다(기본 300초)
         - { key: node.kubernetes.io/not-ready, operator: Exists, effect: NoExecute, tolerationSeconds: 30 }
         - { key: node.kubernetes.io/unreachable, operator: Exists, effect: NoExecute, tolerationSeconds: 30 }
-      # ... (containers: go2rtc, recorder, occupancy)
+      # ... (containers: go2rtc, recorder, archiver)
       volumes:
         - name: nvr-storage
           persistentVolumeClaim:
@@ -284,7 +284,7 @@ Deployment 는 이 PVC 를 `/mnt/nvr` 에 붙입니다. 특정 워커에 고정�
 ```
 {: file="iot/edge/nvr/deployment.yaml (발췌)" }
 
-볼륨이 `ReadWriteOnce` 라 한 노드에서만 붙으므로, 같은 볼륨을 쓰는 CronJob 두 개(`nvr-daily-archive`, `nvr-review`)는 `podAffinity` 로 NVR 파드와 같은 노드에 뜨게 합니다.
+볼륨이 `ReadWriteOnce` 라 한 노드에서만 붙습니다. 일일 이관은 NVR 파드 안의 `archiver` sidecar 가 맡으므로 파드와 함께 옮겨 다니며 같은 볼륨을 씁니다. 같은 볼륨을 쓰는 사후 검수 CronJob(`nvr-review`)은 `podAffinity` 로 NVR 파드와 같은 노드에 뜨게 합니다.
 
 ```yaml
           affinity:                             # 영상 볼륨이 ReadWriteOnce 라 NVR 파드와 같은 노드에 떠야 함께 마운트됩니다
@@ -293,7 +293,7 @@ Deployment 는 이 PVC 를 `/mnt/nvr` 에 붙입니다. 특정 워커에 고정�
                 - labelSelector: { matchLabels: { app: nvr } }
                   topologyKey: kubernetes.io/hostname
 ```
-{: file="iot/edge/nvr/cronjob-daily-archive.yaml (발췌)" }
+{: file="iot/edge/nvr/cronjob-review.yaml (발췌)" }
 
 시험에서 NVR 파드는 65초 만에 다른 워커로 넘어갔고, DB 에 남은 카메라 기록의 공백은 59초였습니다.
 
@@ -329,7 +329,7 @@ streams:
 ```
 {: file="iot/edge/nvr/collector-settings.json" }
 
-매일 00:05 에 실행되는 `nvr-daily-archive` CronJob 은 전날 파일이 닫히기를 기다린 뒤 종류마다 재인코딩 없이 하나로 합칩니다. 재시작 때문에 파일이 나뉜 날은 녹화가 이어진 구간마다 `<날짜>_<종류>_<시작>-<끝>.mkv` 로 합치므로 이름의 시각 사이가 녹화가 끊긴 구간입니다. 이어서 주 스트림(`_main`), 보조 스트림(`_sub`), 실시간 측정 영상(`_live`)을 Tailscale 경유 서울 NAS(`/volume3/backup/nvr/daejeon/<날짜>/`)로 SFTP 로 보내고, 다 보낸 전날 폴더는 로컬에서 바로 지웁니다(`LOCAL_DAYS` 기본 0). NAS 에서는 365일이 지난 날짜 폴더를 지웁니다. 정리가 하루 한 번만 돌기 때문에 전날 영상을 남겨 두면 18Gi 볼륨이 다음 날 가득 차므로 로컬에는 당일치만 둡니다. 정리한 뒤에도 여유가 60%(`MIN_FREE_PCT`)보다 적으면 남은 지난 폴더의 영상부터 더 지웁니다. NAS 로 보내지 못한 파일이 있는 폴더는 지우지 않고 다음 실행에 다시 보냅니다. NAS 계정은 볼륨 최상위에 폴더를 만들 수 없으므로 기존 공유 폴더 아래에 두고, 시놀로지는 rsync 서비스를 켜지 않으면 rsync-over-ssh 를 거부하므로 SFTP 를 씁니다. SFTP 경로는 공유 폴더 기준(`/backup/nvr/daejeon`)입니다.
+일일 이관은 NVR 파드의 `archiver` sidecar 가 `scripts/archive-loop.sh` 로 돌립니다. 파드가 뜰 때 한 번, 그 뒤 매일 00:05(파드 시간대 Asia/Seoul)에 `daily-archive.sh pass main sub live rec` 를 실행하고, 실패하면 1시간 뒤 다시 합니다. CronJob 은 쿠버네티스 API 가 있어야 Job 을 만들지만 sidecar 의 루프는 API 가 멈춰도(etcd 과반 상실) 녹화 파드 안에서 계속 돕니다. `pass` 는 오늘보다 이전 날짜 중 합치지 않은 조각이 남은 날짜를 모두 처리하고, 볼륨 위 잠금(`.archive.lock`)을 `flock` 으로 잡아 겹쳐 돌지 않습니다. 어제 날짜는 파일이 닫히기를 기다린 뒤 종류마다 재인코딩 없이 하나로 합칩니다. 재시작 때문에 파일이 나뉜 날은 녹화가 이어진 구간마다 `<날짜>_<종류>_<시작>-<끝>.mkv` 로 합치므로 이름의 시각 사이가 녹화가 끊긴 구간입니다. 이어서 주 스트림(`_main`), 보조 스트림(`_sub`), 실시간 측정 영상(`_live`)을 Tailscale 경유 서울 NAS(`/volume3/backup/nvr/daejeon/<날짜>/`)로 SFTP 로 보내고, 남은 모든 파일이 목적지에 같은 크기로 있는 것을 확인한 전날 폴더는 로컬에서 바로 지웁니다(`LOCAL_DAYS` 기본 0). NAS 에서는 365일이 지난 날짜 폴더를 지웁니다. 정리가 하루 한 번만 돌기 때문에 전날 영상을 남겨 두면 18Gi 볼륨이 다음 날 가득 차므로 로컬에는 당일치만 둡니다. 정리한 뒤에도 여유가 60%(`MIN_FREE_PCT`)보다 적으면 남은 지난 폴더의 영상부터 더 지웁니다. NAS 로 보내지 못한 파일이 있는 폴더는 지우지 않고 다음 실행에 다시 보냅니다. NAS 계정은 볼륨 최상위에 폴더를 만들 수 없으므로 기존 공유 폴더 아래에 두고, 시놀로지는 rsync 서비스를 켜지 않으면 rsync-over-ssh 를 거부하므로 SFTP 를 씁니다. SFTP 경로는 공유 폴더 기준(`/backup/nvr/daejeon`)입니다. 스크립트 ConfigMap(`nvr-archive-script`)은 이름에 해시를 붙이지 않으므로 `daily-archive.sh` 를 고치면 다음 실행부터 반영되고, `archive-loop.sh` 를 고치면 파드를 다시 띄웁니다. 기다리지 않고 한 번 돌리려면 `kubectl -n nvr exec deploy/nvr -c archiver -- sh /scripts/daily-archive.sh pass main sub live rec` 를 실행합니다.
 
 `nvr-review` CronJob(매일 00:30)은 사후 검수입니다. 실시간 측정은 움직이는 사람은 잘 잡지만 오래 가만히 있는 사람에게 약하므로, 합친 5MP 원본의 **모든 프레임**을 더 큰 모델로 다시 추적해 초마다 인원을 내고 DB `readings` 의 실시간 `occupant_count` 와 비교합니다. 값이 다른 구간만 왼쪽에 실시간 측정 영상, 오른쪽에 검수 결과를 붙인 2560x720 클립으로 남기고, 일치율과 불일치 구간 목록을 `<날짜>_review.json` 에 씁니다. 마감 시간 없이 검수 안 된 가장 최근 날짜부터 처리하고, CPU 가 모자랄 때 실시간 수집이 먼저 받도록 검수 CronJob 의 CPU request 를 낮게 둡니다. 모델과 비교 기준은 `review-settings.json` 에서 바꿉니다.
 
@@ -404,13 +404,13 @@ ssh ubuntu@kubectl-hub.eu4ng.com "kubectl --kubeconfig ~/k8s-daejeon.yaml -n nvr
 
 - **확인:** 1280x720 프레임에 사람이 있으면 초록 박스와 `#칸 id 신뢰도` 라벨이, 왼쪽 위에 시각과 인원이 보입니다.
 
-다음 날 00:05 이후 전날 폴더가 종류마다 합쳐지고 NAS 로 보내졌는지 봅니다.
+다음 날 00:05 이후 전날 폴더가 종류마다 합쳐지고 NAS 로 보내졌는지 `archiver` sidecar 로그로 봅니다.
 
 ```bash
-ssh ubuntu@kubectl-hub.eu4ng.com "kubectl --kubeconfig ~/k8s-daejeon.yaml -n nvr logs -l job-name --all-containers --prefix --tail=30"
+ssh ubuntu@kubectl-hub.eu4ng.com "kubectl --kubeconfig ~/k8s-daejeon.yaml -n nvr logs deploy/nvr -c archiver --tail=30"
 ```
 
-- **확인:** `rec: <날짜>_rec.mkv`, `live: <날짜>_live.mkv` 처럼 종류마다 합친 파일 이름이 나오고 `NAS 이관` 줄에 이어 `로컬 보존 정리` 와 `<날짜>: 지움` 이 보입니다. 끊긴 날은 `<날짜>_<종류>_<시작>-<끝>.mkv` 로 여러 개입니다.
+- **확인:** `rec: <날짜>_rec.mkv`, `live: <날짜>_live.mkv` 처럼 종류마다 합친 파일 이름이 나오고 `<목적지 이름> 이관`(목적지 이름은 `ARCHIVE_ID`, 기본 `nas`) 줄에 이어 `로컬 보존 정리` 와 `<날짜>: 지움`, 끝에 `다음 실행:` 시각이 보입니다. 끊긴 날은 `<날짜>_<종류>_<시작>-<끝>.mkv` 로 여러 개입니다.
 
 사후 검수를 켰다면(전날 원본이 남도록 `LOCAL_DAYS` 와 볼륨을 늘린 경우) 검수가 끝난 뒤 결과 파일을 봅니다.
 

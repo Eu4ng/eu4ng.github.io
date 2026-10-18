@@ -36,7 +36,7 @@ local-path 볼륨은 한 노드의 디스크에만 있어서 그 서버가 죽�
 
 다음 항목이 준비되어 있어야 합니다.
 
-- worker 두 대를 서로 다른 Proxmox 서버에 둔 kubeadm 클러스터와 그 플레이북 ([Proxmox에 Ansible로 kubeadm 쿠버네티스 클러스터 만드는 방법](/posts/46/))
+- worker 를 Proxmox 서버마다 한 대씩 둔 kubeadm 클러스터와 그 플레이북 ([Proxmox에 Ansible로 kubeadm 쿠버네티스 클러스터 만드는 방법](/posts/46/))
 - GitOps 저장소의 `services/`, `iot/hub/` 폴더를 배포하는 Argo CD ([쿠버네티스에 Argo CD 설치하고 GitOps로 서비스 추가하는 방법](/posts/36/))
 - `timescaledb-credentials` Secret(블로그 `create-iot-secrets.sh`, [엣지 Mosquitto와 Telegraf 디스크 버퍼로 중앙 TimescaleDB에 유실 없이 IoT 데이터 모으는 방법](/posts/43/)의 준비 단계). 예전처럼 단일 Deployment 로 띄운 허브 DB 가 있으면 5·7단계에서 옮기고, 허브 DB 를 처음 만든다면 5·7단계와 `IOT_LOGIN=NOLOGIN` 은 건너뜁니다
 - Longhorn 으로 옮길 앱: Grafana ([쿠버네티스에 Prometheus와 Grafana 배포해 자원 사용량 대시보드 만드는 방법](/posts/39/)), 중앙 Home Assistant ([중앙 Home Assistant로 여러 지역 Home Assistant 모아 보는 방법](/posts/49/))
@@ -45,7 +45,7 @@ local-path 볼륨은 한 노드의 디스크에만 있어서 그 서버가 죽�
 
 ## 1. worker 에 Longhorn 디스크 준비
 
-Longhorn 복제본은 OS 디스크와 나눈 전용 디스크(`scsi1`)의 `/var/lib/longhorn` 에 둡니다. 클러스터 변수의 worker 항목에 `longhorn_disk`(GB)를 붙이면, 플레이북이 VM 에 디스크를 핫플러그하고 Longhorn 이 쓰는 iSCSI(`open-iscsi`, `iscsi_tcp`)를 준비한 뒤 디스크를 포맷해 마운트합니다. 나중에 `longhorn_disk` 값을 키우고 다시 실행하면 VM 을 켠 채로 디스크와 파일시스템을 그 크기로 늘립니다(줄이지는 못합니다). Ubuntu 의 multipathd 가 Longhorn 장치를 가로채지 않게 `sd` 장치를 multipath 에서 뺍니다.
+Longhorn 복제본은 OS 디스크와 나눈 전용 디스크(`scsi1`)의 `/var/lib/longhorn` 에 둡니다. 클러스터 변수의 worker 항목에 `longhorn_disk`(GB)를 붙이면, 플레이북이 VM 에 디스크를 핫플러그하고 Longhorn 이 쓰는 iSCSI(`open-iscsi`, `iscsi_tcp`)를 준비한 뒤 디스크를 포맷해 마운트합니다. `longhorn_storage` 를 적으면 그 Proxmox 저장소에 디스크를 둡니다(기본 `vm_disk_storage`). NVMe 가 넉넉하지 않은 서버의 worker 는 NAS HDD 의 NFS 저장소(`nas_vm_storage`)에 두고, 이때는 qcow2 로 만들고 SSD 표시를 붙이지 않습니다. HDD 위 디스크라 DB 는 이 worker 에 두지 않고 NVMe 서버의 worker 에만 둡니다. 나중에 `longhorn_disk` 값을 키우고 다시 실행하면 VM 을 켠 채로 디스크와 파일시스템을 그 크기로 늘립니다(줄이지는 못합니다). Ubuntu 의 multipathd 가 Longhorn 장치를 가로채지 않게 `sd` 장치를 multipath 에서 뺍니다.
 
 ```yaml
 k8s_clusters:
@@ -54,6 +54,7 @@ k8s_clusters:
       # ... control plane 항목
       - { name: k8s-hub-worker-1, pve: pve01, role: worker, vmid: 123, ip: [WORKER1_IP], cores: 12, memory: 24576, disk: 100G, longhorn_disk: 20 }
       - { name: k8s-hub-worker-2, pve: pve02, role: worker, vmid: 124, ip: [WORKER2_IP], cores: 8,  memory: 16384, disk: 60G,  longhorn_disk: 20 }
+      - { name: k8s-hub-worker-3, pve: pve03, role: worker, vmid: 126, ip: [WORKER3_IP], cores: 6,  memory: 12288, disk: 40G,  longhorn_disk: 100, longhorn_storage: nas, startup: "order=2" }
 ```
 {: file="group_vars/all.yml" }
 
@@ -67,16 +68,19 @@ ansible-playbook playbooks/k8s-cluster.yml -e k8s_cluster=hub
 
 {% raw %}
 ```yaml
+    # longhorn_storage 가 NFS(nas_vm_storage)면 qcow2(파일), lvmthin 이면 raw 입니다. HDD 위 NFS 디스크에는 ssd 표시를 붙이지 않습니다
     - name: Longhorn 디스크 (scsi1, 없을 때만. 켜진 VM 에 핫플러그)
       community.proxmox.proxmox_disk:
         vmid: "{{ item.vmid }}"
         disk: scsi1
-        storage: "{{ vm_disk_storage }}"
+        storage: "{{ lh_storage }}"
         size: "{{ item.longhorn_disk }}"
-        format: raw
+        format: "{{ 'qcow2' if lh_storage == nas_vm_storage.name else 'raw' }}"
         discard: "on"
-        ssd: true
+        ssd: "{{ lh_storage != nas_vm_storage.name }}"
         state: present
+      vars:
+        lh_storage: "{{ item.longhorn_storage | default(vm_disk_storage) }}"
       loop: "{{ active | selectattr('longhorn_disk', 'defined') }}"
       loop_control: { label: "{{ item.name }}" }
     - name: Longhorn 디스크 늘리기 (longhorn_disk 를 키웠을 때. 켠 채로 늘리고, 줄이지는 못함)
@@ -87,6 +91,7 @@ ansible-playbook playbooks/k8s-cluster.yml -e k8s_cluster=hub
         state: resized
       loop: "{{ active | selectattr('longhorn_disk', 'defined') }}"
       loop_control: { label: "{{ item.name }}" }
+    - name: VM 설정 맞추기 (코어·메모리·CPU 우선순위·IP·DNS·자동 시작·부팅 순서. 모듈 특성상 매번 changed 로 보고됨. 코어·메모리는 VM 을 껐다 켜야 적용)
 ```
 {: file="playbooks/k8s-cluster.yml (VM 만들기 플레이)" }
 
@@ -330,7 +335,7 @@ subjects:
 ```
 {: file="iot/hub/timescaledb/patroni-rbac.yaml" }
 
-`iot/hub/timescaledb/kustomization.yaml` 의 `resources` 에 `patroni-rbac.yaml` 을 더해 push 하고, 동기화되면 비밀값 스크립트를 실행합니다. 스크립트는 superuser·replication 비밀번호를 만들어 허브 Secret `timescaledb-patroni` 에 넣고, NAS 멤버가 쓸 비밀번호와 kubeconfig 를 `~/.config/portainer/secrets/` 에 둡니다. 끝으로 NAS 멤버 자리의 Pod `nas` 를 만듭니다. 어느 노드에도 스케줄되지 않는 Pod 라 실행되지 않고, Argo CD 가 `Pending` Pod 를 계속 `Progressing` 으로 보므로 저장소가 아니라 스크립트에서 만듭니다.
+`iot/hub/timescaledb/kustomization.yaml` 의 `resources` 에 `patroni-rbac.yaml` 을 더해 push 하고, 동기화되면 비밀값 스크립트를 실행합니다. 스크립트는 superuser·replication 비밀번호를 만들어 허브 Secret `timescaledb-patroni` 에 넣고, NAS 멤버가 쓸 비밀번호와 kubeconfig 를 `~/.config/portainer/secrets/` 에 둡니다. `NAS_MEMBER=1` 을 주면 끝으로 NAS 멤버 자리의 Pod `nas` 도 만듭니다. 어느 노드에도 스케줄되지 않는 Pod 라 실행되지 않고, Argo CD 가 `Pending` Pod 를 계속 `Progressing` 으로 보므로 저장소가 아니라 스크립트에서 만듭니다. 이 단계에서는 `NAS_MEMBER` 없이 실행하고, 자리표시 Pod 는 NAS 멤버를 붙이는 8단계에서 만듭니다. 멤버 없이 자리표시만 있으면 6단계의 `failsafe_mode` 가 그 멤버를 연락 안 되는 멤버로 보고, 쿠버네티스 API 가 멈출 때 주 DB 를 읽기 전용으로 내리기 때문입니다.
 
 ```bash
 # GitOps 저장소 루트에서 스크립트 내려받기
@@ -357,6 +362,7 @@ bash scripts/timescaledb-ha-secrets.sh v1
 #
 # 사용법: bash scripts/timescaledb-ha-secrets.sh [SUFFIX] [EDGE_KUBECONFIG ...]
 #   SUFFIX 기본값 v1(값을 바꿀 때는 새 SUFFIX 로). EDGE_KUBECONFIG 는 허브 kubectl 호스트 기준 경로(예: /home/ubuntu/k8s-daejeon.yaml)
+#   NAS_MEMBER=1 이면 NAS 멤버 자리표시 Pod 도 만듭니다(NAS 멤버가 실제로 돌 때만)
 
 set -euo pipefail
 
@@ -433,6 +439,11 @@ ls -1 "$OUT" | grep "timescaledb_.*_$SUFFIX" | sed 's/^/    /'
 # Patroni 의 쿠버네티스 DCS 는 멤버 상태를 "멤버 이름과 같은 Pod" 의 주석에 적습니다. NAS 멤버는 클러스터 밖이라 Pod 가 없으므로
 # 어느 노드에도 스케줄되지 않는 Pod(nas)를 둡니다. 실행되지 않아 자원을 쓰지 않고, 노드가 죽어도 영향이 없습니다.
 # Argo CD 는 Pending Pod 를 계속 Progressing 으로 보므로 저장소가 아니라 여기서 만듭니다.
+# NAS 멤버가 실제로 돌 때만 만듭니다(NAS_MEMBER=1). 멤버 없이 자리표시만 있으면 failsafe_mode 가 그 멤버를 연락 안 되는 멤버로 보고
+# 쿠버네티스 API 가 멈출 때 주 DB 를 읽기 전용으로 내립니다. 서울 NAS 고장(2026-10-18) 뒤로 기본은 만들지 않습니다.
+if [ "${NAS_MEMBER:-0}" != 1 ]; then
+  log "NAS 멤버 자리표시 Pod: 건너뜀(NAS_MEMBER=1 일 때만 만듦)"; log "완료."; exit 0
+fi
 log "NAS 멤버 자리표시 Pod (timescaledb/nas)"
 "${KUBECTL[@]}" apply -f - >/dev/null <<'POD'
 apiVersion: v1
@@ -452,7 +463,7 @@ log "완료."
 
 </details>
 
-- **확인:** `kubectl -n timescaledb get secret timescaledb-patroni patroni-nas-token` 에 두 Secret 이 보이고, `kubectl -n timescaledb get pod nas` 가 `Pending`, `ls ~/.config/portainer/secrets/ | grep timescaledb` 에 `_v1` 로 끝나는 파일 세 개가 보입니다.
+- **확인:** `kubectl -n timescaledb get secret timescaledb-patroni patroni-nas-token` 에 두 Secret 이 보이고, 스크립트가 `NAS 멤버 자리표시 Pod: 건너뜀` 을 출력하며, `ls ~/.config/portainer/secrets/ | grep timescaledb` 에 `_v1` 로 끝나는 파일 세 개가 보입니다.
 
 ## 5. 기존 DB 쓰기 멈추고 덤프
 
@@ -488,6 +499,7 @@ Patroni 설정의 요점은 아래와 같습니다.
 - `scope` 가 곧 Service·Endpoints 이름이고, `kubernetes.ports` 의 이름이 Service 포트 이름과 같아야 합니다.
 - `synchronous_mode` 와 `synchronous_node_count: 1` 로 쓰기는 대기 복제본 하나가 받아야 완료됩니다. `sync_priority` 가 높은 worker 멤버를 먼저 고르고, 없으면 NAS 멤버가 동기 복제본이 됩니다. `synchronous_mode_strict: false` 라 둘 다 없으면 쓰기를 멈추지 않고 비동기로 씁니다.
 - `failover_priority` 로 주 DB 가 죽으면 worker 멤버(2)를 NAS 멤버(1)보다 먼저 올립니다.
+- `failsafe_mode: true` 로 DCS 인 쿠버네티스 API 가 멈춰도(etcd 과반 상실) 주 DB 를 유지합니다. 리더 잠금을 갱신하지 못해도 리더가 마지막으로 기록한 멤버 모두가 Patroni REST API(`/failsafe`)에 답하면 주 DB 로 남고, 연락 안 되는 멤버가 하나라도 있으면 그때 읽기 전용으로 내려갑니다. 끄면 잠금을 갱신하지 못한 `ttl` 뒤에 읽기 전용으로 내려가 수집이 끊깁니다. 동작 원리는 [PostgreSQL 스트리밍 복제와 동기·비동기 복제의 차이](/posts/73/)에 정리했습니다.
 - `authentication` 에 `rewind` 계정은 적지 않습니다. 이름만 적고 비밀번호를 주지 않았더니 타임라인이 갈라진 복제본이 `pg_rewind` 로 주 DB 에 붙을 때 `no password supplied` 로 실패해 스스로 따라붙지 못했습니다. 적지 않으면 superuser 계정으로 `pg_rewind` 합니다. NAS 멤버의 스택 파일(8단계)도 같습니다.
 - `post_bootstrap` 스크립트는 클러스터를 처음 만들 때 한 번 실행되어 role 과 DB 를 만듭니다. 복원 전에 Telegraf 가 먼저 붙어 테이블을 만들지 않게, `IOT_LOGIN=NOLOGIN` 을 주면 `iot` role 을 로그인할 수 없게 만듭니다.
 
@@ -511,6 +523,9 @@ bootstrap:
     synchronous_mode: true
     synchronous_node_count: 1
     synchronous_mode_strict: false
+    # DCS(쿠버네티스 API)가 멈춰도(etcd 과반 상실) 리더가 마지막으로 기록한 멤버 모두와 Patroni REST 로 연락되면 주 DB 를 유지합니다.
+    # 끄면 리더 잠금을 갱신하지 못한 ttl 뒤에 읽기 전용으로 내려가 수집이 끊깁니다. 연락 안 되는 멤버가 하나라도 있으면 그때는 내려갑니다
+    failsafe_mode: true
     postgresql:
       use_pg_rewind: true
       use_slots: true
@@ -765,7 +780,7 @@ $PSQL -c "ALTER ROLE iot LOGIN;"
 
 ## 8. NAS 멤버 붙이기
 
-NAS 멤버는 같은 이미지로 Portainer Swarm 스택에서 돌립니다. DCS 는 허브 쿠버네티스라 4단계의 kubeconfig 로 API VIP 에 붙고, 멤버 이름은 자리표시 Pod 이름(`nas`)과 같아야 합니다. 평소에는 대기 복제본이고, worker 대기 복제본이 없으면 동기 복제본이 되며, 허브 멤버가 모두 없을 때만 주 DB 가 됩니다. 허브 멤버가 주 DB 를 만든 뒤에 띄웁니다. 그 전에 뜨면 NAS 멤버가 새 클러스터를 만들어 버립니다.
+NAS 멤버는 같은 이미지로 Portainer Swarm 스택에서 돌립니다. DCS 는 허브 쿠버네티스라 4단계의 kubeconfig 로 API VIP 에 붙고, 멤버 이름은 자리표시 Pod 이름(`nas`)과 같아야 합니다. 평소에는 대기 복제본이고, worker 대기 복제본이 없으면 동기 복제본이 되며, 허브 멤버가 모두 없을 때만 주 DB 가 됩니다. 허브 멤버가 주 DB 를 만든 뒤에 띄웁니다. 그 전에 뜨면 NAS 멤버가 새 클러스터를 만들어 버립니다. 띄우기 전에 비밀값 스크립트를 `NAS_MEMBER=1` 로 다시 실행해 자리표시 Pod `nas` 를 만듭니다.
 
 ```yaml
 # 원격지 NAS(Synology, Portainer Swarm)의 TimescaleDB 세 번째 멤버(Patroni). 허브 worker 두 대의 멤버(iot/hub/timescaledb)와 같은 클러스터입니다.
@@ -851,10 +866,14 @@ networks:
 git add stacks/[REGION]/timescaledb scripts/timescaledb-ha-secrets.sh
 git commit -m "feat(stacks): 원격 NAS 에 TimescaleDB 세 번째 멤버 추가"
 git push
+NAS_MEMBER=1 bash scripts/timescaledb-ha-secrets.sh v1
 bash scripts/portainer-stack.sh stacks/[REGION]/timescaledb/stack.yml
 ```
 
-- **확인:** 스크립트가 secret 세 개와 스택을 `만듦` 으로 출력하고, 전체 데이터를 받아 오는 동안 기다린 뒤 9단계의 `patronictl list` 에 `nas` 가 `streaming` 으로 보입니다.
+> NAS 멤버를 빼면 자리표시 Pod 도 `kubectl -n timescaledb delete pod nas` 로 지웁니다. 남겨 두면 `failsafe_mode` 가 응답하지 않는 그 멤버 때문에, 쿠버네티스 API 가 멈출 때 주 DB 를 읽기 전용으로 내립니다.
+{: .prompt-warning }
+
+- **확인:** `kubectl -n timescaledb get pod nas` 가 `Pending` 이고, 스크립트가 secret 세 개와 스택을 `만듦` 으로 출력하고, 전체 데이터를 받아 오는 동안 기다린 뒤 9단계의 `patronictl list` 에 `nas` 가 `streaming` 으로 보입니다.
 
 ## 9. 확인
 

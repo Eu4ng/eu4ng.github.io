@@ -1,17 +1,17 @@
 ---
 layout: post
 title: Proxmox에 Ansible로 kubeadm 엣지 클러스터 만들고 Argo CD 원격 클러스터로 등록하는 방법
-description: 허브와 같은 kubeadm 플레이북으로 지역 엣지 클러스터(control plane 2 + worker 2, API VIP, 서비스 VIP)를 만들고, etcd 세 번째 투표자와 Longhorn 기본 StorageClass 를 붙인 뒤 허브의 Argo CD 에 원격 클러스터로 등록해 GitOps 저장소의 지역 폴더가 그 클러스터로 배포되게 하는 방법을 정리했습니다.
+description: 허브와 같은 kubeadm 플레이북으로 지역 엣지 클러스터(control plane 3 + worker 3, API VIP, 서비스 VIP)를 만들고, Longhorn 기본 StorageClass 를 붙인 뒤 허브의 Argo CD 에 원격 클러스터로 등록해 GitOps 저장소의 지역 폴더가 그 클러스터로 배포되게 하는 방법을 정리했습니다.
 author: Eu4ng
-tags: [proxmox, ansible, kubeadm, kubernetes, kube-vip, longhorn, argo-cd, gitops, edge]
+tags: [proxmox, ansible, kubeadm, kubernetes, keepalived, longhorn, argo-cd, gitops, edge]
 permalink: /posts/42/
 ---
 
-허브 클러스터를 만든 플레이북 `k8s-cluster.yml` 에 지역 하나를 더 적어 **지역 엣지 클러스터**를 만들고, 허브의 **Argo CD** 에 원격 클러스터로 등록합니다. 엣지를 허브의 worker 로 붙이지 않고 별도 클러스터로 두는 이유는, [허브나 인터넷이 끊겨도](/posts/62/) 지역 안의 수집·제어가 자체 control plane 으로 계속 돌아야 하기 때문입니다. 엣지는 control plane 두 대와 worker 두 대를 두 Proxmox 노드에 나눠 두고, etcd 세 번째 투표자를 원격 NAS 컨테이너로 붙여 서버 한 대가 죽어도 버티게 합니다. Argo CD 등록은 API 서버 로그인 대신 CLI 의 core 모드로 쿠버네티스 API 에 직접 써서 비밀번호 없이 끝냅니다.
+허브 클러스터를 만든 플레이북 `k8s-cluster.yml` 에 지역 하나를 더 적어 **지역 엣지 클러스터**를 만들고, 허브의 **Argo CD** 에 원격 클러스터로 등록합니다. 엣지를 허브의 worker 로 붙이지 않고 별도 클러스터로 두는 이유는, [허브나 인터넷이 끊겨도](/posts/62/) 지역 안의 수집·제어가 자체 control plane 으로 계속 돌아야 하기 때문입니다. 엣지는 control plane 세 대와 worker 세 대를 세 Proxmox 노드에 하나씩 나눠 두어, etcd 가 control plane 3멤버라 서버 한 대가 죽어도 버티게 합니다. Argo CD 등록은 API 서버 로그인 대신 CLI 의 core 모드로 쿠버네티스 API 에 직접 써서 비밀번호 없이 끝냅니다.
 
 1. 지역 클러스터 값 추가
 2. 플레이북 실행
-3. etcd 세 번째 투표자 붙이기
+3. etcd 멤버 확인
 4. Argo CD 에 클러스터 등록
 5. 지역 폴더 규칙과 ApplicationSet 추가
 6. Longhorn 을 기본 StorageClass 로 배포
@@ -25,20 +25,20 @@ permalink: /posts/42/
 
 | 항목 | 버전 |
 | :--- | :--- |
-| Proxmox VE | `9.2` (노드 2대 클러스터) |
+| Proxmox VE | `9.2` (노드 3대 클러스터) |
 | Ansible | `13.1` (ansible-core `2.20`, community.proxmox `1.4`) |
 | Kubernetes | `v1.37.0` (kubeadm, containerd `2.2`) |
-| kube-vip | `v1.2.4` |
+| keepalived | `2.2.8` (Ubuntu 24.04 패키지) |
 | Longhorn | `1.12.1` (Helm 차트) |
 | Argo CD (허브) | `v3.5.3` |
 | 작성 기준일 | `2026-09-27` |
 
 다음 항목이 준비되어 있어야 합니다.
 
-- 두 노드로 묶은 Proxmox 클러스터 ([Proxmox 두 대를 클러스터로 묶고 원격 NAS에 QDevice 붙이는 방법](/posts/53/))
+- 세 노드로 묶은 Proxmox 클러스터 ([Proxmox 두 대를 클러스터로 묶고 원격 NAS에 QDevice 붙이는 방법](/posts/53/))
 - `proxmox-ansible` 저장소의 `vm-template.yml`·`k8s-cluster.yml` 과 그 플레이북으로 만든 허브 클러스터 ([Proxmox에 Ansible로 kubeadm 쿠버네티스 클러스터 만드는 방법](/posts/46/)). 이 글은 같은 플레이북에 지역을 하나 더 적어 실행하므로 플레이북 전문은 그 글을 봅니다.
 - Argo CD 가 설치된 허브 클러스터와 GitOps 저장소 ([쿠버네티스에 Argo CD 설치하고 GitOps로 서비스 추가하는 방법](/posts/36/))
-- 엣지용으로 비어 있는 VM ID 4개, 노드 고정 IP 4개, 노드가 쓰지 않는 IP 2개(API VIP, 서비스 VIP)
+- 엣지용으로 비어 있는 VM ID 6개, 노드 고정 IP 6개, 노드가 쓰지 않는 IP 2개(API VIP, 서비스 VIP)
 
 ## 1. 지역 클러스터 값 추가
 
@@ -53,36 +53,39 @@ k8s_clusters:
     nodes:
       - { name: k8s-[SITE_SHORT]-cp-1,     pve: pve01, role: control-plane, vmid: 131, ip: [EDGE_CP1_IP], cores: 2, memory: 2048, disk: 32G }
       - { name: k8s-[SITE_SHORT]-cp-2,     pve: pve02, role: control-plane, vmid: 132, ip: [EDGE_CP2_IP], cores: 2, memory: 2048, disk: 32G }
+      - { name: k8s-[SITE_SHORT]-cp-3,     pve: pve03, role: control-plane, vmid: 135, ip: [EDGE_CP3_IP], cores: 2, memory: 2048, disk: 32G, startup: "order=1" }
       - { name: k8s-[SITE_SHORT]-worker-1, pve: pve01, role: worker,        vmid: 133, ip: [EDGE_WORKER1_IP], cores: 6, memory: 8192, disk: 40G, longhorn_disk: 40 }
       - { name: k8s-[SITE_SHORT]-worker-2, pve: pve02, role: worker,        vmid: 134, ip: [EDGE_WORKER2_IP], cores: 4, memory: 8192, disk: 40G, longhorn_disk: 40 }
+      - { name: k8s-[SITE_SHORT]-worker-3, pve: pve03, role: worker,        vmid: 136, ip: [EDGE_WORKER3_IP], cores: 6, memory: 12288, disk: 40G, longhorn_disk: 200, longhorn_storage: nas, startup: "order=2" }
     dns_name: [SITE_SHORT]                    # 내부망 DNS 역할 이름 k8s-[SITE_SHORT](API VIP), kubectl-[SITE_SHORT], iot-[SITE_SHORT](서비스 VIP)
-    vip: [EDGE_API_VIP]                       # API 엔드포인트(kube-vip, ARP). control plane 중 한 대가 가짐
-    service_vip: [EDGE_SERVICE_VIP]           # LoadBalancer 서비스 VIP. k8s-gitops iot/clusters/[SITE] 의 kube-vip.io/loadbalancerIPs 와 같아야 함
+    vip: [EDGE_API_VIP]                       # API 엔드포인트(keepalived VRRP). control plane 중 한 대가 가짐
+    vrrp_id: 130                              # keepalived virtual_router_id. 같은 LAN 의 클러스터마다 달라야 함(허브와 다르게)
+    service_vip: [EDGE_SERVICE_VIP]           # 서비스 VIP(keepalived 가 API VIP 와 함께 가짐). k8s-gitops iot/clusters/[SITE] 의 Service externalIPs 와 같아야 함
     lan_dns_names: [ha-[SITE_SHORT], z2m-[SITE_SHORT], matter-[SITE_SHORT], grafana-[SITE_SHORT]]   # 내부망에서 service_vip 로 답할 지역 서비스 이름
     control_plane_workloads: false
-    kube_vip_services: true                   # LoadBalancer Service 에 VIP 를 줌(service_vip)
     otbr_host: true                           # OpenThread Border Router(hostNetwork)용 커널 설정
     kubeconfig: "{{ lookup('env', 'HOME') }}/.kube/k8s-[SITE].yaml"
 ```
 {: file="group_vars/all.yml" }
 {% endraw %}
 
-- `pve`: VM 을 둘 Proxmox 노드입니다. control plane 과 worker 를 한 대씩 두 노드에 나눠, 어느 서버가 죽어도 control plane 과 worker 가 하나씩 남게 합니다.
-- `cores`, `memory`: 엣지는 IoT 전용이라 IoT 서비스가 도는 만큼만 줍니다. worker-1 은 NVR 재실 감지가 CPU 를 다 써서 6코어, worker-2 는 NVR 이 넘어올 수 있는 최소인 4코어입니다.
-- `longhorn_disk`: worker 에 붙는 Longhorn 전용 디스크(GB, `scsi1`, `/var/lib/longhorn`)입니다. 6단계의 Longhorn 이 이 디스크에 볼륨을 두 벌씩 둡니다. NVR 영상 버퍼(18Gi, 2벌)까지 담으려고 허브(20)보다 큰 40 으로 둡니다.
-- `service_vip`: 지역의 LoadBalancer Service(Home Assistant, Zigbee2MQTT, Mosquitto, Grafana 등)가 포트만 달리해 함께 쓰는 주소입니다. 각 서비스는 GitOps 저장소의 지역 오버레이에서 `kube-vip.io/loadbalancerIPs` 주석으로 이 주소를 받습니다.
+- `pve`: VM 을 둘 Proxmox 노드입니다. control plane 과 worker 를 한 대씩 세 노드에 나눠, 어느 서버가 죽어도 control plane 과 worker 가 두 대씩 남게 합니다.
+- `cores`, `memory`: 엣지는 IoT 전용이라 IoT 서비스가 도는 만큼만 줍니다. worker-1 은 NVR 재실 감지가 CPU 를 다 써서 6코어, worker-2 는 NVR 이 넘어올 수 있는 최소인 4코어, worker-3 은 평소 IoT 수집 사슬과 NVR 을 받으므로 6코어입니다.
+- `longhorn_disk`: worker 에 붙는 Longhorn 전용 디스크(GB, `scsi1`, `/var/lib/longhorn`)입니다. 6단계의 Longhorn 이 이 디스크에 볼륨을 두 벌씩 둡니다. NVR 영상 버퍼(18Gi, 2벌)까지 담으려고 허브(20)보다 큰 40 으로 둡니다. NVMe 가 넉넉하지 않은 세 번째 서버의 worker 는 `longhorn_storage: nas` 로 NAS HDD 의 NFS 저장소에 디스크를 두고, `startup` 으로 NAS VM 이 뜬 뒤에 켜지게 합니다([kubeadm 클러스터 글](/posts/46/)의 1단계).
+- `vrrp_id`: control plane 의 keepalived 가 VIP 를 정할 때 쓰는 VRRP `virtual_router_id` 입니다. 같은 LAN 에 있는 허브와 겹치지 않게 다른 값을 줍니다.
+- `service_vip`: 지역의 Service(Home Assistant, Zigbee2MQTT, Mosquitto, Grafana 등)가 포트만 달리해 함께 쓰는 주소입니다. 각 서비스는 `type: ClusterIP` 이고, GitOps 저장소의 지역 오버레이에서 `spec.externalIPs` 로 이 주소를 받습니다.
 - `lan_dns_names`: 내부망 DNS 가 이 지역의 서비스 VIP 로 답할 이름입니다. 그 이름을 받는 지역 인그레스는 [지역 엣지에 TimescaleDB와 Grafana를 두어 인터넷 없이도 기록하고 보는 방법](/posts/56/)에서 만듭니다.
 
-> 서비스 VIP 는 kube-vip 의 `--services` 만 켜고 `--servicesElection` 은 쓰지 않습니다. 플레이북(`playbooks/tasks/kube-vip.yml`)도 그렇게 만듭니다. 서비스별 선출을 켜면 서비스마다 리더를 따로 뽑아, 여러 서비스가 한 IP 를 나눠 쓸 때 그 IP 가 두 노드에 동시에 붙습니다. [ARP 응답이 엇갈려](/posts/69/) 서비스 VIP 로 가는 연결이 간헐적으로 끊깁니다.
+> 서비스 VIP 는 API VIP 와 같은 keepalived 인스턴스가 함께 가집니다. 서비스마다 따로 주인을 정하면 여러 서비스가 한 IP 를 나눠 쓸 때 그 IP 가 두 노드에 동시에 붙어 [ARP 응답이 엇갈리고](/posts/69/) 서비스 VIP 로 가는 연결이 간헐적으로 끊깁니다. 쿠버네티스 1.37 은 `externalIPs` 를 쓰면 폐기 예정 경고를 냅니다.
 {: .prompt-warning }
 
 - **확인:** `ansible-inventory --graph` 가 오류 없이 끝나고, `ansible localhost -m debug -a "var=k8s_clusters.[SITE].vip"` 이 `[EDGE_API_VIP]` 를 출력합니다.
 
 ## 2. 플레이북 실행
 
-허브와 같은 플레이북을 지역 이름만 바꿔 실행합니다. 플레이북은 노드마다 `pve` 에 적은 Proxmox 노드의 템플릿을 복제해 VM 을 만들고, 첫 control plane 에서 API VIP 를 엔드포인트로 `kubeadm init` 을 한 뒤 두 번째 control plane 과 worker 를 합류시킵니다. 허브와 다른 점은 값에서 켠 것들입니다.
+허브와 같은 플레이북을 지역 이름만 바꿔 실행합니다. 플레이북은 노드마다 `pve` 에 적은 Proxmox 노드의 템플릿을 복제해 VM 을 만들고, 첫 control plane 에서 API VIP 를 엔드포인트로 `kubeadm init` 을 한 뒤 나머지 control plane 과 worker 를 합류시킵니다. 허브와 다른 점은 값에서 켠 것들입니다.
 
-- `kube_vip_services: true`: control plane 의 kube-vip static pod 가 `--services` 로 떠서 LoadBalancer Service 에 서비스 VIP 를 붙입니다. API VIP 와 같은 리더 한 대가 가집니다.
+- `service_vip`: control plane 의 keepalived 가 API VIP 와 함께 서비스 VIP 도 가집니다. 서비스 VIP 로 들어온 요청은 kube-proxy 의 `externalIPs` 규칙이 파드로 넘기므로, etcd 과반을 잃어 API 가 멈춰도 살아 있는 노드의 서비스는 계속 응답합니다. 다른 노드의 파드로 넘길 때는 출발 주소가 control plane 주소로 바뀝니다(SNAT).
 - `longhorn_disk`: worker 에 전용 디스크를 붙이고 `open-iscsi`, `iscsi_tcp` 모듈, multipath 예외를 설정해 마운트합니다.
 - `otbr_host: true`: IPv6 포워딩, RA 수용, `tun` 모듈을 설정합니다.
 - 마지막에 `lan-dns.yml` 을 다시 실행해 새 노드 이름과 역할 이름(`k8s-[SITE_SHORT]`, `kubectl-[SITE_SHORT]`, `iot-[SITE_SHORT]`), `lan_dns_names` 를 내부망 DNS 에 넣습니다.
@@ -97,13 +100,11 @@ ansible-playbook playbooks/k8s-cluster.yml -e k8s_cluster=[SITE]
 > `kubeadm init` 은 API VIP 가 이미 응답하는데 목록의 control plane 중 클러스터에 든 노드가 없으면 멈춥니다. 다른 클러스터가 같은 VIP 를 쓰고 있을 때 새 클러스터를 만들어 버리지 않기 위해서입니다. 이 경우 `vip` 값을 확인합니다.
 {: .prompt-info }
 
-- **확인:** 마지막 `결과` 태스크에 노드 4대가 `Ready` 로 보이고 `PLAY RECAP` 에 `failed=0` 입니다. 실행 PC 에 `~/.kube/k8s-[SITE].yaml` 이 생기고 그 `server:` 가 `https://[EDGE_API_VIP]:6443` 입니다.
+- **확인:** 마지막 `결과` 태스크에 노드 6대가 `Ready` 로 보이고 `PLAY RECAP` 에 `failed=0` 입니다. 실행 PC 에 `~/.kube/k8s-[SITE].yaml` 이 생기고 그 `server:` 가 `https://[EDGE_API_VIP]:6443` 입니다.
 
-## 3. etcd 세 번째 투표자 붙이기
+## 3. etcd 멤버 확인
 
-control plane 이 두 대면 etcd 멤버도 두 개라, 서버 한 대가 죽으면 [과반](/posts/61/)(2표 중 2표)을 잃어 API 서버가 멈춥니다. 원격 NAS 에 etcd 컨테이너를 세 번째 투표자로 두어 3표 중 2표가 남게 합니다. 투표자는 클러스터마다 따로 두며, 허브 투표자와 같은 NAS 에 둘 때는 포트만 바꿉니다(예: 허브 `2379/2380`, 지역 `12379/12380`). 인터넷이 끊겨도 지역의 두 control plane 끼리 과반이라 엣지는 계속 돕니다.
-
-붙이는 방법은 [쿠버네티스 etcd 세 번째 투표자를 원격 NAS 컨테이너로 붙이는 방법](/posts/55/)을 따르되, 인증서를 만들 때 클러스터 인자에 지역 이름(`[SITE]`)을 주고 멤버 추가·승격은 지역의 첫 control plane 에서 실행합니다.
+control plane 이 세 대라 etcd 멤버도 세 개이고, 서버 한 대가 죽어도 [과반](/posts/61/)(3표 중 2표)이 남아 API 서버가 계속 응답합니다. 멤버가 모두 집 LAN 에 있으므로 인터넷이 끊겨도 엣지는 계속 돕니다. 서버가 두 대뿐이라 control plane 을 두 대만 둘 수 있다면 [쿠버네티스 etcd 세 번째 투표자를 원격 NAS 컨테이너로 붙이는 방법](/posts/55/)으로 세 번째 표를 원격 NAS 에 둡니다.
 
 ```bash
 # 지역 첫 control plane 에서 etcd 멤버 목록 보기
@@ -112,7 +113,7 @@ kubectl -n kube-system exec etcd-k8s-[SITE_SHORT]-cp-1 -- etcdctl \
   member list -w table
 ```
 
-- **확인:** 멤버 세 개(`k8s-[SITE_SHORT]-cp-1`, `k8s-[SITE_SHORT]-cp-2`, 원격 투표자)가 모두 `started` 이고 `IS LEARNER` 가 `false` 입니다.
+- **확인:** 멤버 세 개(`k8s-[SITE_SHORT]-cp-1`, `k8s-[SITE_SHORT]-cp-2`, `k8s-[SITE_SHORT]-cp-3`)가 모두 `started` 이고 `IS LEARNER` 가 `false` 입니다.
 
 ## 4. Argo CD 에 클러스터 등록
 
@@ -328,7 +329,7 @@ git push
 
 ## 6. Longhorn 을 기본 StorageClass 로 배포
 
-엣지의 PVC(Home Assistant 설정, Zigbee2MQTT·Matter 페어링 정보, Mosquitto, Telegraf 버퍼 등)는 서버 한 대가 죽어도 다른 노드에서 같은 데이터로 떠야 하므로, worker 두 대의 전용 디스크에 두 벌씩 두는 Longhorn 을 기본 StorageClass 로 둡니다. 지역 폴더에 첫 Application 으로 Longhorn Helm 폴더를 추가합니다. 허브와 같은 차트·버전이고, Longhorn 자체의 설정은 [쿠버네티스에 Longhorn과 Patroni로 볼륨과 TimescaleDB 이중화하는 방법](/posts/54/)을 봅니다. 엣지에서는 기본 StorageClass 로 둔다는 점만 다릅니다.
+엣지의 PVC(Home Assistant 설정, Zigbee2MQTT·Matter 페어링 정보, Mosquitto, Telegraf 버퍼 등)는 서버 한 대가 죽어도 다른 노드에서 같은 데이터로 떠야 하므로, worker 의 전용 디스크에 두 벌씩 두는 Longhorn 을 기본 StorageClass 로 둡니다. 지역 폴더에 첫 Application 으로 Longhorn Helm 폴더를 추가합니다. 허브와 같은 차트·버전이고, Longhorn 자체의 설정은 [쿠버네티스에 Longhorn과 Patroni로 볼륨과 TimescaleDB 이중화하는 방법](/posts/54/)을 봅니다. 엣지에서는 기본 StorageClass 로 둔다는 점만 다릅니다.
 
 ```yaml
 apiVersion: v2
@@ -372,7 +373,7 @@ git commit -m "feat(iot): [SITE] 엣지에 Longhorn 기본 StorageClass 추가"
 git push
 ```
 
-- **확인:** Argo CD 에 `[SITE]-longhorn-system` Application 이 생겨 `Synced`·`Healthy` 가 되고, 엣지에서 아래 명령을 실행하면 `longhorn (default)` StorageClass 와 worker 두 대의 Longhorn 노드가 `READY True` 로 보입니다.
+- **확인:** Argo CD 에 `[SITE]-longhorn-system` Application 이 생겨 `Synced`·`Healthy` 가 되고, 엣지에서 아래 명령을 실행하면 `longhorn (default)` StorageClass 와 worker 세 대의 Longhorn 노드가 `READY True` 로 보입니다.
 
 ```bash
 # 허브 control plane 에서 엣지 확인
@@ -396,13 +397,13 @@ kubectl --kubeconfig k8s-[SITE].yaml -n longhorn-system get nodes.longhorn.io
 
 ## 마무리
 
-허브와 같은 플레이북으로 control plane 2 + worker 2 의 지역 엣지 클러스터를 만들고, etcd 세 번째 투표자와 Longhorn 기본 StorageClass 를 붙인 뒤 허브의 Argo CD 에 원격 클러스터로 등록해, `iot/clusters/[SITE]/` 아래 폴더가 그 클러스터로 배포되는 구성을 완성했습니다. 지역이 늘면 `k8s_clusters` 에 지역을 추가해 플레이북을 돌리고, 같은 스크립트로 등록한 뒤 `iot/clusters/` 아래 폴더만 추가하면 됩니다. 허브가 엣지 API 서버에 닿지 못하는 동안 Argo CD 는 그 지역의 Application 을 `Unknown` 으로 표시하지만, 엣지에 이미 배포된 파드는 자체 control plane 으로 계속 동작합니다.
+허브와 같은 플레이북으로 control plane 3 + worker 3 의 지역 엣지 클러스터를 만들고, Longhorn 기본 StorageClass 를 붙인 뒤 허브의 Argo CD 에 원격 클러스터로 등록해, `iot/clusters/[SITE]/` 아래 폴더가 그 클러스터로 배포되는 구성을 완성했습니다. 지역이 늘면 `k8s_clusters` 에 지역을 추가해 플레이북을 돌리고, 같은 스크립트로 등록한 뒤 `iot/clusters/` 아래 폴더만 추가하면 됩니다. 허브가 엣지 API 서버에 닿지 못하는 동안 Argo CD 는 그 지역의 Application 을 `Unknown` 으로 표시하지만, 엣지에 이미 배포된 파드는 자체 control plane 으로 계속 동작합니다.
 
 ## 참고 자료
 
 - [Kubernetes - Creating Highly Available Clusters with kubeadm](https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/high-availability/)
-- [kube-vip - Static Pods](https://kube-vip.io/docs/installation/static/)
-- [kube-vip - Kubernetes Services](https://kube-vip.io/docs/usage/kubernetes-services/)
+- [Keepalived - User Guide](https://keepalived.readthedocs.io/en/latest/)
+- [Kubernetes - Service (External IPs)](https://kubernetes.io/docs/concepts/services-networking/service/#external-ips)
 - [Longhorn - Settings Reference](https://longhorn.io/docs/1.12.1/references/settings/)
 - [Argo CD - Declarative Setup (Clusters)](https://argo-cd.readthedocs.io/en/stable/operator-manual/declarative-setup/#clusters)
 - [Argo CD - Git Generator](https://argo-cd.readthedocs.io/en/stable/operator-manual/applicationset/Generators-Git/)

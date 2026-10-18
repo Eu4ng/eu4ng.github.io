@@ -40,6 +40,14 @@
         src: ../scripts/pve-reboot.sh
         dest: /usr/local/sbin/pve-reboot.sh
         mode: "0755"
+    # 다른 게스트를 모두 내린 뒤 마지막에 내릴 게스트(NAS). NFS 저장소에 디스크를 둔 VM 이 NAS 보다 먼저 내려가게 합니다
+    - name: 재부팅 스크립트 기본값 (마지막에 내릴 게스트)
+      ansible.builtin.copy:
+        dest: /etc/default/pve-reboot
+        mode: "0644"
+        content: |
+          # proxmox-ansible pve-cluster.yml (group_vars 의 xpenology.vmid). scripts/pve-reboot.sh 가 읽음
+          LAST_VMIDS="{{ xpenology.vmid if xpenology.pve == inventory_hostname else '' }}"
     # governor 를 먼저 바꿔야 EPP 를 고를 수 있습니다(performance governor 에서는 EPP 가 performance 하나뿐)
     - name: CPU 주파수 정책 (부팅 때 적용)
       ansible.builtin.copy:
@@ -134,10 +142,17 @@
     - name: 합류
       when: not corosync.stat.exists
       block:
+        # 네트워크로 받지 않고(ssh-keyscan) 메인 서버에서 직접 읽은 키를 넣습니다. 합류(pvecm add --use_ssh)가 이 키로 메인 서버를 검증합니다
+        - name: 메인 서버 호스트 키 읽기
+          ansible.builtin.slurp:
+            src: /etc/ssh/ssh_host_ed25519_key.pub
+          delegate_to: "{{ groups.proxmox_primary[0] }}"
+          register: primary_host_key
         - name: 메인 서버 호스트 키 등록
-          ansible.builtin.shell: |
-            ssh-keygen -R {{ primary_ip }} >/dev/null 2>&1 || true
-            ssh-keyscan -t ed25519,rsa {{ primary_ip }} >> /root/.ssh/known_hosts
+          ansible.builtin.known_hosts:
+            path: /root/.ssh/known_hosts
+            name: "{{ primary_ip }}"
+            key: "{{ primary_ip }} {{ (primary_host_key.content | b64decode).split()[:2] | join(' ') }}"
         - name: 합류 (게스트가 없는 노드만 가능)
           ansible.builtin.command: pvecm add {{ primary_ip }} --link0 {{ ansible_host }} --use_ssh
           register: join
@@ -271,15 +286,17 @@
       register: qnetd_port
       changed_when: false
       failed_when: false
+      when: pve_qdevice_host | length > 0
     - name: qnetd 경고
       ansible.builtin.debug:
         msg: "[경고] {{ inventory_hostname }} 에서 qnetd {{ pve_qdevice_host }}:5403 에 닿지 않습니다. 서울 NAS 의 Tailscale·qnetd 컨테이너를 확인합니다."
-      when: qnetd_port.rc != 0
+      when: pve_qdevice_host | length > 0 and qnetd_port.rc != 0
 
 # 두 노드 클러스터의 세 번째 표. 한 노드가 꺼져도 남은 노드 + QDevice 로 과반을 유지합니다.
 # pvecm qdevice setup 은 설정이 이미 있으면 거부하고, qdevice remove 는 모든 노드가 online 이어야 하므로 상태에 따라 나눕니다.
 #   설정 없음 → setup / 있고 모든 노드에서 corosync-qdevice 가 돎 → 그대로 / 있는데 어느 노드에서 안 돎 → 모두 online 이면 remove 뒤 setup,
 #   offline 노드가 있으면 멈춤(같은 이름 노드를 다시 넣을 때는 scripts/pve-node-rebuild.sh 가 미리 remove 해 둡니다)
+# pve_qdevice_host 가 비면 QDevice 를 두지 않습니다: 설정이 있고 모든 노드가 online 이면 remove, offline 노드가 있으면 경고만 냅니다.
 - name: QDevice
   hosts: proxmox
   gather_facts: false
@@ -290,12 +307,13 @@
     - name: corosync-qdevice
       ansible.builtin.apt:
         name: corosync-qdevice
-    - name: qnetd 컨테이너의 ssh 포트 (pvecm qdevice setup 의 ssh·scp 가 씀)
+    - name: qnetd 컨테이너의 ssh 포트 (pvecm qdevice setup 의 ssh·scp 가 씀. QDevice 를 안 두면 블록을 지움)
       ansible.builtin.blockinfile:
         path: /root/.ssh/config
         create: true
         mode: "0600"
         marker: "# {mark} pve-cluster.yml: QDevice"
+        state: "{{ 'present' if pve_qdevice_host | length > 0 else 'absent' }}"
         block: |
           Host {{ pve_qdevice_host }}
             Port {{ pve_qdevice_ssh_port }}
@@ -320,7 +338,8 @@
           {%- set members = (qdevice_state.stdout_lines[1:] | join('\n') | from_json).nodelist -%}
           {%- set all_online = members.values() | map(attribute='online') | min == 1 -%}
           {%- set all_active = ansible_play_hosts_all | map('extract', hostvars, ['qdevice_active', 'stdout']) | unique | list == ['active'] -%}
-          {%- if not conf -%}setup
+          {%- if pve_qdevice_host | length == 0 -%}{{ ('remove' if all_online else 'remove-blocked') if conf else 'none' }}
+          {%- elif not conf -%}setup
           {%- elif all_active -%}keep
           {%- elif all_online -%}reset
           {%- else -%}blocked{%- endif -%}
@@ -336,9 +355,13 @@
       ansible.builtin.command: ssh -o BatchMode=yes -o ConnectTimeout=10 {{ pve_qdevice_host }} corosync-qnetd-tool -s
       changed_when: false
       when: inventory_hostname == primary and qdevice_action in ['setup', 'reset']
-    - name: QDevice 다시 설정하기 전에 지우기
+    - name: QDevice 다시 설정하기 전에 지우기 (또는 QDevice 를 안 두게 되어 지우기)
       ansible.builtin.command: pvecm qdevice remove
-      when: inventory_hostname == primary and qdevice_action == 'reset'
+      when: inventory_hostname == primary and qdevice_action in ['reset', 'remove']
+    - name: 지울 QDevice 가 남음 경고
+      ansible.builtin.debug:
+        msg: "[경고] pve_qdevice_host 가 비었는데 QDevice 설정이 남아 있고, offline 노드가 있어 지금은 지울 수 없습니다. 모든 노드가 online 일 때 다시 실행합니다."
+      when: inventory_hostname == primary and qdevice_action == 'remove-blocked'
     - name: QDevice 연결 (모든 노드가 온라인이어야 함)
       ansible.builtin.command: pvecm qdevice setup {{ pve_qdevice_host }}
       when: inventory_hostname == primary and qdevice_action in ['setup', 'reset']
@@ -351,12 +374,13 @@
       ansible.builtin.command: pvecm status
       register: status
       changed_when: false
-    - name: 모든 노드가 들어왔고 과반인지
+    - name: 모든 노드가 들어왔고 과반인지 (QDevice 는 pve_qdevice_host 가 있을 때만 있어야 하고, 비면 없어야 함)
       ansible.builtin.assert:
         that:
           - "'Quorate:          Yes' in status.stdout"
           - "status.stdout is search('Nodes:\\s+' ~ (groups.proxmox | length) ~ '\\s')"
-          - "status.stdout is search('Qdevice')"
+          # 설정된 표(votes N)로 봅니다. qdevice remove 뒤에도 corosync 를 다시 띄울 때까지 'Qdevice (votes 0)' 줄이 남습니다
+          - "(status.stdout is search('Qdevice \\(votes [1-9]')) == (pve_qdevice_host | length > 0)"
         fail_msg: "{{ status.stdout }}"
     - name: 상태
       ansible.builtin.debug:
@@ -365,7 +389,7 @@
     - name: QDevice 표 경고
       ansible.builtin.debug:
         msg: "[경고] QDevice 가 표를 내지 않습니다(qnetd {{ pve_qdevice_host }} 연결 확인). 지금 노드 하나가 꺼지면 과반을 잃습니다."
-      when: status.stdout is search('0x00000000\\s+0\\s+Qdevice')
+      when: pve_qdevice_host | length > 0 and status.stdout is search('0x00000000\\s+0\\s+Qdevice')
 
 # 모든 노드가 다른 노드를 복구할 수 있게(저장소·ansible·토큰·키). 복구로 새로 들어온 노드도 여기서 같이 준비됩니다
 - import_playbook: pve-controller.yml

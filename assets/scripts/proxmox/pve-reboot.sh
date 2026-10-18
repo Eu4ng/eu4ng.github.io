@@ -11,6 +11,12 @@
 # sysrq o 는 커널이 전원 끄기를 지원할 때만 실제로 끕니다. 꺼졌는지는 접속 단절이 아니라 전력(스마트 플러그)이나 현장에서
 # 확인합니다.
 #
+# 게스트는 두 차례로 내립니다. 먼저 나머지 게스트를 모두 내리고, 그다음에 NAS(헤놀로지) 같은 마지막 게스트를 내립니다.
+# NAS 를 먼저 내리면 그 NFS 저장소(nas)에 디스크를 둔 VM 이 I/O 에서 굳습니다. 마지막 게스트는 --last 또는
+# /etc/default/pve-reboot 의 LAST_VMIDS(pve-cluster.yml 이 group_vars 의 xpenology.vmid 로 배포)로 정합니다.
+# pve03 을 재부팅하면 NAS 가 멈추므로 다른 노드에서 nas 저장소를 쓰는 VM(docker VM 206 등)도 그동안 디스크 I/O 가 멈춥니다.
+# pve03 의 worker-3 은 이 스크립트가 NAS 보다 먼저 내립니다. 다른 노드의 nas VM 은 미리 내리거나 멈춤을 감수합니다.
+#
 # 사용법(호스트에서 root). 실행 중에 이 호스트의 게스트(ssh 를 건너온 CT 포함)가 내려가 세션이 끊기므로 systemd-run 으로 띄웁니다:
 #   systemd-run --unit pve-reboot --collect /usr/local/sbin/pve-reboot.sh [옵션]; journalctl -fu pve-reboot
 # 옵션:
@@ -18,19 +24,24 @@
 #   --poweroff         재부팅 대신 전원을 끔(하드웨어 작업용). BMC 가 없으면 다시 켜는 것은 사람이 함
 #   --force-sysrq      판정과 무관하게 sysrq 로 재부팅(종료)
 #   --skip <vmid>      내리지 않을 게스트(여러 번 줄 수 있음). 그 게스트는 재부팅과 함께 끊깁니다
+#   --last <vmid>      다른 게스트를 모두 내린 뒤 마지막에 내릴 게스트(여러 번 줄 수 있음, LAST_VMIDS 에 더함)
 #   --vm-timeout <초>  VM 종료 대기(기본 180)
 #   --ct-timeout <초>  CT 종료 대기(기본 60)
 # 종료 코드: 0 재부팅·종료 시작(또는 dry-run), 1 쿼럼 없음 등으로 중단, 2 인자 오류
 set -uo pipefail
 
 DRY_RUN=0 FORCE_SYSRQ=0 POWEROFF=0 VM_TIMEOUT=180 CT_TIMEOUT=60
-declare -A SKIP=()
+declare -A SKIP=() LAST=()
+# 노드별 기본값(pve-cluster.yml 이 배포). LAST_VMIDS="205" 처럼 공백으로 나눕니다
+[ -r /etc/default/pve-reboot ] && . /etc/default/pve-reboot
+for id in ${LAST_VMIDS:-}; do LAST[$id]=1; done
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY_RUN=1 ;;
     --force-sysrq) FORCE_SYSRQ=1 ;;
     --poweroff) POWEROFF=1 ;;
     --skip) SKIP[$2]=1; shift ;;
+    --last) LAST[$2]=1; shift ;;
     --vm-timeout) VM_TIMEOUT=$2; shift ;;
     --ct-timeout) CT_TIMEOUT=$2; shift ;;
     -h|--help) sed -n '2,/^set -uo/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
@@ -50,21 +61,33 @@ if [ -e /etc/pve/corosync.conf ]; then
   log "쿼럼 정상"
 fi
 
-# 2) 이 노드에서 켜져 있는 게스트를 동시에 내린다
+# 2) 이 노드에서 켜져 있는 게스트를 내린다. 1차는 LAST 가 아닌 게스트를 동시에, 2차는 LAST 게스트를
 running_vms() { qm list 2>/dev/null | awk 'NR>1 && $3=="running" {print $1}'; }
 running_cts() { pct list 2>/dev/null | awk 'NR>1 && $2=="running" {print $1}'; }
-pids=()
-for id in $(running_vms); do
-  [ -n "${SKIP[$id]:-}" ] && { log "VM $id 건너뜀(--skip)"; continue; }
-  log "VM $id 종료(최대 ${VM_TIMEOUT}초)"
-  if [ "$DRY_RUN" = 0 ]; then qm shutdown "$id" --timeout "$VM_TIMEOUT" >/dev/null 2>&1 & pids+=($!); fi
-done
-for id in $(running_cts); do
-  [ -n "${SKIP[$id]:-}" ] && { log "CT $id 건너뜀(--skip)"; continue; }
-  log "CT $id 종료(최대 ${CT_TIMEOUT}초)"
-  if [ "$DRY_RUN" = 0 ]; then pct shutdown "$id" --timeout "$CT_TIMEOUT" >/dev/null 2>&1 & pids+=($!); fi
-done
-[ ${#pids[@]} -gt 0 ] && wait "${pids[@]}"
+shutdown_phase() {   # $1: first(LAST 제외) | last(LAST 만)
+  local id pids=()
+  for id in $(running_vms); do
+    if [ "$1" = first ]; then [ -n "${LAST[$id]:-}" ] && continue; else [ -z "${LAST[$id]:-}" ] && continue; fi
+    [ -n "${SKIP[$id]:-}" ] && { log "VM $id 건너뜀(--skip)"; continue; }
+    log "VM $id 종료(최대 ${VM_TIMEOUT}초)"
+    if [ "$DRY_RUN" = 0 ]; then qm shutdown "$id" --timeout "$VM_TIMEOUT" >/dev/null 2>&1 & pids+=($!); fi
+  done
+  for id in $(running_cts); do
+    if [ "$1" = first ]; then [ -n "${LAST[$id]:-}" ] && continue; else [ -z "${LAST[$id]:-}" ] && continue; fi
+    [ -n "${SKIP[$id]:-}" ] && { log "CT $id 건너뜀(--skip)"; continue; }
+    log "CT $id 종료(최대 ${CT_TIMEOUT}초)"
+    if [ "$DRY_RUN" = 0 ]; then pct shutdown "$id" --timeout "$CT_TIMEOUT" >/dev/null 2>&1 & pids+=($!); fi
+  done
+  [ ${#pids[@]} -gt 0 ] && wait "${pids[@]}"
+  return 0
+}
+last_ids="${!LAST[*]}"
+log "1차: 마지막 게스트(${last_ids:-없음})를 뺀 게스트 종료"
+shutdown_phase first
+if [ ${#LAST[@]} -gt 0 ]; then
+  log "2차: 마지막 게스트 종료"
+  shutdown_phase last
+fi
 
 # 3) 멈춤 판정: 아직 켜진 게스트(--skip 제외), 또는 10초 간격 두 번 모두 D 상태인 작업
 hung=()
