@@ -258,7 +258,7 @@ spec:
         accessModes: [ReadWriteOnce]
         storageClassName: longhorn-local            # storageclass.yaml. 한 벌만 두고 이중화는 DB 복제가 맡습니다
         volumeMode: Filesystem
-        resources: { requests: { storage: 5Gi } }   # Longhorn 은 온라인으로 늘릴 수 있습니다
+        resources: { requests: { storage: 20Gi } }  # 템플릿은 바꿀 수 없어, 늘릴 때는 PVC 를 patch(Longhorn 온라인 확장)하고 StatefulSet 을 --cascade=orphan 으로 지워 다시 만들게 합니다
       status: { phase: Pending }
 ```
 {: file="iot/edge/timescaledb/statefulset.yaml" }
