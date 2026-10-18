@@ -237,7 +237,10 @@ ssh ubuntu@kubectl-hub.eu4ng.com "kubectl --kubeconfig ~/k8s-daejeon.yaml -n nvr
 | `<날짜>_live.mkv` | 실시간 측정 영상(보조 스트림 기반 초록 박스) | 당일 | 365일 |
 | `<날짜>_review.json`, `<날짜>_review_<시작>-<끝>.mkv` | 사후 검수 결과와 불일치 구간 클립 | 당일 | 365일 |
 
-로컬의 "당일" 은 그날 쓰는 폴더만 남긴다는 뜻입니다. 전날 폴더는 자정 뒤 NAS 로 보낸 다음 지웁니다.
+로컬의 "당일" 은 그날 쓰는 폴더만 남긴다는 뜻입니다. 전날 폴더는 자정 뒤 NAS 로 보내고, NAS 에 같은 크기로 있는 것을 확인한 다음 지웁니다.
+
+> 2026-10-18 서울 NAS 가 고장 나, 지금은 같은 LAN 의 Proxmox CT(`nvr-archive`, 320GB)에 30일치를 받습니다. 목적지는 GitOps 저장소의 `iot/edge/nvr/archive-target.env` 한 곳에서 바꾸고, 표의 "서울 NAS 365일" 은 NAS 를 되살리면 돌아갈 설정입니다.
+{: .prompt-info }
 
 NVR 은 상시 무중단 녹화를 담당하는 **녹화 파드(`nvr`)**와, 알고리즘 개선 및 모델 재배포가 잦은 **영상 분석 파드(`nvr-occupancy`)**로 역할을 분리하여 협력하는 구조입니다:
 1. **`go2rtc`** (녹화 파드): 카메라에 RTSP 세션을 맺고(주 스트림 `main`, 보조 스트림 `sub`), Service `nvr:8554` 로 스트림을 분배합니다. 저가형 IP 카메라의 동시 연결 수 한계 문제를 원천 차단합니다.
@@ -329,7 +332,9 @@ streams:
 ```
 {: file="iot/edge/nvr/collector-settings.json" }
 
-매일 00:05 에 실행되는 `nvr-daily-archive` CronJob 은 전날 파일이 닫히기를 기다린 뒤 종류마다 재인코딩 없이 하나로 합칩니다. 재시작 때문에 파일이 나뉜 날은 녹화가 이어진 구간마다 `<날짜>_<종류>_<시작>-<끝>.mkv` 로 합치므로 이름의 시각 사이가 녹화가 끊긴 구간입니다. 이어서 주 스트림(`_main`), 보조 스트림(`_sub`), 실시간 측정 영상(`_live`)을 Tailscale 경유 서울 NAS(`/volume3/backup/nvr/daejeon/<날짜>/`)로 SFTP 로 보내고, 다 보낸 전날 폴더는 로컬에서 바로 지웁니다(`LOCAL_DAYS` 기본 0). NAS 에서는 365일이 지난 날짜 폴더를 지웁니다. 정리가 하루 한 번만 돌기 때문에 전날 영상을 남겨 두면 18Gi 볼륨이 다음 날 가득 차므로 로컬에는 당일치만 둡니다. 정리한 뒤에도 여유가 60%(`MIN_FREE_PCT`)보다 적으면 남은 지난 폴더의 영상부터 더 지웁니다. NAS 로 보내지 못한 파일이 있는 폴더는 지우지 않고 다음 실행에 다시 보냅니다. NAS 계정은 볼륨 최상위에 폴더를 만들 수 없으므로 기존 공유 폴더 아래에 두고, 시놀로지는 rsync 서비스를 켜지 않으면 rsync-over-ssh 를 거부하므로 SFTP 를 씁니다. SFTP 경로는 공유 폴더 기준(`/backup/nvr/daejeon`)입니다.
+매일 00:05 에 실행되는 `nvr-daily-archive` CronJob 은 전날 파일이 닫히기를 기다린 뒤 종류마다 재인코딩 없이 하나로 합칩니다. 재시작 때문에 파일이 나뉜 날은 녹화가 이어진 구간마다 `<날짜>_<종류>_<시작>-<끝>.mkv` 로 합치므로 이름의 시각 사이가 녹화가 끊긴 구간입니다. 이어서 주 스트림(`_main`), 보조 스트림(`_sub`), 실시간 측정 영상(`_live`)을 Tailscale 경유 서울 NAS(`/volume3/backup/nvr/daejeon/<날짜>/`)로 SFTP 로 보내고, 폴더에 남은 모든 파일이 지금 목적지에 같은 크기로 있는 것을 확인한 전날 폴더만 로컬에서 지웁니다(`LOCAL_DAYS` 기본 0, `CLEANUP=1`). NAS 에서는 365일(`NAS_DAYS`)이 지난 날짜 폴더를 지웁니다.
+
+목적지(`ARCHIVE_ID`, `NAS_HOST`, `NAS_USER`, `NAS_DIR`, `NAS_SFTP_DIR`, `NAS_DAYS`, `KNOWN_HOSTS`)는 `archive-target.env` 에 두고 kustomize `configMapGenerator` 로 ConfigMap `nvr-archive-target` 을 만들어 두 CronJob 이 `envFrom` 으로 받습니다. 목적지의 ssh 호스트 키는 `archive-known-hosts` 파일을 ConfigMap 으로 `/etc/archive-ssh/known_hosts` 에 넣고 `StrictHostKeyChecking=yes` 로 검증하므로, 다른 기계가 그 주소를 받아도 영상을 보내지 않습니다. 보낸 표시는 목적지마다 따로(`.uploaded-<종류>.<ARCHIVE_ID>`) 남기므로, 목적지를 바꾸면 옛 목적지에만 보낸 날짜도 새 목적지로 다시 보냅니다. 목적지에 닿지 않거나 크기가 다르면 그 날짜는 지우지 않습니다. 정리가 하루 한 번만 돌기 때문에 전날 영상을 남겨 두면 18Gi 볼륨이 다음 날 가득 차므로 로컬에는 당일치만 둡니다. 정리한 뒤에도 여유가 60%(`MIN_FREE_PCT`)보다 적으면 목적지에서 확인한 지난 날짜의 영상부터 더 지우고, 확인하지 못한 날짜만 남았으면 지우지 않고 경고만 냅니다(녹화가 멈출 수 있으므로 경고를 보면 목적지를 살립니다). 보내지 못한 파일이 있는 폴더는 다음 실행에 다시 보냅니다. NAS 계정은 볼륨 최상위에 폴더를 만들 수 없으므로 기존 공유 폴더 아래에 두고, 시놀로지는 rsync 서비스를 켜지 않으면 rsync-over-ssh 를 거부하므로 SFTP 를 씁니다. SFTP 경로는 공유 폴더 기준(`/backup/nvr/daejeon`)입니다.
 
 `nvr-review` CronJob(매일 00:30)은 사후 검수입니다. 실시간 측정은 움직이는 사람은 잘 잡지만 오래 가만히 있는 사람에게 약하므로, 합친 5MP 원본의 **모든 프레임**을 더 큰 모델로 다시 추적해 초마다 인원을 내고 DB `readings` 의 실시간 `occupant_count` 와 비교합니다. 값이 다른 구간만 왼쪽에 실시간 측정 영상, 오른쪽에 검수 결과를 붙인 2560x720 클립으로 남기고, 일치율과 불일치 구간 목록을 `<날짜>_review.json` 에 씁니다. 마감 시간 없이 검수 안 된 가장 최근 날짜부터 처리하고, CPU 가 모자랄 때 실시간 수집이 먼저 받도록 검수 CronJob 의 CPU request 를 낮게 둡니다. 모델과 비교 기준은 `review-settings.json` 에서 바꿉니다.
 
@@ -410,7 +415,7 @@ ssh ubuntu@kubectl-hub.eu4ng.com "kubectl --kubeconfig ~/k8s-daejeon.yaml -n nvr
 ssh ubuntu@kubectl-hub.eu4ng.com "kubectl --kubeconfig ~/k8s-daejeon.yaml -n nvr logs -l job-name --all-containers --prefix --tail=30"
 ```
 
-- **확인:** `rec: <날짜>_rec.mkv`, `live: <날짜>_live.mkv` 처럼 종류마다 합친 파일 이름이 나오고 `NAS 이관` 줄에 이어 `로컬 보존 정리` 와 `<날짜>: 지움` 이 보입니다. 끊긴 날은 `<날짜>_<종류>_<시작>-<끝>.mkv` 로 여러 개입니다.
+- **확인:** `rec: <날짜>_rec.mkv`, `live: <날짜>_live.mkv` 처럼 종류마다 합친 파일 이름이 나오고 `<ARCHIVE_ID> 이관` 줄(예: `pve01-nvr-archive 이관`)에 이어 `로컬 보존 정리` 와 `<날짜>: 지움` 이 보입니다. 끊긴 날은 `<날짜>_<종류>_<시작>-<끝>.mkv` 로 여러 개입니다.
 
 사후 검수를 켰다면(전날 원본이 남도록 `LOCAL_DAYS` 와 볼륨을 늘린 경우) 검수가 끝난 뒤 결과 파일을 봅니다.
 
