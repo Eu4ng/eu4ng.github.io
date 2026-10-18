@@ -274,7 +274,7 @@ ansible-galaxy collection install -r requirements.yml
 
 ## 5. 플레이북 실행
 
-플레이북은 여섯 플레이와 마지막에 불러오는 `pve-controller.yml` 입니다. 노드 준비(구독 없는 apt 저장소, 호스트 이름, CPU 절전 정책), 클러스터 만들기, 합류, Tailscale, QDevice, 확인 순서이고, `pve-controller.yml` 은 모든 노드를 다른 노드를 다시 만들 수 있는 노드로 준비합니다(7단계). 합류와 QDevice 는 이미 되어 있으면 건너뜁니다. Tailscale 로그인에 실패하면 한 노드라도 거기서 멈추고, 다시 실행하면 이어 갑니다. CPU 절전 정책은 부팅 때 도는 systemd 유닛(`cpu-epp`)으로, amd-pstate-epp 의 governor 를 `powersave`, EPP 를 `balance_performance` 로 둡니다. 부하가 오면 클럭이 바로 오르고, 한가할 때만 내려가 유휴 전력이 줄어듭니다(값은 `group_vars/all.yml` 의 `pve_cpu_governor`·`pve_cpu_epp`).
+플레이북은 여섯 플레이와 마지막에 불러오는 `pve-controller.yml` 입니다. 노드 준비(구독 없는 apt 저장소, 호스트 이름, CPU 절전 정책), 클러스터 만들기, 합류, Tailscale, QDevice, 확인 순서이고, `pve-controller.yml` 은 모든 노드를 다른 노드를 다시 만들 수 있는 노드로 준비합니다(7단계). 합류와 QDevice 는 이미 되어 있으면 건너뜁니다. Tailscale 로그인에 실패하면 한 노드라도 거기서 멈추고, 다시 실행하면 이어 갑니다. CPU 절전 정책은 부팅 때 도는 systemd 유닛(`cpu-epp`)으로, amd-pstate-epp 의 governor 를 `powersave`, EPP 를 `balance_power` 로 둡니다. 한가할 때 클럭이 내려가 유휴 전력이 줄고, 부하가 와도 클럭을 덜 공격적으로 올려 발열과 팬 소음이 줄어듭니다(처음에는 `balance_performance` 였는데, 16코어 노드가 부하에 95 °C 까지 올라 팬이 시끄러워 낮췄습니다)(값은 `group_vars/all.yml` 의 `pve_cpu_governor`·`pve_cpu_epp`).
 
 Tailscale 플레이는 로그인 뒤 두 노드를 서브넷 라우터로 만듭니다. IP 포워딩을 켜고 `tailscale set --advertise-routes` 로 집 LAN 을 광고합니다. 두 노드가 같은 대역을 광고하면 Tailscale 은 한 노드를 주 라우터로 쓰고 다른 노드를 대기로 둡니다. 원격 노드는 LAN 대역으로 가는 응답을 주 라우터로만 보내므로, VM 이 tailnet 으로 보내는 패킷은 자기 Proxmox 노드의 Tailscale IP 로 바꿔([마스커레이드](/posts/68/)) 내보냅니다. 이 규칙은 부팅 때 `tailscaled` 뒤에 적용되도록 systemd 유닛(`tailscale-lan-masquerade`)으로 둡니다.
 
