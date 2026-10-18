@@ -42,7 +42,7 @@ permalink: /posts/43/
 - 지역 DB(`iot/clusters/[SITE]/timescaledb`) ([지역 엣지에 TimescaleDB와 Grafana를 두어 인터넷 없이도 기록하고 보는 방법](/posts/56/)). 지역 DB 보다 Telegraf 를 먼저 배포하면 지역 DB 몫은 디스크 버퍼에 쌓였다가 DB 가 뜨면 들어갑니다.
 - 허브의 kube-prometheus-stack(Grafana) ([쿠버네티스에 Prometheus와 Grafana 배포해 자원 사용량 대시보드 만드는 방법](/posts/39/))
 - 허브 control plane 에 엣지 kubeconfig 파일(`k8s-[SITE].yaml`)
-- 엣지의 서비스 VIP(`[EDGE_SERVICE_VIP]`, kube-vip 가 LoadBalancer Service 에 붙이는 LAN 주소)와 허브 control plane VIP(`[HUB_VIP]`)
+- 엣지의 서비스 VIP(`[EDGE_SERVICE_VIP]`, 엣지 control plane 의 keepalived 가 가지고 Service 의 `externalIPs` 로 받는 LAN 주소)와 허브 control plane VIP(`[HUB_VIP]`)
 
 ## 1. 비밀 값 만들기
 
@@ -209,7 +209,7 @@ Grafana 는 기존 `services/monitoring/values.yaml` 에 데이터소스를 추�
 
 엣지 서비스는 `iot/edge/[이름]/` 에 공통 베이스를 두고 지역 오버레이가 참조합니다. 설정 파일은 kustomize 의 `configMapGenerator` 로 넣어, 파일을 고치면 ConfigMap 이름의 해시가 바뀌어 파드가 자동으로 다시 뜹니다.
 
-Mosquitto 는 계정 없는 접속을 막고 persistence 를 켭니다. Service 는 `LoadBalancer` 로 두고 지역 오버레이가 서비스 VIP 를 지정하면, 엣지의 kube-vip 가 그 VIP 의 1883 을 열어 주어 LAN 기기가 표준 포트로 붙습니다.
+Mosquitto 는 계정 없는 접속을 막고 persistence 를 켭니다. Service 는 `ClusterIP` 로 두고 지역 오버레이가 `spec.externalIPs` 에 서비스 VIP 를 적으면, kube-proxy 가 그 VIP 의 1883 으로 들어온 연결을 브로커로 넘겨 LAN 기기가 표준 포트로 붙습니다. VIP 는 엣지 control plane 의 keepalived 가 가지므로 쿠버네티스 API 가 멈춰도 계속 받습니다.
 
 ```yaml
 # 엣지의 MQTT 브로커. 지역 오버레이(iot/clusters/<지역>/mosquitto/)가 이 폴더를 참조합니다.
@@ -248,7 +248,7 @@ metadata:
 spec:
   replicas: 1
   strategy:
-    type: Recreate           # PVC 가 ReadWriteOnce 이고 LoadBalancer 포트도 하나입니다
+    type: Recreate           # PVC 가 ReadWriteOnce 입니다
   selector:
     matchLabels: { app: mosquitto }
   template:
@@ -288,13 +288,13 @@ spec:
 `priorityClassName: essential` 과 `tolerations` 는 서버 한 대가 죽었을 때를 위한 설정입니다. 남은 worker 에 자리가 모자라면 이 파드를 먼저 살리고, 죽은 노드를 기본 300초 대신 30초만 기다린 뒤 다른 노드에서 다시 띄웁니다. 등급은 [쿠버네티스에 Longhorn과 Patroni로 볼륨과 TimescaleDB 이중화하는 방법](/posts/54/)의 6단계에서 만들고, 등급이 없으면 파드가 만들어지지 않습니다.
 
 ```yaml
-# LAN 의 기기(ESPHome, 서버의 Telegraf 등)와 디버깅용 mosquitto_sub 이 [엣지 VIP]:1883 표준 포트로 붙습니다. VIP 는 지역 오버레이가 kube-vip.io/loadbalancerIPs 로 줍니다.
+# LAN 의 기기(ESPHome, 서버의 Telegraf 등)와 디버깅용 mosquitto_sub 이 [엣지 VIP]:1883 표준 포트로 붙습니다. VIP 는 지역 오버레이가 spec.externalIPs 로 줍니다(control plane 의 keepalived 가 가진 주소를 kube-proxy 가 받아 넘김).
 apiVersion: v1
 kind: Service
 metadata:
   name: mosquitto
 spec:
-  type: LoadBalancer
+  type: ClusterIP
   selector: { app: mosquitto }
   ports:
     - { port: 1883, targetPort: 1883 }
@@ -1178,14 +1178,14 @@ SELECT count(*) AS split_series FROM (
 resources:
   - ../../../edge/mosquitto
 patches:
-  # [SITE] 엣지의 서비스 VIP(kube-vip). HA·Z2M·Matter·Mosquitto 가 포트만 달리해 같은 주소를 씁니다(LAN 기기·허브가 이 주소로 붙음)
+  # [SITE] 엣지의 서비스 VIP(proxmox-ansible 의 service_vip, control plane 의 keepalived 가 가짐. API 가 멈춰도 kube-proxy 규칙으로 계속 받음). HA·Z2M·Matter·Mosquitto 가 포트만 달리해 같은 주소를 씁니다(LAN 기기·허브가 이 주소로 붙음)
   - patch: |
       apiVersion: v1
       kind: Service
       metadata:
         name: mosquitto
-        annotations:
-          kube-vip.io/loadbalancerIPs: "[EDGE_SERVICE_VIP]"
+      spec:
+        externalIPs: [[EDGE_SERVICE_VIP]]
 ```
 {: file="iot/clusters/[SITE]/mosquitto/kustomization.yaml" }
 
@@ -1285,7 +1285,9 @@ configMapGenerator:
 
 ```yaml
 # 중앙 시계열 저장소. 모든 지역의 엣지 Telegraf 가 여기로 씁니다.
-# Patroni 클러스터: worker 두 대의 StatefulSet 멤버 + 서울 NAS 멤버(stacks/seoul/timescaledb). 주 DB 하나에 나머지가 스트리밍 복제로 따라갑니다.
+# Patroni 클러스터: worker 두 대의 StatefulSet 멤버. 주 DB 하나에 나머지가 스트리밍 복제로 따라갑니다.
+# 서울 NAS 멤버(stacks/seoul/timescaledb)를 더할 때만 자리표시 Pod nas 를 둡니다. 멤버 없이 자리표시만 남으면
+# failsafe_mode 가 그 멤버를 "연락 안 되는 멤버"로 보고 API 가 멈출 때 주 DB 를 내립니다. 넣을 때는 timescaledb-ha-secrets.sh 의 NAS_MEMBER=1
 resources:
   - service.yaml
   - patroni-rbac.yaml
@@ -1386,5 +1388,5 @@ kubectl $E -n mosquitto delete pod mq-drill
 - [Grafana - Provision data sources](https://grafana.com/docs/grafana/latest/administration/provisioning/#data-sources)
 - [Grafana Helm chart - Sidecar for dashboards](https://github.com/grafana/helm-charts/tree/main/charts/grafana#sidecar-for-dashboards)
 - [Grafana - PostgreSQL data source (매크로와 템플릿 변수)](https://grafana.com/docs/grafana/latest/datasources/postgres/)
-- [kube-vip - Kubernetes Services (LoadBalancer)](https://kube-vip.io/docs/usage/kubernetes-services/)
+- [Kubernetes - Service (External IPs)](https://kubernetes.io/docs/concepts/services-networking/service/#external-ips)
 - [Kustomize - configMapGenerator](https://kubectl.docs.kubernetes.io/references/kustomize/kustomization/configmapgenerator/)

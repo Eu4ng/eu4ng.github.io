@@ -33,7 +33,7 @@ address=/{{ name }}.{{ lan_dns_domain }}/{{ c.service_vip }}
 {% set _ = hosts.update({n.name: n.ip}) %}
 {% endfor %}
 {% endfor %}
-{# 역할 이름: k8s-<클러스터>(API VIP), kubectl-<클러스터>(kubectl 을 돌리는 첫 control plane), iot-<클러스터>(LoadBalancer 서비스 VIP) #}
+{# 역할 이름: k8s-<클러스터>(API VIP), kubectl-<클러스터>(kubectl 을 돌리는 첫 control plane), iot-<클러스터>(서비스 VIP) #}
 {% for c in k8s_clusters.values() if c.dns_name is defined %}
 {% set _ = hosts.update({'k8s-' ~ c.dns_name: c.vip}) %}
 {% set _ = hosts.update({'kubectl-' ~ c.dns_name: (c.nodes | selectattr('role', 'eq', 'control-plane') | rejectattr('retire', 'defined') | first).ip}) %}

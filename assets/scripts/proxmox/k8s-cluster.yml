@@ -1,5 +1,5 @@
 # kubeadm 쿠버네티스 클러스터(control plane N + worker N). group_vars 의 k8s_clusters 에서 -e k8s_cluster=<이름>(기본 hub)으로 고릅니다.
-# 노드마다 정한 Proxmox 노드의 템플릿(vm-template.yml)을 복제해 VM 을 만들고, containerd·kubeadm 을 설치해 VIP(kube-vip) 엔드포인트로
+# 노드마다 정한 Proxmox 노드의 템플릿(vm-template.yml)을 복제해 VM 을 만들고, containerd·kubeadm 을 설치해 VIP(keepalived) 엔드포인트로
 # 클러스터를 구성한 뒤 kubeconfig 를 실행 PC 로 가져옵니다. 허브(hub)와 지역 엣지(daejeon 등)가 같은 절차로 만들어집니다.
 # etcd 세 번째 멤버(서울 NAS)는 k8s-gitops 의 scripts/etcd-witness-certs.sh 와 stacks/seoul/etcd-witness* 로 붙입니다.
 # VIP 없이 만든 기존 클러스터는 먼저 scripts/k8s-control-plane-endpoint.sh 로 옮깁니다. 그 다음은 Argo CD 설치·등록부터 GitOps 입니다.
@@ -334,11 +334,14 @@
       ansible.builtin.stat:
         path: /etc/kubernetes/admin.conf
       register: admin_conf
-    # 새 클러스터는 VIP 엔드포인트로 만듭니다. kube-vip 은 init 중에는 super-admin.conf 로 로컬 apiserver 에 붙어 VIP 를 잡습니다
-    - name: kube-vip (init 용)
-      ansible.builtin.include_tasks: tasks/kube-vip.yml
-      vars: { kube_vip_kubeconfig: /etc/kubernetes/super-admin.conf }
+    # 새 클러스터는 VIP 엔드포인트로 만듭니다. keepalived 는 API 없이 VIP 를 잡으므로 init 전에 켜 둡니다(apiserver 가 아직 없어 응답은 기다리지 않음)
+    - name: keepalived (init 용)
+      ansible.builtin.include_tasks:
+        file: tasks/keepalived.yml
+        apply: { tags: [vip] }
+      vars: { keepalived_wait_api: false }
       when: not admin_conf.stat.exists
+      tags: [vip]
     - name: kubeadm init (처음 한 번)
       ansible.builtin.command: >-
         kubeadm init --control-plane-endpoint={{ kc.vip }}:6443 --upload-certs
@@ -346,8 +349,11 @@
         --pod-network-cidr={{ k8s_pod_cidr }} --apiserver-advertise-address={{ ansible_host }}
       args:
         creates: /etc/kubernetes/admin.conf
-    - name: kube-vip
-      ansible.builtin.include_tasks: tasks/kube-vip.yml
+    - name: keepalived (VIP)
+      ansible.builtin.include_tasks:
+        file: tasks/keepalived.yml
+        apply: { tags: [vip] }
+      tags: [vip]
     - name: ubuntu 계정 kubeconfig
       ansible.builtin.shell: |
         install -d -o {{ ansible_user }} -g {{ ansible_user }} /home/{{ ansible_user }}/.kube
@@ -436,8 +442,11 @@
         --apiserver-advertise-address {{ ansible_host }}
       args:
         creates: /etc/kubernetes/kubelet.conf
-    - name: kube-vip
-      ansible.builtin.include_tasks: tasks/kube-vip.yml
+    - name: keepalived (VIP)
+      ansible.builtin.include_tasks:
+        file: tasks/keepalived.yml
+        apply: { tags: [vip] }
+      tags: [vip]
     - name: ubuntu 계정 kubeconfig
       ansible.builtin.shell: |
         install -d -o {{ ansible_user }} -g {{ ansible_user }} /home/{{ ansible_user }}/.kube
@@ -668,6 +677,58 @@
       loop_control: { label: "{{ item.name }}" }
       register: node_label
       changed_when: "'CHANGED' in node_label.stdout"
+
+# CoreDNS 를 노드마다 하나씩 두고 kube-dns 가 같은 노드의 CoreDNS 를 먼저 쓰게 합니다. etcd 과반이 깨져 API 가 멈추면 엔드포인트가
+# 갱신되지 않아, 죽은 노드의 CoreDNS 로 가는 조회가 실패합니다(2벌이면 절반). 같은 노드의 CoreDNS 는 마지막으로 받은 레코드로 계속 답합니다.
+# kubeadm upgrade 가 CoreDNS 설정을 되돌리므로 업그레이드 뒤 다시 실행합니다: -e k8s_cluster=<이름> --tags dns
+- name: CoreDNS 노드마다 하나
+  hosts: k8s_cp
+  become: true
+  gather_facts: false
+  tags: [dns]
+  tasks:
+    # cordon 한 노드는 받을 수 없으므로 빼고 셉니다(넣으면 남는 파드가 Pending 이고 롤아웃이 멈춤). 노드를 다시 들이면 다시 실행합니다
+    - name: CoreDNS 를 받을 수 있는 노드 수
+      ansible.builtin.shell: >-
+        kubectl --kubeconfig=/etc/kubernetes/admin.conf get nodes -o jsonpath='{range .items[*]}{.spec.unschedulable}{"\n"}{end}'
+        | grep -vc true
+      register: dns_nodes
+      changed_when: false
+    - name: coredns Deployment (노드마다 하나, control plane 에도)
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig=/etc/kubernetes/admin.conf
+          - -n=kube-system
+          - patch
+          - deployment/coredns
+          - --type=strategic
+          - -p
+          - "{{ patch | to_json }}"
+      vars:
+        patch:
+          spec:
+            replicas: "{{ dns_nodes.stdout | int }}"
+            # 한 노드에 하나만 두므로 새 파드가 들어갈 빈 노드가 없습니다. 옛 파드를 먼저 하나씩 내립니다
+            strategy: { rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } }
+            template:
+              spec:
+                affinity:
+                  podAntiAffinity:
+                    requiredDuringSchedulingIgnoredDuringExecution:
+                      - labelSelector: { matchLabels: { k8s-app: kube-dns } }
+                        topologyKey: kubernetes.io/hostname
+                tolerations:
+                  - { key: CriticalAddonsOnly, operator: Exists }
+                  - { key: node-role.kubernetes.io/control-plane, operator: Exists, effect: NoSchedule }
+      register: coredns_patch
+      changed_when: "'(no change)' not in coredns_patch.stdout"
+    - name: kube-dns 가 같은 노드의 CoreDNS 를 먼저 씀
+      ansible.builtin.command: >-
+        kubectl --kubeconfig=/etc/kubernetes/admin.conf -n kube-system patch service/kube-dns --type=merge
+        -p '{"spec":{"trafficDistribution":"PreferSameNode"}}'
+      register: kube_dns_patch
+      changed_when: "'(no change)' not in kube_dns_patch.stdout"
 
 - name: 확인
   hosts: k8s_cp

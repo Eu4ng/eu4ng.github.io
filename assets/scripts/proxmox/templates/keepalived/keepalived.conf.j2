@@ -1,0 +1,42 @@
+# {{ ansible_managed }} — proxmox-ansible playbooks/tasks/keepalived.yml
+{% set me = kc.nodes | selectattr('name', 'equalto', inventory_hostname) | first %}
+{% set peers = kc.nodes | rejectattr('retire', 'defined') | selectattr('role', 'equalto', 'control-plane') | rejectattr('name', 'equalto', inventory_hostname) | map(attribute='ip') | list %}
+global_defs {
+    router_id {{ inventory_hostname }}
+    script_user root
+    enable_script_security
+}
+
+# 이 노드의 apiserver 가 응답하지 않으면 우선순위를 20 내립니다. FAULT 로 VIP 를 놓지 않습니다(모든 control plane 이 실패해도 누군가는 가짐)
+vrrp_script apiserver {
+    script "/etc/keepalived/check-apiserver.sh"
+    interval 2
+    timeout 3
+    fall 3
+    rise 2
+    weight -20
+}
+
+vrrp_instance k8s_{{ k8s_cluster_name }} {
+    state BACKUP
+    interface {{ k8s_vip_interface }}
+    virtual_router_id {{ kc.vrrp_id }}
+    # 메인 서버(proxmox_node, pve01) 쪽 control plane 이 평소 VIP 를 가집니다. 돌아오면 다시 가져갑니다(preempt 기본)
+    priority {{ 110 if me.pve | default(proxmox_node) == proxmox_node else 100 }}
+    advert_int 1
+    # 멀티캐스트 대신 상대 control plane 에 직접 보냅니다
+    unicast_src_ip {{ me.ip }}
+    unicast_peer {
+{% for ip in peers %}
+        {{ ip }}
+{% endfor %}
+    }
+    virtual_ipaddress {
+{% for ip in keepalived_vips %}
+        {{ ip }}/32 dev {{ k8s_vip_interface }}
+{% endfor %}
+    }
+    track_script {
+        apiserver
+    }
+}

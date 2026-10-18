@@ -3,7 +3,7 @@
 # --control-plane-endpoint 없이 만든 kubeadm 클러스터에 VIP 엔드포인트를 들입니다. 컨트롤 플레인을 여러 대로 늘리기 전에 한 번 실행합니다.
 # 첫 control plane 에서 root 로 실행합니다. 여러 번 실행해도 됩니다(이미 된 단계는 건너뜀).
 #   1. etcd 스냅샷 (되돌리기용, /var/lib/etcd/snapshot-<시각>.db)
-#   2. kube-vip static pod (ARP 로 VIP 를 control plane 중 한 대가 가짐)
+#   2. keepalived (VRRP 로 VIP 를 control plane 중 한 대가 가짐. 여기서는 이 노드 하나만 두고, 상대 control plane 은 playbooks/k8s-cluster.yml 이 더함)
 #   3. kubeadm-config: controlPlaneEndpoint, apiserver certSANs, 노드 장애 시 파드 재배치 30초
 #   4. apiserver 인증서 재발급(VIP 를 SAN 에 추가)과 static pod 매니페스트 반영
 #   5. kubeconfig·kube-proxy·cluster-info 의 API 주소를 VIP 로 (control plane 의 kubelet·controller-manager·scheduler 는 로컬 apiserver 유지)
@@ -15,7 +15,7 @@
 set -euo pipefail
 
 # ---------- 환경에 맞게 수정 ----------
-KUBE_VIP_VERSION=v1.2.4           # https://github.com/kube-vip/kube-vip/releases
+VRRP_ID=51                        # keepalived virtual_router_id. 같은 LAN 의 클러스터마다 다르게(proxmox-ansible group_vars 의 vrrp_id)
 # --------------------------------------
 
 log() { echo "==> $*"; }
@@ -47,18 +47,48 @@ else
   log "etcd 스냅샷: 이미 있음 ($(ls /var/lib/etcd/snapshot-*.db | tail -1))"
 fi
 
-# ---------- 2. kube-vip ----------
-# kube-vip 은 리더 선출에 API 가 필요한데, VIP 는 kube-vip 이 띄우므로 자기 노드의 apiserver 로 붙는 kubeconfig 를 따로 줍니다
-log "kube-vip ($KUBE_VIP_VERSION, $VIP on $IFACE)"
-sed "s#server: https://.*:6443#server: https://$NODE_IP:6443#" $K/admin.conf > $K/kube-vip.conf.new
-chmod 0600 $K/kube-vip.conf.new && mv $K/kube-vip.conf.new $K/kube-vip.conf
-IMG=ghcr.io/kube-vip/kube-vip:$KUBE_VIP_VERSION
-ctr -n k8s.io image pull "$IMG" >/dev/null
-ctr -n k8s.io run --rm --net-host "$IMG" kube-vip-manifest-$$ /kube-vip manifest pod \
-  --interface "$IFACE" --address "$VIP" --controlplane --arp --leaderElection \
-  --k8sConfigPath $K/kube-vip.conf > /tmp/kube-vip.yaml
-grep -q "path: $K/kube-vip.conf" /tmp/kube-vip.yaml || die "kube-vip 매니페스트가 kube-vip.conf 를 마운트하지 않습니다: /tmp/kube-vip.yaml"
-if ! cmp -s /tmp/kube-vip.yaml $K/manifests/kube-vip.yaml; then mv /tmp/kube-vip.yaml $K/manifests/kube-vip.yaml; else rm /tmp/kube-vip.yaml; fi
+# ---------- 2. keepalived ----------
+# VIP 는 쿠버네티스 API 없이 VRRP 로 정합니다(API 리스로 정하면 etcd 과반이 깨질 때 VIP 도 놓음). 이미 keepalived 설정이 있으면
+# (playbooks/k8s-cluster.yml 이 상대 control plane 까지 넣은 것) 그대로 둡니다
+log "keepalived ($VIP on $IFACE, virtual_router_id $VRRP_ID)"
+command -v keepalived >/dev/null || { apt-get update -qq && apt-get install -y -qq keepalived >/dev/null; }
+if [ ! -s /etc/keepalived/keepalived.conf ]; then
+  printf '%s\n' '#!/bin/bash' "exec timeout 2 bash -c '</dev/tcp/127.0.0.1/6443'" > /etc/keepalived/check-apiserver.sh
+  chmod 0755 /etc/keepalived/check-apiserver.sh
+  cat > /etc/keepalived/keepalived.conf <<EOF
+global_defs {
+    router_id $NODE_NAME
+    script_user root
+    enable_script_security
+}
+# 이 노드의 apiserver 가 응답하지 않으면 우선순위를 20 내립니다(FAULT 로 VIP 를 놓지 않음)
+vrrp_script apiserver {
+    script "/etc/keepalived/check-apiserver.sh"
+    interval 2
+    timeout 3
+    fall 3
+    rise 2
+    weight -20
+}
+vrrp_instance k8s {
+    state BACKUP
+    interface $IFACE
+    virtual_router_id $VRRP_ID
+    priority 110
+    advert_int 1
+    unicast_src_ip $NODE_IP
+    unicast_peer {
+    }
+    virtual_ipaddress {
+        $VIP/32 dev $IFACE
+    }
+    track_script {
+        apiserver
+    }
+}
+EOF
+fi
+systemctl enable --now keepalived >/dev/null 2>&1
 wait_api "$VIP"
 
 # ---------- 3. kubeadm-config ----------

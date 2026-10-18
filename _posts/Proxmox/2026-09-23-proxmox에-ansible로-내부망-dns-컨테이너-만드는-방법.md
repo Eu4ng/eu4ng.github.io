@@ -156,7 +156,7 @@ dnsmasq 설정 템플릿이 답하는 이름은 다음과 같습니다. 그 밖�
 | inventory 의 모든 호스트와 `k8s_clusters` 의 노드(`pve01`, `lan-dns-2`, `k8s-hub-cp-1` 등) | 그 호스트의 주소 |
 | `k8s-<dns_name>`(`k8s-hub` 등) | 그 클러스터의 API VIP |
 | `kubectl-<dns_name>`(`kubectl-hub` 등) | 그 클러스터의 첫 control plane(`retire` 가 붙은 노드 제외) |
-| `iot-<dns_name>`(`iot-dj` 등) | 그 클러스터의 LoadBalancer 서비스 VIP |
+| `iot-<dns_name>`(`iot-dj` 등) | 그 클러스터의 서비스 VIP(Service `externalIPs`) |
 
 이름마다 `local=` 로 dnsmasq 가 직접 답하게 하고 `address=` 로 주소를 줍니다. `local=` 이 없으면 AAAA 처럼 `address=` 에 없는 질의를 상위로 넘겨 Cloudflare 의 IPv6 주소가 새어 나갑니다. `listen-address` 는 각 컨테이너의 주소라, 두 컨테이너가 같은 템플릿으로 같은 답을 줍니다. 그 주소에만 열 때 `bind-interfaces` 대신 `bind-dynamic` 을 씁니다. `bind-interfaces` 는 시작할 때 주소가 아직 붙어 있지 않으면 죽는데, 호스트를 재부팅한 뒤 컨테이너의 dnsmasq 가 주소가 붙기 전에 시작해 `Cannot assign requested address` 로 죽은 적이 있습니다.
 
@@ -197,7 +197,7 @@ address=/{{ name }}.{{ lan_dns_domain }}/{{ c.service_vip }}
 {% set _ = hosts.update({n.name: n.ip}) %}
 {% endfor %}
 {% endfor %}
-{# 역할 이름: k8s-<클러스터>(API VIP), kubectl-<클러스터>(kubectl 을 돌리는 첫 control plane), iot-<클러스터>(LoadBalancer 서비스 VIP) #}
+{# 역할 이름: k8s-<클러스터>(API VIP), kubectl-<클러스터>(kubectl 을 돌리는 첫 control plane), iot-<클러스터>(서비스 VIP) #}
 {% for c in k8s_clusters.values() if c.dns_name is defined %}
 {% set _ = hosts.update({'k8s-' ~ c.dns_name: c.vip}) %}
 {% set _ = hosts.update({'kubectl-' ~ c.dns_name: (c.nodes | selectattr('role', 'eq', 'control-plane') | rejectattr('retire', 'defined') | first).ip}) %}

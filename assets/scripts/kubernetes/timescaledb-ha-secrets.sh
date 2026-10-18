@@ -11,6 +11,7 @@
 #
 # 사용법: bash scripts/timescaledb-ha-secrets.sh [SUFFIX] [EDGE_KUBECONFIG ...]
 #   SUFFIX 기본값 v1(값을 바꿀 때는 새 SUFFIX 로). EDGE_KUBECONFIG 는 허브 kubectl 호스트 기준 경로(예: /home/ubuntu/k8s-daejeon.yaml)
+#   NAS_MEMBER=1 이면 NAS 멤버 자리표시 Pod 도 만듭니다(NAS 멤버가 실제로 돌 때만)
 
 set -euo pipefail
 
@@ -87,6 +88,11 @@ ls -1 "$OUT" | grep "timescaledb_.*_$SUFFIX" | sed 's/^/    /'
 # Patroni 의 쿠버네티스 DCS 는 멤버 상태를 "멤버 이름과 같은 Pod" 의 주석에 적습니다. NAS 멤버는 클러스터 밖이라 Pod 가 없으므로
 # 어느 노드에도 스케줄되지 않는 Pod(nas)를 둡니다. 실행되지 않아 자원을 쓰지 않고, 노드가 죽어도 영향이 없습니다.
 # Argo CD 는 Pending Pod 를 계속 Progressing 으로 보므로 저장소가 아니라 여기서 만듭니다.
+# NAS 멤버가 실제로 돌 때만 만듭니다(NAS_MEMBER=1). 멤버 없이 자리표시만 있으면 failsafe_mode 가 그 멤버를 연락 안 되는 멤버로 보고
+# 쿠버네티스 API 가 멈출 때 주 DB 를 읽기 전용으로 내립니다. 서울 NAS 고장(2026-10-18) 뒤로 기본은 만들지 않습니다.
+if [ "${NAS_MEMBER:-0}" != 1 ]; then
+  log "NAS 멤버 자리표시 Pod: 건너뜀(NAS_MEMBER=1 일 때만 만듦)"; log "완료."; exit 0
+fi
 log "NAS 멤버 자리표시 Pod (timescaledb/nas)"
 "${KUBECTL[@]}" apply -f - >/dev/null <<'POD'
 apiVersion: v1

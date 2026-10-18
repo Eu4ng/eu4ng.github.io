@@ -330,7 +330,7 @@ subjects:
 ```
 {: file="iot/hub/timescaledb/patroni-rbac.yaml" }
 
-`iot/hub/timescaledb/kustomization.yaml` 의 `resources` 에 `patroni-rbac.yaml` 을 더해 push 하고, 동기화되면 비밀값 스크립트를 실행합니다. 스크립트는 superuser·replication 비밀번호를 만들어 허브 Secret `timescaledb-patroni` 에 넣고, NAS 멤버가 쓸 비밀번호와 kubeconfig 를 `~/.config/portainer/secrets/` 에 둡니다. 끝으로 NAS 멤버 자리의 Pod `nas` 를 만듭니다. 어느 노드에도 스케줄되지 않는 Pod 라 실행되지 않고, Argo CD 가 `Pending` Pod 를 계속 `Progressing` 으로 보므로 저장소가 아니라 스크립트에서 만듭니다.
+`iot/hub/timescaledb/kustomization.yaml` 의 `resources` 에 `patroni-rbac.yaml` 을 더해 push 하고, 동기화되면 비밀값 스크립트를 실행합니다. 스크립트는 superuser·replication 비밀번호를 만들어 허브 Secret `timescaledb-patroni` 에 넣고, NAS 멤버가 쓸 비밀번호와 kubeconfig 를 `~/.config/portainer/secrets/` 에 둡니다. `NAS_MEMBER=1` 을 주면 끝으로 NAS 멤버 자리의 Pod `nas` 도 만듭니다. 어느 노드에도 스케줄되지 않는 Pod 라 실행되지 않고, Argo CD 가 `Pending` Pod 를 계속 `Progressing` 으로 보므로 저장소가 아니라 스크립트에서 만듭니다. 이 단계에서는 `NAS_MEMBER` 없이 실행하고, 자리표시 Pod 는 NAS 멤버를 붙이는 8단계에서 만듭니다. 멤버 없이 자리표시만 있으면 6단계의 `failsafe_mode` 가 그 멤버를 연락 안 되는 멤버로 보고, 쿠버네티스 API 가 멈출 때 주 DB 를 읽기 전용으로 내리기 때문입니다.
 
 ```bash
 # GitOps 저장소 루트에서 스크립트 내려받기
@@ -357,6 +357,7 @@ bash scripts/timescaledb-ha-secrets.sh v1
 #
 # 사용법: bash scripts/timescaledb-ha-secrets.sh [SUFFIX] [EDGE_KUBECONFIG ...]
 #   SUFFIX 기본값 v1(값을 바꿀 때는 새 SUFFIX 로). EDGE_KUBECONFIG 는 허브 kubectl 호스트 기준 경로(예: /home/ubuntu/k8s-daejeon.yaml)
+#   NAS_MEMBER=1 이면 NAS 멤버 자리표시 Pod 도 만듭니다(NAS 멤버가 실제로 돌 때만)
 
 set -euo pipefail
 
@@ -433,6 +434,11 @@ ls -1 "$OUT" | grep "timescaledb_.*_$SUFFIX" | sed 's/^/    /'
 # Patroni 의 쿠버네티스 DCS 는 멤버 상태를 "멤버 이름과 같은 Pod" 의 주석에 적습니다. NAS 멤버는 클러스터 밖이라 Pod 가 없으므로
 # 어느 노드에도 스케줄되지 않는 Pod(nas)를 둡니다. 실행되지 않아 자원을 쓰지 않고, 노드가 죽어도 영향이 없습니다.
 # Argo CD 는 Pending Pod 를 계속 Progressing 으로 보므로 저장소가 아니라 여기서 만듭니다.
+# NAS 멤버가 실제로 돌 때만 만듭니다(NAS_MEMBER=1). 멤버 없이 자리표시만 있으면 failsafe_mode 가 그 멤버를 연락 안 되는 멤버로 보고
+# 쿠버네티스 API 가 멈출 때 주 DB 를 읽기 전용으로 내립니다. 서울 NAS 고장(2026-10-18) 뒤로 기본은 만들지 않습니다.
+if [ "${NAS_MEMBER:-0}" != 1 ]; then
+  log "NAS 멤버 자리표시 Pod: 건너뜀(NAS_MEMBER=1 일 때만 만듦)"; log "완료."; exit 0
+fi
 log "NAS 멤버 자리표시 Pod (timescaledb/nas)"
 "${KUBECTL[@]}" apply -f - >/dev/null <<'POD'
 apiVersion: v1
@@ -452,7 +458,7 @@ log "완료."
 
 </details>
 
-- **확인:** `kubectl -n timescaledb get secret timescaledb-patroni patroni-nas-token` 에 두 Secret 이 보이고, `kubectl -n timescaledb get pod nas` 가 `Pending`, `ls ~/.config/portainer/secrets/ | grep timescaledb` 에 `_v1` 로 끝나는 파일 세 개가 보입니다.
+- **확인:** `kubectl -n timescaledb get secret timescaledb-patroni patroni-nas-token` 에 두 Secret 이 보이고, 스크립트가 `NAS 멤버 자리표시 Pod: 건너뜀` 을 출력하며, `ls ~/.config/portainer/secrets/ | grep timescaledb` 에 `_v1` 로 끝나는 파일 세 개가 보입니다.
 
 ## 5. 기존 DB 쓰기 멈추고 덤프
 
@@ -488,6 +494,7 @@ Patroni 설정의 요점은 아래와 같습니다.
 - `scope` 가 곧 Service·Endpoints 이름이고, `kubernetes.ports` 의 이름이 Service 포트 이름과 같아야 합니다.
 - `synchronous_mode` 와 `synchronous_node_count: 1` 로 쓰기는 대기 복제본 하나가 받아야 완료됩니다. `sync_priority` 가 높은 worker 멤버를 먼저 고르고, 없으면 NAS 멤버가 동기 복제본이 됩니다. `synchronous_mode_strict: false` 라 둘 다 없으면 쓰기를 멈추지 않고 비동기로 씁니다.
 - `failover_priority` 로 주 DB 가 죽으면 worker 멤버(2)를 NAS 멤버(1)보다 먼저 올립니다.
+- `failsafe_mode: true` 로 DCS 인 쿠버네티스 API 가 멈춰도(etcd 과반 상실) 주 DB 를 유지합니다. 리더 잠금을 갱신하지 못해도 리더가 마지막으로 기록한 멤버 모두가 Patroni REST API(`/failsafe`)에 답하면 주 DB 로 남고, 연락 안 되는 멤버가 하나라도 있으면 그때 읽기 전용으로 내려갑니다. 끄면 잠금을 갱신하지 못한 `ttl` 뒤에 읽기 전용으로 내려가 수집이 끊깁니다. 동작 원리는 [PostgreSQL 스트리밍 복제와 동기·비동기 복제의 차이](/posts/73/)에 정리했습니다.
 - `authentication` 에 `rewind` 계정은 적지 않습니다. 이름만 적고 비밀번호를 주지 않았더니 타임라인이 갈라진 복제본이 `pg_rewind` 로 주 DB 에 붙을 때 `no password supplied` 로 실패해 스스로 따라붙지 못했습니다. 적지 않으면 superuser 계정으로 `pg_rewind` 합니다. NAS 멤버의 스택 파일(8단계)도 같습니다.
 - `post_bootstrap` 스크립트는 클러스터를 처음 만들 때 한 번 실행되어 role 과 DB 를 만듭니다. 복원 전에 Telegraf 가 먼저 붙어 테이블을 만들지 않게, `IOT_LOGIN=NOLOGIN` 을 주면 `iot` role 을 로그인할 수 없게 만듭니다.
 
@@ -511,6 +518,9 @@ bootstrap:
     synchronous_mode: true
     synchronous_node_count: 1
     synchronous_mode_strict: false
+    # DCS(쿠버네티스 API)가 멈춰도(etcd 과반 상실) 리더가 마지막으로 기록한 멤버 모두와 Patroni REST 로 연락되면 주 DB 를 유지합니다.
+    # 끄면 리더 잠금을 갱신하지 못한 ttl 뒤에 읽기 전용으로 내려가 수집이 끊깁니다. 연락 안 되는 멤버가 하나라도 있으면 그때는 내려갑니다
+    failsafe_mode: true
     postgresql:
       use_pg_rewind: true
       use_slots: true
@@ -765,7 +775,7 @@ $PSQL -c "ALTER ROLE iot LOGIN;"
 
 ## 8. NAS 멤버 붙이기
 
-NAS 멤버는 같은 이미지로 Portainer Swarm 스택에서 돌립니다. DCS 는 허브 쿠버네티스라 4단계의 kubeconfig 로 API VIP 에 붙고, 멤버 이름은 자리표시 Pod 이름(`nas`)과 같아야 합니다. 평소에는 대기 복제본이고, worker 대기 복제본이 없으면 동기 복제본이 되며, 허브 멤버가 모두 없을 때만 주 DB 가 됩니다. 허브 멤버가 주 DB 를 만든 뒤에 띄웁니다. 그 전에 뜨면 NAS 멤버가 새 클러스터를 만들어 버립니다.
+NAS 멤버는 같은 이미지로 Portainer Swarm 스택에서 돌립니다. DCS 는 허브 쿠버네티스라 4단계의 kubeconfig 로 API VIP 에 붙고, 멤버 이름은 자리표시 Pod 이름(`nas`)과 같아야 합니다. 평소에는 대기 복제본이고, worker 대기 복제본이 없으면 동기 복제본이 되며, 허브 멤버가 모두 없을 때만 주 DB 가 됩니다. 허브 멤버가 주 DB 를 만든 뒤에 띄웁니다. 그 전에 뜨면 NAS 멤버가 새 클러스터를 만들어 버립니다. 띄우기 전에 비밀값 스크립트를 `NAS_MEMBER=1` 로 다시 실행해 자리표시 Pod `nas` 를 만듭니다.
 
 ```yaml
 # 원격지 NAS(Synology, Portainer Swarm)의 TimescaleDB 세 번째 멤버(Patroni). 허브 worker 두 대의 멤버(iot/hub/timescaledb)와 같은 클러스터입니다.
@@ -851,10 +861,14 @@ networks:
 git add stacks/[REGION]/timescaledb scripts/timescaledb-ha-secrets.sh
 git commit -m "feat(stacks): 원격 NAS 에 TimescaleDB 세 번째 멤버 추가"
 git push
+NAS_MEMBER=1 bash scripts/timescaledb-ha-secrets.sh v1
 bash scripts/portainer-stack.sh stacks/[REGION]/timescaledb/stack.yml
 ```
 
-- **확인:** 스크립트가 secret 세 개와 스택을 `만듦` 으로 출력하고, 전체 데이터를 받아 오는 동안 기다린 뒤 9단계의 `patronictl list` 에 `nas` 가 `streaming` 으로 보입니다.
+> NAS 멤버를 빼면 자리표시 Pod 도 `kubectl -n timescaledb delete pod nas` 로 지웁니다. 남겨 두면 `failsafe_mode` 가 응답하지 않는 그 멤버 때문에, 쿠버네티스 API 가 멈출 때 주 DB 를 읽기 전용으로 내립니다.
+{: .prompt-warning }
+
+- **확인:** `kubectl -n timescaledb get pod nas` 가 `Pending` 이고, 스크립트가 secret 세 개와 스택을 `만듦` 으로 출력하고, 전체 데이터를 받아 오는 동안 기다린 뒤 9단계의 `patronictl list` 에 `nas` 가 `streaming` 으로 보입니다.
 
 ## 9. 확인
 

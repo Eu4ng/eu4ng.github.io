@@ -171,13 +171,13 @@ spec:
 `priorityClassName: essential` 과 `tolerations` 는 서버 한 대가 죽었을 때를 위한 설정입니다. 남은 worker 에 자리가 모자라면 이 파드를 먼저 살리고, 죽은 노드를 기본 300초 대신 30초만 기다린 뒤 다른 노드에서 다시 띄웁니다. 등급은 [쿠버네티스에 Longhorn과 Patroni로 볼륨과 TimescaleDB 이중화하는 방법](/posts/54/)의 6단계에서 만들고, 등급이 없으면 파드가 만들어지지 않습니다.
 
 ```yaml
-# 프런트엔드. LAN 에서 http://[엣지 VIP]:30083 으로 열고 auth_token 으로 들어갑니다. VIP 는 지역 오버레이가 kube-vip.io/loadbalancerIPs 로 줍니다.
+# 프런트엔드. LAN 에서 http://[엣지 VIP]:30083 으로 열고 auth_token 으로 들어갑니다. VIP 는 지역 오버레이가 spec.externalIPs 로 줍니다(control plane 의 keepalived 가 가진 주소를 kube-proxy 가 받아 넘김).
 apiVersion: v1
 kind: Service
 metadata:
   name: zigbee2mqtt
 spec:
-  type: LoadBalancer
+  type: ClusterIP
   selector: { app: zigbee2mqtt }
   ports:
     - { name: http, port: 30083, targetPort: 8080 }
@@ -205,21 +205,21 @@ spec:
 
 ## 3. 지역 오버레이 추가와 배포
 
-`iot/clusters/[SITE]/zigbee2mqtt/` 에 베이스를 참조하고 서비스 VIP 와 코디네이터 주소만 넣는 오버레이를 만듭니다. 서비스 VIP 는 엣지의 kube-vip 가 LoadBalancer Service 에 붙이는 LAN 주소이고, 같은 지역의 HA·Matter·Mosquitto 도 포트만 달리해 이 주소를 함께 씁니다. `adapter` 는 라디오 칩에 맞춥니다. CC26xx·CC2674 계열(Z-Stack)은 `zstack`, EFR32 계열은 `ember` 입니다.
+`iot/clusters/[SITE]/zigbee2mqtt/` 에 베이스를 참조하고 서비스 VIP 와 코디네이터 주소만 넣는 오버레이를 만듭니다. 서비스 VIP 는 엣지 control plane 의 keepalived 가 가지고 Service 의 `spec.externalIPs` 로 받는 LAN 주소이고, 같은 지역의 HA·Matter·Mosquitto 도 포트만 달리해 이 주소를 함께 씁니다. `adapter` 는 라디오 칩에 맞춥니다. CC26xx·CC2674 계열(Z-Stack)은 `zstack`, EFR32 계열은 `ember` 입니다.
 
 ```yaml
 # [SITE] 엣지의 Zigbee2MQTT. 코디네이터는 SLZB-MR3U 의 CC2674P10 라디오(네트워크 모드, 포트 7638).
 resources:
   - ../../../edge/zigbee2mqtt
 patches:
-  # [SITE] 엣지의 서비스 VIP(kube-vip). HA·Z2M·Matter·Mosquitto 가 포트만 달리해 같은 주소를 씁니다(LAN 기기·허브가 이 주소로 붙음)
+  # [SITE] 엣지의 서비스 VIP(proxmox-ansible 의 service_vip, control plane 의 keepalived 가 가짐. API 가 멈춰도 kube-proxy 규칙으로 계속 받음). HA·Z2M·Matter·Mosquitto 가 포트만 달리해 같은 주소를 씁니다(LAN 기기·허브가 이 주소로 붙음)
   - patch: |
       apiVersion: v1
       kind: Service
       metadata:
         name: zigbee2mqtt
-        annotations:
-          kube-vip.io/loadbalancerIPs: "[EDGE_SERVICE_VIP]"
+      spec:
+        externalIPs: [[EDGE_SERVICE_VIP]]
   - patch: |
       apiVersion: apps/v1
       kind: Deployment
