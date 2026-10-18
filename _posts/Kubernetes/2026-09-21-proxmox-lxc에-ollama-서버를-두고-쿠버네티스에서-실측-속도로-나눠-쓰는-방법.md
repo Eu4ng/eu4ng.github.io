@@ -107,8 +107,9 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/templates/ollama/ollam
 # 모델 서버(Ollama) LXC. group_vars 의 ollama_backends 마다 CT 하나를 만들고 Ollama 를 설치해 모델을 받아 둡니다.
 # gpu: true 인 CT 는 그 Proxmox 호스트의 iGPU(/dev/dri/renderD128)를 넘겨 Vulkan 으로 추론합니다(AMD iGPU 는 ROCm 지원 밖).
 # 클러스터에서는 k8s-gitops services/ollama 의 HAProxy 가 이 CT 들을 <이름>.<도메인> 으로 불러 요청을 나눕니다(어느 서버를 먼저 쓸지는 그쪽이 실측 속도로 정합니다).
-# 모델 저장소는 같은 호스트의 CT 끼리 공유합니다(호스트의 thin LV 를 ollama_models_dir 에 붙이고 CT 마다 바인드 마운트). 모델은 호스트마다
-# 한 번만 받고, 공유 폴더에서 다른 CT 의 받는 중인 파일을 지우지 않게 OLLAMA_NOPRUNE=1 로 돕니다(group_vars 의 설명 참고).
+# 모델 저장소는 모든 CT 가 하나를 함께 씁니다. ollama_nfs_host 노드의 thin LV 를 ollama_models_dir 에 붙여 그 안의 store 를 NFS 로 내보내고,
+# 다른 노드는 그 store 를 같은 경로에 마운트하며, CT 마다 store 를 바인드 마운트합니다. 모델은 한 번만 받고, 공유 폴더에서 다른 CT 의
+# 받는 중인 파일을 지우지 않게 OLLAMA_NOPRUNE=1 로 돕니다(group_vars 의 설명 참고).
 #   ansible-playbook playbooks/ollama.yml                          (PROXMOX_* 환경변수 필요, README 참고)
 #   ansible-playbook playbooks/ollama.yml -e ollama_pull_models=false   (모델을 받지 않음. 다른 곳의 모델 파일을 옮겨 넣을 때)
 ---

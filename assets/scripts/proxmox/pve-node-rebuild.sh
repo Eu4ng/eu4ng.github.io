@@ -289,6 +289,9 @@ identity() {
   for h in "$NODE" "$NODE.$DOMAIN" "$INV_IP" "$(st .new.ip)" $(jq -r '.guests[].ip' <<< "$V"); do
     ssh-keygen -R "$h" >/dev/null 2>&1 || true
   done
+  # 지문을 확인해 고정한 새 키를 이름·주소로 다시 넣습니다. 없으면 이 노드에서 일반 ssh 로 새 노드에 붙지 못합니다
+  log "known_hosts 에 새 호스트 키 넣기 ($NODE, $NODE.$DOMAIN, $INV_IP)"
+  awk -v a="$NEW_ALIAS" -v n="$NODE,$NODE.$DOMAIN,$INV_IP" '$1 == a { $1 = n; print }' "$NEW_KH" >> /root/.ssh/known_hosts
 }
 
 # ---- 플레이북 실행 ----
