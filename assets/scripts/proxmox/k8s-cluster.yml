@@ -663,8 +663,8 @@
       delegate_to: localhost
       become: false
 
-# 노드마다 VM 이 있는 Proxmox 노드를 라벨로 붙입니다. 배치 정책(k8s-gitops 의 Kyverno prefer-primary-host)이
-# 이 라벨로 메인 서버(pve01) 노드를 고릅니다. 이 플레이만: -e k8s_cluster=<이름> --tags node-labels
+# 노드마다 VM 이 있는 Proxmox 노드를 라벨로 붙입니다. 배치 정책(k8s-gitops 의 Kyverno prefer-role-host)이
+# 이 라벨로 역할별 서버(CPU 작업 pve01, GPU 작업 pve02, 그 밖 pve03)를 고릅니다. 이 플레이만: -e k8s_cluster=<이름> --tags node-labels
 - name: 노드 라벨 (eu4ng.com/pve)
   hosts: k8s_cp
   become: true
