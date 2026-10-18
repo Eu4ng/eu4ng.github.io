@@ -75,10 +75,17 @@ retry_files_enabled = False
 {: file="ansible.cfg" }
 
 ```yaml
+# 버전을 고정합니다. 고정하지 않으면 실행하는 곳마다 받은 날의 최신판이 깔려 같은 플레이북이 다르게 돕니다
 collections:
   - name: community.proxmox
+    version: 1.4.0
 ```
 {: file="requirements.yml" }
+
+```bash
+# requirements.yml 의 버전으로 컬렉션 설치
+ansible-galaxy collection install -r requirements.yml
+```
 
 인벤토리의 `proxmox` 그룹이 Proxmox 노드이고, `lan_dns` 그룹이 이 글에서 만드는 DNS 컨테이너입니다. 컨테이너 이름은 3단계의 `lan_dns_instances` 와 같아야 합니다.
 

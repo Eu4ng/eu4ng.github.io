@@ -48,13 +48,28 @@
       changed_when: "'CHANGED' in dri.stdout"
       loop: "{{ ollama_backends | selectattr('pve', 'eq', inventory_hostname) | selectattr('gpu') }}"
       loop_control: { label: "{{ item.name }}" }
+    # iGPU 가 쓸 호스트 RAM 상한(group_vars 의 gtt_mb). GRUB 부트 기준. 재부팅해야 적용된다 — 적용 여부는 /sys/module/amdgpu/parameters/gttsize
+    - name: amdgpu.gttsize 커널 파라미터 (gtt_mb 가 있는 gpu CT 의 호스트만)
+      ansible.builtin.lineinfile:
+        path: /etc/default/grub
+        regexp: '^GRUB_CMDLINE_LINUX_DEFAULT='
+        line: 'GRUB_CMDLINE_LINUX_DEFAULT="quiet amdgpu.gttsize={{ item.gtt_mb }}"'
+      register: grub
+      loop: "{{ ollama_backends | selectattr('pve', 'eq', inventory_hostname) | selectattr('gpu') | selectattr('gtt_mb', 'defined') }}"
+      loop_control: { label: "{{ item.name }}" }
+    - name: update-grub
+      ansible.builtin.command: update-grub
+      when: grub.changed
+      changed_when: true
 
-- name: 모델 저장소 (호스트마다 하나, 그 호스트의 CT 가 함께 씀)
+- name: 모델 저장소 (pve01 thin LV 원본 + NFS 로 다른 노드와 단일 공유)
   hosts: proxmox
   gather_facts: false
   vars:
     backends_here: "{{ ollama_backends | selectattr('pve', 'eq', inventory_hostname) | list }}"
+    is_nfs_host: "{{ inventory_hostname == ollama_nfs_host }}"
   tasks:
+    # --- NFS 호스트 (pve01): 로컬 thin LV + ext4 마운트 + NFS export ---
     - name: thin LV (pve/ollama-models)
       community.general.lvol:
         vg: pve
@@ -62,12 +77,12 @@
         thinpool: data
         size: "{{ ollama_models_lv_size }}"
         shrink: false          # 손으로 늘린 뒤 다시 실행해도 줄이지 않습니다
-      when: backends_here | length > 0
+      when: is_nfs_host
     - name: ext4 (처음 한 번)
       community.general.filesystem:
         fstype: ext4
         dev: /dev/pve/ollama-models
-      when: backends_here | length > 0 and not ansible_check_mode   # check 모드에서는 LV 가 아직 없다
+      when: is_nfs_host and not ansible_check_mode   # check 모드에서는 LV 가 아직 없다
     # nofail 을 쓰지 않습니다. 마운트가 안 되면 아래 store 폴더가 없어 CT 가 시작하지 못하고(라우터가 건너뜀),
     # 호스트 루트에 모델을 받는 일이 없습니다
     - name: 마운트 (fstab)
@@ -78,11 +93,11 @@
         opts: defaults
         state: mounted
       register: models_mount
-      when: backends_here | length > 0
+      when: is_nfs_host
     - name: systemd 가 바뀐 fstab 을 읽게
       ansible.builtin.systemd:
         daemon_reload: true
-      when: models_mount is changed
+      when: is_nfs_host and (models_mount is changed)
     - name: store 폴더 (CT 의 root 가 쓰도록 비특권 CT 의 uid 100000 소유)
       ansible.builtin.file:
         path: "{{ ollama_models_dir }}/store"
@@ -90,7 +105,41 @@
         owner: "100000"
         group: "100000"
         mode: "0755"
-      when: backends_here | length > 0
+      when: is_nfs_host
+    - name: nfs-kernel-server 패키지 설치
+      ansible.builtin.apt:
+        name: nfs-kernel-server
+        state: present
+      when: is_nfs_host
+    - name: NFS export 설정 (/etc/exports.d/ollama.exports)
+      ansible.builtin.copy:
+        dest: /etc/exports.d/ollama.exports
+        content: "{{ ollama_models_dir }}/store [NFS_CLIENT_IP](rw,sync,no_subtree_check,all_squash,anonuid=100000,anongid=100000)\n"
+        mode: "0644"
+      register: nfs_export
+      when: is_nfs_host
+    - name: NFS export 갱신 및 서비스 재시작
+      ansible.builtin.shell: |
+        exportfs -ra
+        systemctl restart nfs-server
+      when: is_nfs_host and (nfs_export is changed)
+
+    # --- NFS 클라이언트 호스트 (pve02 등): NFS 마운트 ---
+    - name: NFS 클라이언트 마운트 폴더 준비
+      ansible.builtin.file:
+        path: "{{ ollama_models_dir }}/store"
+        state: directory
+      when: not is_nfs_host and (backends_here | length > 0)
+    - name: NFS 마운트 (fstab)
+      ansible.posix.mount:
+        path: "{{ ollama_models_dir }}/store"
+        src: "{{ ollama_nfs_server_ip }}:{{ ollama_models_dir }}/store"
+        fstype: nfs
+        opts: "nfsvers=4.2,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,_netdev"
+        state: mounted
+      when: not is_nfs_host and (backends_here | length > 0)
+
+    # --- 공통: CT 에 바인드 마운트 ---
     # 새 경로에 붙이므로(옛 /var/lib/ollama/models 를 가리지 않음) 실행 중인 CT 에도 재부팅 없이 바로 붙습니다
     - name: CT 에 바인드 마운트
       ansible.builtin.shell: |
@@ -195,6 +244,37 @@
       until: api.status == 200
       retries: 30
       delay: 2
+    # 라우터(k8s-gitops haproxy.cfg 의 agent-check)에 상태를 알리는 에이전트. GPU 가 멈춰 llama-server 가 커널 안(D 상태)에 걸리면
+    # ollama 는 살아 있어 헬스체크를 통과하는데 이 에이전트가 drain 으로 답해 새 요청을 막는다
+    - name: 상태 보고 에이전트 스크립트
+      ansible.builtin.copy:
+        src: ../templates/ollama/ollama-agent.py
+        dest: /usr/local/bin/ollama-agent.py
+        mode: "0755"
+      register: agent_script
+    - name: 상태 보고 에이전트 서비스
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/ollama-agent.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Ollama 상태 보고(HAProxy agent-check 포트 {{ ollama_agent_port }}, 상태 JSON 포트 {{ ollama_agent_status_port }})
+          After=network-online.target
+          [Service]
+          Environment=AGENT_PORT={{ ollama_agent_port }}
+          Environment=AGENT_STATUS_PORT={{ ollama_agent_status_port }}
+          ExecStart=/usr/bin/python3 /usr/local/bin/ollama-agent.py
+          Restart=always
+          RestartSec=5
+          [Install]
+          WantedBy=multi-user.target
+      register: agent_unit
+    - name: 상태 보고 에이전트 시작
+      ansible.builtin.systemd:
+        name: ollama-agent
+        daemon_reload: true
+        enabled: true
+        state: "{{ 'restarted' if (agent_script.changed or agent_unit.changed) else 'started' }}"
     - name: 모델 받기 (없는 것만)
       ansible.builtin.shell: |
         ollama list | awk 'NR>1{print $1}' | grep -qxF -e "{{ item }}" -e "{{ item }}:latest" && exit 0   # 태그 없이 적은 모델은 :latest 로 나온다

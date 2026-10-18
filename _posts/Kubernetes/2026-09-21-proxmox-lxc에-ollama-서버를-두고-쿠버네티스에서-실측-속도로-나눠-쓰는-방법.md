@@ -52,16 +52,23 @@ permalink: /posts/37/
 # 클러스터의 ollama 서비스(k8s-gitops services/ollama, HAProxy)가 비어 있는 서버에 보냅니다. 어느 서버를 먼저 쓸지는 그쪽이 실측 속도로 정합니다.
 ollama_version: 0.34.4                        # https://github.com/ollama/ollama/releases (iGPU Vulkan 은 OLLAMA_VULKAN=1·OLLAMA_IGPU_ENABLE=1)
 ollama_models: [gemma4:e4b, qwen3.5:9b, glm-ocr]   # 모든 백엔드가 쓸 모델(glm-ocr: wiki-papers 의 표·수식 판독)
-# 모델 저장소는 같은 Proxmox 호스트의 CT 끼리 공유합니다. 호스트의 thin LV(pve/ollama-models, Proxmox 가 관리하지 않아 GUI 에 안 보임)를
-# 호스트의 ollama_models_dir 에 붙이고, 그 안의 store 폴더를 CT 마다 같은 경로로 바인드 마운트합니다. 모델은 호스트마다 한 번만 받습니다.
+# 모델 저장소는 한 곳(ollama_nfs_host)에만 둡니다. 그 노드의 thin LV(pve/ollama-models, Proxmox 가 관리하지 않아 GUI 에 안 보임)를
+# ollama_models_dir 에 ext4 로 붙이고 store 폴더를 NFS 로 내보내며, 다른 노드는 그 store 를 NFSv4 로 같은 경로에 마운트합니다.
+# CT 마다 store 를 같은 경로로 바인드 마운트하므로 모델은 클러스터 전체에서 한 번만 받습니다. 원본 노드에는 모델 서버가 없어도 됩니다.
 # - OLLAMA_NOPRUNE=1: Ollama 는 시작할 때 manifest 가 가리키지 않는 blob 과 받는 중인 파일을 지웁니다. 공유 폴더에서는 한 CT 가 받는
 #   중에 다른 CT 의 ollama 가 재시작되면 그 모델이 깨지므로 끕니다(옛 blob 은 ollama rm 으로 지웁니다).
 # - 바인드 마운트가 있는 CT 는 스냅샷(pct snapshot)과 다른 노드로의 이전이 안 되고, vzdump 백업에서 모델이 빠집니다(다시 받으면 된다).
 # - 같은 저장소의 metadata/ 를 함께 쓰므로 ollama_version 은 모든 CT 가 같아야 합니다(이 변수 하나라 늘 같습니다).
 ollama_models_dir: /srv/ollama-models         # 호스트 마운트 위치이자 CT 안의 경로(OLLAMA_MODELS)
-ollama_models_lv_size: 100g                   # thin LV 라 실제로 쓴 만큼만 차지합니다
+ollama_models_lv_size: 100g                   # 원본 노드의 thin LV 크기. thin LV 라 실제로 쓴 만큼만 차지합니다
+ollama_nfs_host: pve01                        # 모델 저장소 원본을 두고 NFS 로 내보내는 노드
+ollama_nfs_server_ip: [NFS_SERVER_IP]         # 그 노드의 LAN IP. 다른 노드가 이 주소로 마운트합니다
+ollama_agent_port: 11435                      # 상태 보고 에이전트(HAProxy agent-check). 라우터 설정(haproxy.cfg)의 agent-port 와 같아야 함
+ollama_agent_status_port: 11437               # 같은 에이전트의 상태 JSON(GET /status). 라우터 metrics.py 의 --status-port 와 같아야 함
 ollama_backends:                              # 메모리: 9B 모델 약 7GB + 64K 컨텍스트 KV 약 2GB. inventory 의 ollama 그룹과 이름이 같아야 함
   # flash_attention: OLLAMA_FLASH_ATTENTION(기본 켬). 켜면 죽는 GPU 만 flash_attention: false 로 끕니다
+  # gtt_mb: 그 호스트의 iGPU 가 쓸 수 있는 호스트 RAM 상한(커널 파라미터 amdgpu.gttsize, 재부팅 때 적용). iGPU 메모리는 CT 메모리 한도 밖에서
+  # 호스트 RAM 을 잡아, 호스트가 빠듯하면 드라이버가 커널 안에서 교착해 서버가 멈출 수 있습니다. 상한을 두면 그 대신 할당 실패(ollama 500)로 끝납니다
   - { name: ollama-780m, pve: pve02, vmid: 213, ip: [OLLAMA_780M_IP], cores: 8,  memory: 49152, disk: 40, gpu: true }
 ```
 {: file="group_vars/all.yml" }
@@ -83,11 +90,13 @@ all:
 
 ## 2. 플레이북 실행
 
-플레이북은 CT 를 정의하고, `gpu: true` 인 CT 에 `/dev/dri/renderD128` 을 넘기고, CT 가 있는 Proxmox 호스트에 모델 저장소를 만들어 CT 마다 바인드 마운트한 뒤, CT 를 켜고 Ollama 를 설치하고 모델을 받습니다. 모델 저장소는 호스트의 thin LV 하나(`pve/ollama-models`)를 `/srv/ollama-models` 에 붙이고 그 안의 `store` 폴더를 같은 호스트의 CT 들이 함께 쓰므로, 모델은 호스트마다 한 번만 받고 디스크도 한 벌만 씁니다. 비특권 CT 의 root 는 호스트에서 uid 100000 이라 `store` 폴더를 그 소유로 만듭니다. Ollama 는 시작할 때 쓰지 않는 blob 과 받는 중인 파일을 지우는데, 함께 쓰는 폴더에서는 다른 CT 가 받는 중인 모델을 깨뜨리므로 `OLLAMA_NOPRUNE=1` 로 끕니다. 바인드 마운트가 있는 CT 는 스냅샷과 다른 노드로의 이전이 안 됩니다. Ollama 는 서비스 설정으로 LAN 에서 요청을 받고(`OLLAMA_HOST=0.0.0.0:11434`), 한 번에 모델 하나(`OLLAMA_MAX_LOADED_MODELS=1`)와 요청 하나(`OLLAMA_NUM_PARALLEL=1`)만 다룹니다. 라우터가 서버마다 요청을 하나씩만 보내는 것과 짝을 이룹니다. AMD iGPU 는 ROCm 지원 밖이라 iGPU CT 는 `mesa-vulkan-drivers` 를 깔고 Vulkan 으로 돌립니다(`OLLAMA_VULKAN=1`, `OLLAMA_IGPU_ENABLE=1`). flash attention 은 기본으로 켜고, 켜면 죽는 GPU 만 CT 의 `flash_attention: false` 로 끕니다. Radeon 610M 의 Vulkan 에서는 켜면 `gemma4:e4b` 가 약 750토큰이 넘는 프롬프트마다 죽어 꺼야 했습니다. Radeon 780M 에서는 그 크래시가 없고, 켜면 `gemma4:12b` 의 4K 입력 + 1024 출력 작업이 126.6초에서 82.6초로, 32K 입력 + 512 출력 작업이 360.7초에서 285.5초로 줄었습니다(실측). 새 GPU 에서는 긴 프롬프트로 크래시가 없는지 먼저 확인합니다. 이미 설치된 버전과 받아 둔 모델은 건너뛰므로 여러 번 실행해도 결과가 같습니다.
+플레이북은 CT 를 정의하고, `gpu: true` 인 CT 에 `/dev/dri/renderD128` 을 넘기고, 모델 저장소를 만들어 CT 마다 바인드 마운트한 뒤, CT 를 켜고 Ollama 를 설치하고 모델을 받습니다. 모델 저장소는 `ollama_nfs_host` 노드의 thin LV 하나(`pve/ollama-models`)를 `/srv/ollama-models` 에 붙이고 그 안의 `store` 폴더를 NFS 로 내보냅니다. CT 가 있는 다른 노드는 그 `store` 를 같은 경로에 NFS 로 마운트하므로, 모든 CT 가 같은 폴더를 써서 모델은 한 번만 받고 디스크도 한 벌만 씁니다. 비특권 CT 의 root 는 호스트에서 uid 100000 이라 `store` 폴더를 그 소유로 만들고, NFS 로 들어오는 쓰기도 모두 그 uid 로 바꿉니다(`all_squash,anonuid=100000`). 내보내기는 플레이북의 `[NFS_CLIENT_IP]` 한 곳(마운트하는 노드의 LAN IP)에만 열리므로, 마운트하는 노드가 바뀌면 그 줄을 고칩니다. Ollama 는 시작할 때 쓰지 않는 blob 과 받는 중인 파일을 지우는데, 함께 쓰는 폴더에서는 다른 CT 가 받는 중인 모델을 깨뜨리므로 `OLLAMA_NOPRUNE=1` 로 끕니다. 바인드 마운트가 있는 CT 는 스냅샷과 다른 노드로의 이전이 안 됩니다. `gtt_mb` 를 둔 iGPU CT 의 호스트에는 GRUB 커널 파라미터 `amdgpu.gttsize` 를 넣고, 재부팅해야 적용됩니다(`/sys/module/amdgpu/parameters/gttsize` 로 확인). CT 마다 상태 보고 에이전트(`ollama-agent.py`, 포트 11435·11437)를 systemd 서비스로 띄웁니다. GPU 가 멈춰 llama-server 가 커널 안에 걸리면 Ollama 는 살아 있어 헬스체크를 통과하는데, 이 에이전트가 라우터의 agent-check 에 drain 으로 답해 새 요청을 막습니다(4단계). Ollama 는 서비스 설정으로 LAN 에서 요청을 받고(`OLLAMA_HOST=0.0.0.0:11434`), 한 번에 모델 하나(`OLLAMA_MAX_LOADED_MODELS=1`)와 요청 하나(`OLLAMA_NUM_PARALLEL=1`)만 다룹니다. 라우터가 서버마다 요청을 하나씩만 보내는 것과 짝을 이룹니다. AMD iGPU 는 ROCm 지원 밖이라 iGPU CT 는 `mesa-vulkan-drivers` 를 깔고 Vulkan 으로 돌립니다(`OLLAMA_VULKAN=1`, `OLLAMA_IGPU_ENABLE=1`). flash attention 은 기본으로 켜고, 켜면 죽는 GPU 만 CT 의 `flash_attention: false` 로 끕니다. Radeon 610M 의 Vulkan 에서는 켜면 `gemma4:e4b` 가 약 750토큰이 넘는 프롬프트마다 죽어 꺼야 했습니다. Radeon 780M 에서는 그 크래시가 없고, 켜면 `gemma4:12b` 의 4K 입력 + 1024 출력 작업이 126.6초에서 82.6초로, 32K 입력 + 512 출력 작업이 360.7초에서 285.5초로 줄었습니다(실측). 새 GPU 에서는 긴 프롬프트로 크래시가 없는지 먼저 확인합니다. 이미 설치된 버전과 받아 둔 모델은 건너뛰므로 여러 번 실행해도 결과가 같습니다.
 
 ```bash
-# 플레이북 내려받기
+# 플레이북과 상태 보고 에이전트 내려받기
 curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/ollama.yml -o playbooks/ollama.yml
+mkdir -p templates/ollama
+curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/templates/ollama/ollama-agent.py -o templates/ollama/ollama-agent.py
 ```
 
 <details markdown="1">
@@ -145,13 +154,28 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/ollama.yml -o playbook
       changed_when: "'CHANGED' in dri.stdout"
       loop: "{{ ollama_backends | selectattr('pve', 'eq', inventory_hostname) | selectattr('gpu') }}"
       loop_control: { label: "{{ item.name }}" }
+    # iGPU 가 쓸 호스트 RAM 상한(group_vars 의 gtt_mb). GRUB 부트 기준. 재부팅해야 적용된다 — 적용 여부는 /sys/module/amdgpu/parameters/gttsize
+    - name: amdgpu.gttsize 커널 파라미터 (gtt_mb 가 있는 gpu CT 의 호스트만)
+      ansible.builtin.lineinfile:
+        path: /etc/default/grub
+        regexp: '^GRUB_CMDLINE_LINUX_DEFAULT='
+        line: 'GRUB_CMDLINE_LINUX_DEFAULT="quiet amdgpu.gttsize={{ item.gtt_mb }}"'
+      register: grub
+      loop: "{{ ollama_backends | selectattr('pve', 'eq', inventory_hostname) | selectattr('gpu') | selectattr('gtt_mb', 'defined') }}"
+      loop_control: { label: "{{ item.name }}" }
+    - name: update-grub
+      ansible.builtin.command: update-grub
+      when: grub.changed
+      changed_when: true
 
-- name: 모델 저장소 (호스트마다 하나, 그 호스트의 CT 가 함께 씀)
+- name: 모델 저장소 (pve01 thin LV 원본 + NFS 로 다른 노드와 단일 공유)
   hosts: proxmox
   gather_facts: false
   vars:
     backends_here: "{{ ollama_backends | selectattr('pve', 'eq', inventory_hostname) | list }}"
+    is_nfs_host: "{{ inventory_hostname == ollama_nfs_host }}"
   tasks:
+    # --- NFS 호스트 (pve01): 로컬 thin LV + ext4 마운트 + NFS export ---
     - name: thin LV (pve/ollama-models)
       community.general.lvol:
         vg: pve
@@ -159,12 +183,12 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/ollama.yml -o playbook
         thinpool: data
         size: "{{ ollama_models_lv_size }}"
         shrink: false          # 손으로 늘린 뒤 다시 실행해도 줄이지 않습니다
-      when: backends_here | length > 0
+      when: is_nfs_host
     - name: ext4 (처음 한 번)
       community.general.filesystem:
         fstype: ext4
         dev: /dev/pve/ollama-models
-      when: backends_here | length > 0 and not ansible_check_mode   # check 모드에서는 LV 가 아직 없다
+      when: is_nfs_host and not ansible_check_mode   # check 모드에서는 LV 가 아직 없다
     # nofail 을 쓰지 않습니다. 마운트가 안 되면 아래 store 폴더가 없어 CT 가 시작하지 못하고(라우터가 건너뜀),
     # 호스트 루트에 모델을 받는 일이 없습니다
     - name: 마운트 (fstab)
@@ -175,11 +199,11 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/ollama.yml -o playbook
         opts: defaults
         state: mounted
       register: models_mount
-      when: backends_here | length > 0
+      when: is_nfs_host
     - name: systemd 가 바뀐 fstab 을 읽게
       ansible.builtin.systemd:
         daemon_reload: true
-      when: models_mount is changed
+      when: is_nfs_host and (models_mount is changed)
     - name: store 폴더 (CT 의 root 가 쓰도록 비특권 CT 의 uid 100000 소유)
       ansible.builtin.file:
         path: "{{ ollama_models_dir }}/store"
@@ -187,7 +211,41 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/ollama.yml -o playbook
         owner: "100000"
         group: "100000"
         mode: "0755"
-      when: backends_here | length > 0
+      when: is_nfs_host
+    - name: nfs-kernel-server 패키지 설치
+      ansible.builtin.apt:
+        name: nfs-kernel-server
+        state: present
+      when: is_nfs_host
+    - name: NFS export 설정 (/etc/exports.d/ollama.exports)
+      ansible.builtin.copy:
+        dest: /etc/exports.d/ollama.exports
+        content: "{{ ollama_models_dir }}/store [NFS_CLIENT_IP](rw,sync,no_subtree_check,all_squash,anonuid=100000,anongid=100000)\n"
+        mode: "0644"
+      register: nfs_export
+      when: is_nfs_host
+    - name: NFS export 갱신 및 서비스 재시작
+      ansible.builtin.shell: |
+        exportfs -ra
+        systemctl restart nfs-server
+      when: is_nfs_host and (nfs_export is changed)
+
+    # --- NFS 클라이언트 호스트 (pve02 등): NFS 마운트 ---
+    - name: NFS 클라이언트 마운트 폴더 준비
+      ansible.builtin.file:
+        path: "{{ ollama_models_dir }}/store"
+        state: directory
+      when: not is_nfs_host and (backends_here | length > 0)
+    - name: NFS 마운트 (fstab)
+      ansible.posix.mount:
+        path: "{{ ollama_models_dir }}/store"
+        src: "{{ ollama_nfs_server_ip }}:{{ ollama_models_dir }}/store"
+        fstype: nfs
+        opts: "nfsvers=4.2,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,_netdev"
+        state: mounted
+      when: not is_nfs_host and (backends_here | length > 0)
+
+    # --- 공통: CT 에 바인드 마운트 ---
     # 새 경로에 붙이므로(옛 /var/lib/ollama/models 를 가리지 않음) 실행 중인 CT 에도 재부팅 없이 바로 붙습니다
     - name: CT 에 바인드 마운트
       ansible.builtin.shell: |
@@ -292,6 +350,37 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/ollama.yml -o playbook
       until: api.status == 200
       retries: 30
       delay: 2
+    # 라우터(k8s-gitops haproxy.cfg 의 agent-check)에 상태를 알리는 에이전트. GPU 가 멈춰 llama-server 가 커널 안(D 상태)에 걸리면
+    # ollama 는 살아 있어 헬스체크를 통과하는데 이 에이전트가 drain 으로 답해 새 요청을 막는다
+    - name: 상태 보고 에이전트 스크립트
+      ansible.builtin.copy:
+        src: ../templates/ollama/ollama-agent.py
+        dest: /usr/local/bin/ollama-agent.py
+        mode: "0755"
+      register: agent_script
+    - name: 상태 보고 에이전트 서비스
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/ollama-agent.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Ollama 상태 보고(HAProxy agent-check 포트 {{ ollama_agent_port }}, 상태 JSON 포트 {{ ollama_agent_status_port }})
+          After=network-online.target
+          [Service]
+          Environment=AGENT_PORT={{ ollama_agent_port }}
+          Environment=AGENT_STATUS_PORT={{ ollama_agent_status_port }}
+          ExecStart=/usr/bin/python3 /usr/local/bin/ollama-agent.py
+          Restart=always
+          RestartSec=5
+          [Install]
+          WantedBy=multi-user.target
+      register: agent_unit
+    - name: 상태 보고 에이전트 시작
+      ansible.builtin.systemd:
+        name: ollama-agent
+        daemon_reload: true
+        enabled: true
+        state: "{{ 'restarted' if (agent_script.changed or agent_unit.changed) else 'started' }}"
     - name: 모델 받기 (없는 것만)
       ansible.builtin.shell: |
         ollama list | awk 'NR>1{print $1}' | grep -qxF -e "{{ item }}" -e "{{ item }}:latest" && exit 0   # 태그 없이 적은 모델은 :latest 로 나온다
@@ -335,7 +424,7 @@ for h in ollama-780m; do
 done
 ```
 
-- **확인:** `ollama.yml` 의 마지막 `결과` 태스크에 CT 마다 받아 둔 모델 이름이 보이고, iGPU CT 줄 끝에는 `GPU: Vulkan` 이 붙습니다. 위 명령은 CT 마다 `"name":"glm-ocr:latest"`, `"name":"qwen3.5:9b"`, `"name":"gemma4:e4b"` 세 줄을 출력합니다. 호스트에서 `pct exec <CT ID> -- findmnt -n /srv/ollama-models` 가 두 CT 모두 `pve-ollama--models[/store]` 를 보여 주면 같은 저장소를 쓰는 것입니다.
+- **확인:** `ollama.yml` 의 마지막 `결과` 태스크에 CT 마다 받아 둔 모델 이름이 보이고, iGPU CT 줄 끝에는 `GPU: Vulkan` 이 붙습니다. 위 명령은 CT 마다 `"name":"glm-ocr:latest"`, `"name":"qwen3.5:9b"`, `"name":"gemma4:e4b"` 세 줄을 출력합니다. 호스트에서 `pct exec <CT ID> -- findmnt -n /srv/ollama-models` 의 원본이 원본 노드의 CT 는 `pve-ollama--models[/store]`, 다른 노드의 CT 는 `[NFS_SERVER_IP]:/srv/ollama-models/store` 이면 같은 저장소를 쓰는 것입니다.
 
 ## 3. LAN 의 PC 추가와 서버 확인
 

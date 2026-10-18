@@ -16,6 +16,10 @@
 # 점검을 통과하면 systemd 유닛(pve-node-rebuild-<노드>)으로 다시 떠서 ssh 가 끊겨도 계속 돕니다. 로그는 /root/pve-rebuild/<시각>.log.
 # 상태 파일 /root/pve-rebuild/<노드>.state 에 새 기계(ssh 호스트 키 지문, machine-id)와 단계별 완료를 적으므로, 실패하면 같은 명령으로
 # 이어 갑니다(같은 새 기계일 때만). 정리 단계는 처음 기록한 ID 와 같은 것만 지웁니다(node-rebuild.yml 머리말).
+# 새 기계의 ssh 호스트 키: 점검 때 ssh-keyscan 으로 받은 ed25519 지문을 보여 주고, pve-bootstrap.sh 가 콘솔에 보여 준 값과 같은지
+# 묻습니다(--yes 로도 건너뛰지 않음). 같으면 그 키를 상태 폴더의 전용 known_hosts(<노드>.known_hosts)에 별칭 <노드>-new 로 고정하고,
+# 새 기계로 가는 모든 ssh·scp·ansible 접속이 그 키로만 검증합니다(<노드>-ssh.yml 을 추가 inventory 로 넘김). 새 IP 가 옛 IP 와 같아
+# /root/.ssh/known_hosts·/etc/pve/priv/known_hosts 의 옛 키와 부딪혀도 막히지 않고, IP 를 inventory 값으로 바꾼 뒤에도 같은 키로 검증됩니다.
 # 시험용 고장 주입: REBUILD_FAIL_AFTER=<단계 이름> 이면 그 단계를 마친 뒤 멈춥니다.
 
 # jq 식과 원격 명령은 일부러 작은따옴표로 넘깁니다(여기서 풀지 않음)
@@ -25,7 +29,8 @@ set -euo pipefail
 
 REPO=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
 STATE_DIR=/root/pve-rebuild
-SSH=(ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new)
+SSH_COMMON=(-o BatchMode=yes -o ConnectTimeout=10)
+SSH=(ssh "${SSH_COMMON[@]}" -o StrictHostKeyChecking=accept-new)   # 새 기계가 아닌 곳(control plane VM, 옛 주소)
 export HOME=/root ANSIBLE_DEPRECATION_WARNINGS=False ANSIBLE_CONFIG="$REPO/ansible.cfg"   # systemd 유닛 안에는 HOME 이 없음
 PATH="$REPO/.venv/bin:$PATH"
 
@@ -56,6 +61,17 @@ command -v jq >/dev/null || die "jq 가 없습니다(pve-controller.yml 이 설�
 SELF=$(hostname -s)
 STATE=$STATE_DIR/$NODE.state
 mkdir -p "$STATE_DIR"
+# 새 기계 전용: 고정한 키 하나만 믿습니다. ssh 는 같은 옵션의 첫 값을 쓰므로 SSH 배열(accept-new)과 섞지 않습니다
+NEW_KH=$STATE_DIR/$NODE.known_hosts
+NEW_ALIAS=$NODE-new
+new_opts() {
+  NEW_OPTS=("${SSH_COMMON[@]}" -o UserKnownHostsFile="$NEW_KH" -o GlobalKnownHostsFile=/dev/null -o HostKeyAlias="$NEW_ALIAS"
+    -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519)
+  SSH_NEW=(ssh "${NEW_OPTS[@]}")
+}
+new_opts
+NEW_INV=$STATE_DIR/$NODE-ssh.yml   # ansible 이 새 기계에 붙을 때 같은 키를 쓰게 하는 추가 inventory(대상 노드만)
+INV=(-i inventory.yml -i "$NEW_INV")
 cd "$REPO"
 
 # ---- 상태 파일 ----
@@ -105,7 +121,39 @@ fingerprint() {   # <IP> → ed25519 호스트 키 지문(없으면 빈 줄)
   ssh-keyscan -T 5 -t ed25519 "$1" 2>/dev/null | ssh-keygen -lf - 2>/dev/null | awk '{print $2}' | head -1
 }
 host_key_blobs() { ssh-keyscan -T 5 "$1" 2>/dev/null | awk '!/^#/ {print $3}'; }
-machine_id() { "${SSH[@]}" "root@$1" cat /etc/machine-id 2>/dev/null; }
+machine_id() { "${SSH_NEW[@]}" "root@$1" cat /etc/machine-id 2>/dev/null; }
+
+# pin_new_key <IP> <파일>: <IP> 의 ed25519 키를 보여 주고(실제 실행이면 콘솔 지문과 같은지 물음) 별칭으로 <파일>에 고정합니다
+pin_new_key() {
+  local ip=$1 file=$2 blob fp answer
+  blob=$(ssh-keyscan -T 5 -t ed25519 "$ip" 2>/dev/null | awk '!/^#/ && $2 == "ssh-ed25519" {print $3; exit}')
+  [ -n "$blob" ] || die "새 기계 $ip 의 ed25519 호스트 키를 받지 못했습니다."
+  fp=$(echo "$NEW_ALIAS ssh-ed25519 $blob" | ssh-keygen -lf - | awk '{print $2}')
+  echo "    새 기계 $ip → 노드 $NODE, 호스트 키 지문(ed25519): $fp"
+  echo "    전용 known_hosts: $file (별칭 $NEW_ALIAS)"
+  if [ "$DRY" = 0 ]; then
+    printf '새 노드 콘솔의 pve-bootstrap.sh 끝에 나온 지문(또는 ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub)과 같으면 yes 입력: '
+    read -r answer < /dev/tty
+    [ "$answer" = yes ] || die "지문 확인을 받지 못해 멈춥니다."
+  fi
+  (umask 077; echo "$NEW_ALIAS ssh-ed25519 $blob" > "$file")
+}
+
+# write_new_inventory: 대상 노드에만 고정 키 접속 옵션을 붙이는 추가 inventory. ansible.cfg 의 host_key_checking=False 는
+# StrictHostKeyChecking=no 를 앞에 붙여 아래 옵션을 덮으므로 이 호스트만 host_key_checking 을 켭니다. ControlPersist 소켓을 다시 쓰면
+# 호스트 키를 다시 검증하지 않으므로, 고정 키 없이 같은 주소로 열린 접속(~/.ansible/cp)과 섞이지 않게 소켓 폴더를 따로 둡니다
+write_new_inventory() {
+  (umask 077; cat > "$NEW_INV" <<YML
+# scripts/pve-node-rebuild.sh 가 만듭니다. $NODE 로 가는 ansible 접속을 고정한 호스트 키($NEW_KH)로만 검증합니다
+all:
+  hosts:
+    $NODE:
+      ansible_host_key_checking: true
+      ansible_control_path_dir: $STATE_DIR/$NODE-cp
+      ansible_ssh_common_args: "-o UserKnownHostsFile=$NEW_KH -o GlobalKnownHostsFile=/dev/null -o HostKeyAlias=$NEW_ALIAS -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519"
+YML
+  )
+}
 # 저장된 접속 주소 → inventory IP → 처음 IP 순으로 찾아, 지문과 machine-id 가 저장값과 같은 주소를 돌려줍니다
 find_new_machine() {
   local fp mid a
@@ -131,14 +179,15 @@ preflight() {
     *) die "--reason 은 disk-replaced 또는 failed 입니다." ;;
   esac
 
-  pvecm status | grep -qE '^Quorate:\s+Yes' || die "클러스터가 과반(Quorate)이 아닙니다. QDevice(qnetd) 연결부터 확인합니다."
+  pvecm status | grep -qE '^Quorate:\s+Yes' \
+    || die "클러스터가 과반(Quorate)이 아닙니다. $NODE 가 꺼져 표가 모자라면(QDevice 없음) 이 노드에서 'pvecm expected 1' 로 과반을 만든 뒤 다시 실행합니다."
   local online
   online=$(jq -r --arg n "$NODE" '.nodelist[$n].online // "none"' /etc/pve/.members)
   [ "$online" != 1 ] || die "$NODE 가 클러스터에서 online 입니다. 옛 노드가 살아 있으면 다시 만들지 않습니다."
 
   # 옛 노드 격리: 옛 링 주소가 응답하지 않거나, 응답하면 옛 호스트 키가 아니고 클러스터 설정이 없어야 합니다
   local old_ip old_keys new_keys k
-  old_ip=$(awk -v n="$NODE" '/^\s*node\s*\{/ {nm=""; ip=""} /name:/ {nm=$2} /ring0_addr:/ {ip=$2} nm==n && ip!="" {print ip; exit}' /etc/pve/corosync.conf)
+  old_ip=$(awk -v n="$NODE" '/^[[:space:]]*node[[:space:]]*\{/ {nm=""; ip=""} /name:/ {nm=$2; ip=""} /ring0_addr:/ {ip=$2} nm==n && ip!="" {print ip; exit}' /etc/pve/corosync.conf)
   old_ip=${old_ip:-$INV_IP}
   old_keys=$(awk '{print $3}' "/etc/pve/nodes/$NODE/ssh_known_hosts" 2>/dev/null || true)
   [ -n "$old_keys" ] || warn "옛 호스트 키(/etc/pve/nodes/$NODE/ssh_known_hosts)가 없어 키 비교를 건너뜁니다."
@@ -154,10 +203,13 @@ preflight() {
   new_keys=$(host_key_blobs "$NEW_IP")
   [ -n "$new_keys" ] || die "새 기계 $NEW_IP 의 ssh 가 응답하지 않습니다."
   for k in $new_keys; do grep -qxF "$k" <<< "$old_keys" && die "$NEW_IP 의 호스트 키가 옛 $NODE 와 같습니다. 새로 설치한 기계가 아닙니다(격리 안 됨)."; done
-  "${SSH[@]}" "root@$NEW_IP" true 2>/dev/null || die "root@$NEW_IP 에 ssh 키로 붙지 못합니다. 새 노드 콘솔에서 pve-bootstrap.sh 를 실행합니다."
-  "${SSH[@]}" "root@$NEW_IP" 'test ! -e /etc/pve/corosync.conf' || die "$NEW_IP 는 이미 클러스터 설정(/etc/pve/corosync.conf)이 있습니다."
-  "${SSH[@]}" "root@$NEW_IP" 'command -v pveversion >/dev/null' || die "$NEW_IP 는 Proxmox 가 아닙니다."
-  [ -z "$("${SSH[@]}" "root@$NEW_IP" 'qm list; pct list' 2>/dev/null)" ] || die "$NEW_IP 에 게스트가 있습니다. 합류하려면 비어 있어야 합니다."
+  # 새 기계 호스트 키 고정. dry-run 은 임시 파일에 두고 끝에 지웁니다
+  if [ "$DRY" = 1 ]; then NEW_KH=$(mktemp "$STATE_DIR/.dry-known_hosts.XXXXXX"); new_opts; trap 'rm -f "$NEW_KH"' EXIT; fi
+  pin_new_key "$NEW_IP" "$NEW_KH"
+  "${SSH_NEW[@]}" "root@$NEW_IP" true 2>/dev/null || die "root@$NEW_IP 에 고정한 호스트 키·ssh 키로 붙지 못합니다. 새 노드 콘솔에서 pve-bootstrap.sh 를 실행합니다."
+  "${SSH_NEW[@]}" "root@$NEW_IP" 'test ! -e /etc/pve/corosync.conf' || die "$NEW_IP 는 이미 클러스터 설정(/etc/pve/corosync.conf)이 있습니다."
+  "${SSH_NEW[@]}" "root@$NEW_IP" 'command -v pveversion >/dev/null' || die "$NEW_IP 는 Proxmox 가 아닙니다."
+  [ -z "$("${SSH_NEW[@]}" "root@$NEW_IP" 'qm list; pct list' 2>/dev/null)" ] || die "$NEW_IP 에 게스트가 있습니다. 합류하려면 비어 있어야 합니다."
   if [ "$INV_IP" != "$NEW_IP" ] && [ "$old_ip" != "$INV_IP" ] && [ -n "$(host_key_blobs "$INV_IP")" ]; then
     die "inventory 주소 $INV_IP 를 다른 기계가 쓰고 있습니다."
   fi
@@ -204,12 +256,12 @@ for block in re.findall(r"TASK \[지울 대상\].*?(?=\nTASK|\nPLAY)", text, re.
 PY
 }
 
-ssh_new() { "${SSH[@]}" "root@$ADDR" "$@"; }
+ssh_new() { "${SSH_NEW[@]}" "root@$ADDR" "$@"; }
 
 # ---- 신원 맞추기: 호스트 이름·IP 를 inventory 값으로 ----
 identity() {
   log "신원 맞추기: $ADDR → $NODE.$DOMAIN / $INV_IP"
-  scp -q -o BatchMode=yes scripts/pve-rename-node.sh "root@$ADDR:/root/pve-rename-node.sh"
+  scp -q "${NEW_OPTS[@]}" scripts/pve-rename-node.sh "root@$ADDR:/root/pve-rename-node.sh"
   ssh_new "systemd-run --unit pve-rename-node-\$(date +%s) --collect --wait -p StandardOutput=file:/root/pve-rename-node.log \
     -p StandardError=inherit bash /root/pve-rename-node.sh $NODE $DOMAIN >/dev/null; cat /root/pve-rename-node.log"
   [ "$(ssh_new hostname -f)" = "$NODE.$DOMAIN" ] || die "호스트 이름을 $NODE.$DOMAIN 로 바꾸지 못했습니다."
@@ -243,8 +295,8 @@ identity() {
 run_pb() {   # run_pb <단계 이름> <ansible-playbook 인자>...
   local name=$1; shift
   step_done "$name" && { log "건너뜀(완료): $name"; return 0; }
-  log "실행: ansible-playbook $*"
-  ansible-playbook "$@" || die "$name 에서 실패했습니다. 원인을 고친 뒤 같은 명령으로 이어 갑니다."
+  log "실행: ansible-playbook ${INV[*]} $*"
+  ansible-playbook "${INV[@]}" "$@" || die "$name 에서 실패했습니다. 원인을 고친 뒤 같은 명령으로 이어 갑니다."
   mark_step "$name"
 }
 
@@ -303,7 +355,7 @@ verify() {
     if dig +short +time=3 +tries=2 "@$g" "$NODE.$DOMAIN" 2>/dev/null | grep -qx "$INV_IP"; then echo "$g DNS: $NODE.$DOMAIN → $INV_IP"
     else warn "$g 의 DNS 가 $NODE.$DOMAIN 를 $INV_IP 로 풀지 않습니다."; ok=0; fi
   done
-  "${SSH[@]}" "root@$INV_IP" tailscale status --self --peers=false 2>/dev/null | head -2 || true
+  "${SSH_NEW[@]}" "root@$INV_IP" tailscale status --self --peers=false 2>/dev/null | head -2 || true
   if [ "$ok" = 1 ]; then log "검증 끝. 위 경고만 확인합니다."; else warn "검증 중 실패한 항목이 있습니다. 위 출력을 확인합니다."; fi
 }
 
@@ -365,9 +417,12 @@ log "새 기계: $ADDR (지문 일치)"
 
 if ! step_done identity; then identity; mark_step identity; fi
 [ "$ADDR" = "$INV_IP" ] || die "새 기계가 inventory 주소 $INV_IP 에 있지 않습니다."
-"${SSH[@]}" "root@$INV_IP" 'test ! -e /etc/pve/corosync.conf' 2>/dev/null || step_done cleanup || die "정리 전인데 새 기계가 이미 클러스터에 들어 있습니다."
+"${SSH_NEW[@]}" "root@$INV_IP" 'test ! -e /etc/pve/corosync.conf' 2>/dev/null || step_done cleanup || die "정리 전인데 새 기계가 이미 클러스터에 들어 있습니다."
 
 playbook_env
+write_new_inventory
+log "ansible 이 고정한 호스트 키로 $NODE 에 붙는지"
+ansible "$NODE" "${INV[@]}" -m ansible.builtin.ping -o || die "ansible 이 고정한 호스트 키($NEW_KH)로 $NODE 에 붙지 못합니다. 플레이북을 시작하지 않습니다."
 run_pb cleanup playbooks/node-rebuild.yml -e node="$NODE" -e state="$STATE"
 run_pb pve-cluster playbooks/pve-cluster.yml
 run_pb vm-template playbooks/vm-template.yml
