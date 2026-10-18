@@ -40,6 +40,14 @@
         src: ../scripts/pve-reboot.sh
         dest: /usr/local/sbin/pve-reboot.sh
         mode: "0755"
+    # 다른 게스트를 모두 내린 뒤 마지막에 내릴 게스트(NAS). NFS 저장소에 디스크를 둔 VM 이 NAS 보다 먼저 내려가게 합니다
+    - name: 재부팅 스크립트 기본값 (마지막에 내릴 게스트)
+      ansible.builtin.copy:
+        dest: /etc/default/pve-reboot
+        mode: "0644"
+        content: |
+          # proxmox-ansible pve-cluster.yml (group_vars 의 xpenology.vmid). scripts/pve-reboot.sh 가 읽음
+          LAST_VMIDS="{{ xpenology.vmid if xpenology.pve == inventory_hostname else '' }}"
     # governor 를 먼저 바꿔야 EPP 를 고를 수 있습니다(performance governor 에서는 EPP 가 performance 하나뿐)
     - name: CPU 주파수 정책 (부팅 때 적용)
       ansible.builtin.copy:

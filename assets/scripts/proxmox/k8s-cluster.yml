@@ -1,7 +1,7 @@
 # kubeadm 쿠버네티스 클러스터(control plane N + worker N). group_vars 의 k8s_clusters 에서 -e k8s_cluster=<이름>(기본 hub)으로 고릅니다.
 # 노드마다 정한 Proxmox 노드의 템플릿(vm-template.yml)을 복제해 VM 을 만들고, containerd·kubeadm 을 설치해 VIP(keepalived) 엔드포인트로
 # 클러스터를 구성한 뒤 kubeconfig 를 실행 PC 로 가져옵니다. 허브(hub)와 지역 엣지(daejeon 등)가 같은 절차로 만들어집니다.
-# etcd 세 번째 멤버(서울 NAS)는 k8s-gitops 의 scripts/etcd-witness-certs.sh 와 stacks/seoul/etcd-witness* 로 붙입니다.
+# etcd 는 세 Proxmox 노드에 하나씩 둔 control plane 3멤버입니다.
 # VIP 없이 만든 기존 클러스터는 먼저 scripts/k8s-control-plane-endpoint.sh 로 옮깁니다. 그 다음은 Argo CD 설치·등록부터 GitOps 입니다.
 #   ansible-playbook playbooks/k8s-cluster.yml [-e k8s_cluster=daejeon]                    만들기 (여러 번 실행해도 됨)
 #   ansible-playbook playbooks/k8s-cluster.yml [-e k8s_cluster=...] -e k8s_state=absent    VM 삭제 (ID 와 이름이 모두 맞는 VM 만, yes 입력 후)
@@ -113,16 +113,19 @@
       loop: "{{ clones.results }}"
       loop_control: { label: "{{ item.item.name }}" }
       when: item.changed
+    # longhorn_storage 가 NFS(nas_vm_storage)면 qcow2(파일), lvmthin 이면 raw 입니다. HDD 위 NFS 디스크에는 ssd 표시를 붙이지 않습니다
     - name: Longhorn 디스크 (scsi1, 없을 때만. 켜진 VM 에 핫플러그)
       community.proxmox.proxmox_disk:
         vmid: "{{ item.vmid }}"
         disk: scsi1
-        storage: "{{ vm_disk_storage }}"
+        storage: "{{ lh_storage }}"
         size: "{{ item.longhorn_disk }}"
-        format: raw
+        format: "{{ 'qcow2' if lh_storage == nas_vm_storage.name else 'raw' }}"
         discard: "on"
-        ssd: true
+        ssd: "{{ lh_storage != nas_vm_storage.name }}"
         state: present
+      vars:
+        lh_storage: "{{ item.longhorn_storage | default(vm_disk_storage) }}"
       loop: "{{ active | selectattr('longhorn_disk', 'defined') }}"
       loop_control: { label: "{{ item.name }}" }
     - name: Longhorn 디스크 늘리기 (longhorn_disk 를 키웠을 때. 켠 채로 늘리고, 줄이지는 못함)
@@ -133,7 +136,7 @@
         state: resized
       loop: "{{ active | selectattr('longhorn_disk', 'defined') }}"
       loop_control: { label: "{{ item.name }}" }
-    - name: VM 설정 맞추기 (코어·메모리·CPU 우선순위·IP·DNS·자동 시작. 모듈 특성상 매번 changed 로 보고됨. 코어·메모리는 VM 을 껐다 켜야 적용)
+    - name: VM 설정 맞추기 (코어·메모리·CPU 우선순위·IP·DNS·자동 시작·부팅 순서. 모듈 특성상 매번 changed 로 보고됨. 코어·메모리는 VM 을 껐다 켜야 적용)
       community.proxmox.proxmox_kvm:
         node: "{{ item.pve | default(proxmox_node) }}"
         vmid: "{{ item.vmid }}"
@@ -142,6 +145,7 @@
         memory: "{{ item.memory }}"
         cpuunits: "{{ k8s_vm_cpuunits }}"
         onboot: true
+        startup: "{{ item.startup | default(omit) }}"   # 부팅 순서(group_vars 의 startup 설명)
         ipconfig: { ipconfig0: "ip={{ item.ip }}/24,gw={{ ct_gateway }}" }
         nameservers: "{{ k8s_nameservers }}"
         update: true
@@ -205,8 +209,8 @@
         value: "1"
         sysctl_file: /etc/sysctl.d/k8s.conf
       loop: [net.bridge.bridge-nf-call-iptables, net.bridge.bridge-nf-call-ip6tables, net.ipv4.ip_forward]
-    # 원격지(서울 NAS)의 etcd 투표자·DB 복제본은 tailnet 에 있습니다. VM 이 있는 Proxmox 노드가 Tailscale 서브넷 라우터이므로
-    # tailnet 대역을 그 노드로 보냅니다. VM 은 자기 노드와 함께 죽고 살므로 이 경로에는 이중화가 필요 없습니다
+    # 원격지(tailnet)의 장치·DB 복제본에 닿는 경로입니다(옛 서울 NAS etcd 투표자도 이 경로였음). VM 이 있는 Proxmox 노드가 Tailscale 서브넷
+    # 라우터이므로 tailnet 대역을 그 노드로 보냅니다. VM 은 자기 노드와 함께 죽고 살므로 이 경로에는 이중화가 필요 없습니다
     - name: tailnet 경로 (netplan)
       ansible.builtin.copy:
         dest: /etc/netplan/60-tailnet.yaml
@@ -371,8 +375,9 @@
       register: untaint
       changed_when: "'untainted' in untaint.stdout"
       when: kc.control_plane_workloads | default(false)
-    # 원격 etcd 멤버는 우리 쪽 연결을 NAT 뒤 주소(Proxmox 노드의 Tailscale IP)로 봅니다. 그 주소를 peer 인증서 SAN 에 넣어
-    # SAN 검사를 켠 채로 연결되게 합니다. 합류하는 control plane 은 kubeadm-config 의 이 값으로 인증서를 만듭니다
+    # 원격(tailnet) etcd 멤버는 우리 쪽 연결을 NAT 뒤 주소(Proxmox 노드의 Tailscale IP)로 봅니다. 그 주소를 peer 인증서 SAN 에 넣어
+    # SAN 검사를 켠 채로 연결되게 합니다. 합류하는 control plane 은 kubeadm-config 의 이 값으로 인증서를 만듭니다.
+    # 지금은 원격 멤버가 없지만 원격 멤버를 다시 붙일 수 있게 둡니다
     - name: etcd peer 인증서 SAN (kubeadm-config)
       ansible.builtin.shell: |
         set -e

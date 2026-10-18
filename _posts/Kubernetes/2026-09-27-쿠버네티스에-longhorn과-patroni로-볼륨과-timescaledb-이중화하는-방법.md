@@ -36,7 +36,7 @@ local-path 볼륨은 한 노드의 디스크에만 있어서 그 서버가 죽�
 
 다음 항목이 준비되어 있어야 합니다.
 
-- worker 두 대를 서로 다른 Proxmox 서버에 둔 kubeadm 클러스터와 그 플레이북 ([Proxmox에 Ansible로 kubeadm 쿠버네티스 클러스터 만드는 방법](/posts/46/))
+- worker 를 Proxmox 서버마다 한 대씩 둔 kubeadm 클러스터와 그 플레이북 ([Proxmox에 Ansible로 kubeadm 쿠버네티스 클러스터 만드는 방법](/posts/46/))
 - GitOps 저장소의 `services/`, `iot/hub/` 폴더를 배포하는 Argo CD ([쿠버네티스에 Argo CD 설치하고 GitOps로 서비스 추가하는 방법](/posts/36/))
 - `timescaledb-credentials` Secret(블로그 `create-iot-secrets.sh`, [엣지 Mosquitto와 Telegraf 디스크 버퍼로 중앙 TimescaleDB에 유실 없이 IoT 데이터 모으는 방법](/posts/43/)의 준비 단계). 예전처럼 단일 Deployment 로 띄운 허브 DB 가 있으면 5·7단계에서 옮기고, 허브 DB 를 처음 만든다면 5·7단계와 `IOT_LOGIN=NOLOGIN` 은 건너뜁니다
 - Longhorn 으로 옮길 앱: Grafana ([쿠버네티스에 Prometheus와 Grafana 배포해 자원 사용량 대시보드 만드는 방법](/posts/39/)), 중앙 Home Assistant ([중앙 Home Assistant로 여러 지역 Home Assistant 모아 보는 방법](/posts/49/))
@@ -45,7 +45,7 @@ local-path 볼륨은 한 노드의 디스크에만 있어서 그 서버가 죽�
 
 ## 1. worker 에 Longhorn 디스크 준비
 
-Longhorn 복제본은 OS 디스크와 나눈 전용 디스크(`scsi1`)의 `/var/lib/longhorn` 에 둡니다. 클러스터 변수의 worker 항목에 `longhorn_disk`(GB)를 붙이면, 플레이북이 VM 에 디스크를 핫플러그하고 Longhorn 이 쓰는 iSCSI(`open-iscsi`, `iscsi_tcp`)를 준비한 뒤 디스크를 포맷해 마운트합니다. 나중에 `longhorn_disk` 값을 키우고 다시 실행하면 VM 을 켠 채로 디스크와 파일시스템을 그 크기로 늘립니다(줄이지는 못합니다). Ubuntu 의 multipathd 가 Longhorn 장치를 가로채지 않게 `sd` 장치를 multipath 에서 뺍니다.
+Longhorn 복제본은 OS 디스크와 나눈 전용 디스크(`scsi1`)의 `/var/lib/longhorn` 에 둡니다. 클러스터 변수의 worker 항목에 `longhorn_disk`(GB)를 붙이면, 플레이북이 VM 에 디스크를 핫플러그하고 Longhorn 이 쓰는 iSCSI(`open-iscsi`, `iscsi_tcp`)를 준비한 뒤 디스크를 포맷해 마운트합니다. `longhorn_storage` 를 적으면 그 Proxmox 저장소에 디스크를 둡니다(기본 `vm_disk_storage`). NVMe 가 넉넉하지 않은 서버의 worker 는 NAS HDD 의 NFS 저장소(`nas_vm_storage`)에 두고, 이때는 qcow2 로 만들고 SSD 표시를 붙이지 않습니다. HDD 위 디스크라 DB 는 이 worker 에 두지 않고 NVMe 서버의 worker 에만 둡니다. 나중에 `longhorn_disk` 값을 키우고 다시 실행하면 VM 을 켠 채로 디스크와 파일시스템을 그 크기로 늘립니다(줄이지는 못합니다). Ubuntu 의 multipathd 가 Longhorn 장치를 가로채지 않게 `sd` 장치를 multipath 에서 뺍니다.
 
 ```yaml
 k8s_clusters:
@@ -54,6 +54,7 @@ k8s_clusters:
       # ... control plane 항목
       - { name: k8s-hub-worker-1, pve: pve01, role: worker, vmid: 123, ip: [WORKER1_IP], cores: 12, memory: 24576, disk: 100G, longhorn_disk: 20 }
       - { name: k8s-hub-worker-2, pve: pve02, role: worker, vmid: 124, ip: [WORKER2_IP], cores: 8,  memory: 16384, disk: 60G,  longhorn_disk: 20 }
+      - { name: k8s-hub-worker-3, pve: pve03, role: worker, vmid: 126, ip: [WORKER3_IP], cores: 6,  memory: 12288, disk: 40G,  longhorn_disk: 100, longhorn_storage: nas, startup: "order=2" }
 ```
 {: file="group_vars/all.yml" }
 
@@ -67,16 +68,19 @@ ansible-playbook playbooks/k8s-cluster.yml -e k8s_cluster=hub
 
 {% raw %}
 ```yaml
+    # longhorn_storage 가 NFS(nas_vm_storage)면 qcow2(파일), lvmthin 이면 raw 입니다. HDD 위 NFS 디스크에는 ssd 표시를 붙이지 않습니다
     - name: Longhorn 디스크 (scsi1, 없을 때만. 켜진 VM 에 핫플러그)
       community.proxmox.proxmox_disk:
         vmid: "{{ item.vmid }}"
         disk: scsi1
-        storage: "{{ vm_disk_storage }}"
+        storage: "{{ lh_storage }}"
         size: "{{ item.longhorn_disk }}"
-        format: raw
+        format: "{{ 'qcow2' if lh_storage == nas_vm_storage.name else 'raw' }}"
         discard: "on"
-        ssd: true
+        ssd: "{{ lh_storage != nas_vm_storage.name }}"
         state: present
+      vars:
+        lh_storage: "{{ item.longhorn_storage | default(vm_disk_storage) }}"
       loop: "{{ active | selectattr('longhorn_disk', 'defined') }}"
       loop_control: { label: "{{ item.name }}" }
     - name: Longhorn 디스크 늘리기 (longhorn_disk 를 키웠을 때. 켠 채로 늘리고, 줄이지는 못함)
@@ -87,6 +91,7 @@ ansible-playbook playbooks/k8s-cluster.yml -e k8s_cluster=hub
         state: resized
       loop: "{{ active | selectattr('longhorn_disk', 'defined') }}"
       loop_control: { label: "{{ item.name }}" }
+    - name: VM 설정 맞추기 (코어·메모리·CPU 우선순위·IP·DNS·자동 시작·부팅 순서. 모듈 특성상 매번 changed 로 보고됨. 코어·메모리는 VM 을 껐다 켜야 적용)
 ```
 {: file="playbooks/k8s-cluster.yml (VM 만들기 플레이)" }
 

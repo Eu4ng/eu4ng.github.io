@@ -17,6 +17,9 @@ Proxmox 서버를 한 대 더 들여 클러스터로 묶습니다. 노드가 두
 6. 확인
 7. 노드 디스크 교체·재구축
 
+> 서버가 세 대가 되면 노드마다 한 표씩 세 표라, 한 대가 꺼져도 남은 두 대가 과반(3표 중 2표)입니다. 이때는 QDevice 없이 인벤토리의 `proxmox` 그룹에 세 번째 노드(템플릿 번호 `vm_template_vmid: 9002`)를 더하고 `pve_qdevice_host` 를 비워(`""`) 같은 플레이북을 다시 실행합니다. 플레이북은 모든 노드가 online 일 때 남은 QDevice 설정을 지웁니다.
+{: .prompt-info }
+
 ## 사전 준비
 
 > 이미 준비되어 있는 경우 건너뛰셔도 됩니다.
@@ -239,6 +242,9 @@ pve_controller_dir: /root/proxmox-ansible     # 각 노드의 저장소 사본. 
 pve_controller_key_source: "{{ groups.proxmox_primary[0] }}"   # GitHub 계정 키의 원본 파일이 있는 노드(/root/.ssh/id_ed25519)
 pve_controller_pip: [ansible-core==2.20.1, proxmoxer==2.2.0, requests]   # 실행 PC 와 같은 버전
 pve_controller_token_file: /root/.config/proxmox/token   # 노드별 API 토큰 root@pam!rebuild-<노드> 의 secret
+# 호스트 재부팅 스크립트(scripts/pve-reboot.sh)가 다른 게스트를 모두 내린 뒤 마지막에 내릴 NAS VM. 그 VM 이 있는 노드의 /etc/default/pve-reboot 에
+# LAST_VMIDS 로 들어갑니다. NAS VM 이 없으면 { vmid: "", pve: "" }
+xpenology: { vmid: [NAS_VMID], pve: [NAS_NODE] }
 github_ssh_host_key: "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"   # https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints
 ```
 {: file="group_vars/all.yml" }
@@ -331,6 +337,14 @@ ansible-playbook playbooks/pve-cluster.yml
         src: ../scripts/pve-reboot.sh
         dest: /usr/local/sbin/pve-reboot.sh
         mode: "0755"
+    # 다른 게스트를 모두 내린 뒤 마지막에 내릴 게스트(NAS). NFS 저장소에 디스크를 둔 VM 이 NAS 보다 먼저 내려가게 합니다
+    - name: 재부팅 스크립트 기본값 (마지막에 내릴 게스트)
+      ansible.builtin.copy:
+        dest: /etc/default/pve-reboot
+        mode: "0644"
+        content: |
+          # proxmox-ansible pve-cluster.yml (group_vars 의 xpenology.vmid). scripts/pve-reboot.sh 가 읽음
+          LAST_VMIDS="{{ xpenology.vmid if xpenology.pve == inventory_hostname else '' }}"
     # governor 를 먼저 바꿔야 EPP 를 고를 수 있습니다(performance governor 에서는 EPP 가 performance 하나뿐)
     - name: CPU 주파수 정책 (부팅 때 적용)
       ansible.builtin.copy:
@@ -682,7 +696,7 @@ ansible-playbook playbooks/pve-cluster.yml
 
 </details>
 
-플레이북은 재부팅 스크립트를 각 노드의 `/usr/local/sbin/pve-reboot.sh` 에 둡니다. 호스트를 재부팅하거나 하드웨어 작업으로 끌 때는 일반 `reboot`·`poweroff` 대신 이 스크립트를 씁니다. 게스트를 먼저 내리고, 내려가지 않는 게스트가 있으면 sysrq 로 즉시 재부팅하거나 끕니다.
+플레이북은 재부팅 스크립트를 각 노드의 `/usr/local/sbin/pve-reboot.sh` 에 둡니다. 호스트를 재부팅하거나 하드웨어 작업으로 끌 때는 일반 `reboot`·`poweroff` 대신 이 스크립트를 씁니다. 게스트를 두 차례로 먼저 내리고(나머지 게스트를 모두 내린 뒤 NAS VM 을 마지막에), 내려가지 않는 게스트가 있으면 sysrq 로 즉시 재부팅하거나 끕니다. NAS 를 먼저 내리면 그 NFS 저장소에 디스크를 둔 VM 이 I/O 에서 굳기 때문입니다. 마지막에 내릴 게스트는 플레이북이 `xpenology` 변수로 배포하는 `/etc/default/pve-reboot` 의 `LAST_VMIDS` 이고, 실행할 때 `--last <vmid>` 로 더할 수 있습니다. NAS 가 있는 노드를 재부팅하면 다른 노드에서 그 NFS 저장소를 쓰는 VM 도 그동안 디스크 I/O 가 멈추므로, 그런 VM 은 미리 내리거나 멈춤을 감수합니다.
 
 ```bash
 # 판정만 보기
@@ -712,6 +726,12 @@ journalctl -fu pve-reboot
 # sysrq o 는 커널이 전원 끄기를 지원할 때만 실제로 끕니다. 꺼졌는지는 접속 단절이 아니라 전력(스마트 플러그)이나 현장에서
 # 확인합니다.
 #
+# 게스트는 두 차례로 내립니다. 먼저 나머지 게스트를 모두 내리고, 그다음에 NAS(헤놀로지) 같은 마지막 게스트를 내립니다.
+# NAS 를 먼저 내리면 그 NFS 저장소(nas)에 디스크를 둔 VM 이 I/O 에서 굳습니다. 마지막 게스트는 --last 또는
+# /etc/default/pve-reboot 의 LAST_VMIDS(pve-cluster.yml 이 group_vars 의 xpenology.vmid 로 배포)로 정합니다.
+# pve03 을 재부팅하면 NAS 가 멈추므로 다른 노드에서 nas 저장소를 쓰는 VM(docker VM 206 등)도 그동안 디스크 I/O 가 멈춥니다.
+# pve03 의 worker-3 은 이 스크립트가 NAS 보다 먼저 내립니다. 다른 노드의 nas VM 은 미리 내리거나 멈춤을 감수합니다.
+#
 # 사용법(호스트에서 root). 실행 중에 이 호스트의 게스트(ssh 를 건너온 CT 포함)가 내려가 세션이 끊기므로 systemd-run 으로 띄웁니다:
 #   systemd-run --unit pve-reboot --collect /usr/local/sbin/pve-reboot.sh [옵션]; journalctl -fu pve-reboot
 # 옵션:
@@ -719,19 +739,24 @@ journalctl -fu pve-reboot
 #   --poweroff         재부팅 대신 전원을 끔(하드웨어 작업용). BMC 가 없으면 다시 켜는 것은 사람이 함
 #   --force-sysrq      판정과 무관하게 sysrq 로 재부팅(종료)
 #   --skip <vmid>      내리지 않을 게스트(여러 번 줄 수 있음). 그 게스트는 재부팅과 함께 끊깁니다
+#   --last <vmid>      다른 게스트를 모두 내린 뒤 마지막에 내릴 게스트(여러 번 줄 수 있음, LAST_VMIDS 에 더함)
 #   --vm-timeout <초>  VM 종료 대기(기본 180)
 #   --ct-timeout <초>  CT 종료 대기(기본 60)
 # 종료 코드: 0 재부팅·종료 시작(또는 dry-run), 1 쿼럼 없음 등으로 중단, 2 인자 오류
 set -uo pipefail
 
 DRY_RUN=0 FORCE_SYSRQ=0 POWEROFF=0 VM_TIMEOUT=180 CT_TIMEOUT=60
-declare -A SKIP=()
+declare -A SKIP=() LAST=()
+# 노드별 기본값(pve-cluster.yml 이 배포). LAST_VMIDS="205" 처럼 공백으로 나눕니다
+[ -r /etc/default/pve-reboot ] && . /etc/default/pve-reboot
+for id in ${LAST_VMIDS:-}; do LAST[$id]=1; done
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY_RUN=1 ;;
     --force-sysrq) FORCE_SYSRQ=1 ;;
     --poweroff) POWEROFF=1 ;;
     --skip) SKIP[$2]=1; shift ;;
+    --last) LAST[$2]=1; shift ;;
     --vm-timeout) VM_TIMEOUT=$2; shift ;;
     --ct-timeout) CT_TIMEOUT=$2; shift ;;
     -h|--help) sed -n '2,/^set -uo/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
@@ -751,21 +776,33 @@ if [ -e /etc/pve/corosync.conf ]; then
   log "쿼럼 정상"
 fi
 
-# 2) 이 노드에서 켜져 있는 게스트를 동시에 내린다
+# 2) 이 노드에서 켜져 있는 게스트를 내린다. 1차는 LAST 가 아닌 게스트를 동시에, 2차는 LAST 게스트를
 running_vms() { qm list 2>/dev/null | awk 'NR>1 && $3=="running" {print $1}'; }
 running_cts() { pct list 2>/dev/null | awk 'NR>1 && $2=="running" {print $1}'; }
-pids=()
-for id in $(running_vms); do
-  [ -n "${SKIP[$id]:-}" ] && { log "VM $id 건너뜀(--skip)"; continue; }
-  log "VM $id 종료(최대 ${VM_TIMEOUT}초)"
-  if [ "$DRY_RUN" = 0 ]; then qm shutdown "$id" --timeout "$VM_TIMEOUT" >/dev/null 2>&1 & pids+=($!); fi
-done
-for id in $(running_cts); do
-  [ -n "${SKIP[$id]:-}" ] && { log "CT $id 건너뜀(--skip)"; continue; }
-  log "CT $id 종료(최대 ${CT_TIMEOUT}초)"
-  if [ "$DRY_RUN" = 0 ]; then pct shutdown "$id" --timeout "$CT_TIMEOUT" >/dev/null 2>&1 & pids+=($!); fi
-done
-[ ${#pids[@]} -gt 0 ] && wait "${pids[@]}"
+shutdown_phase() {   # $1: first(LAST 제외) | last(LAST 만)
+  local id pids=()
+  for id in $(running_vms); do
+    if [ "$1" = first ]; then [ -n "${LAST[$id]:-}" ] && continue; else [ -z "${LAST[$id]:-}" ] && continue; fi
+    [ -n "${SKIP[$id]:-}" ] && { log "VM $id 건너뜀(--skip)"; continue; }
+    log "VM $id 종료(최대 ${VM_TIMEOUT}초)"
+    if [ "$DRY_RUN" = 0 ]; then qm shutdown "$id" --timeout "$VM_TIMEOUT" >/dev/null 2>&1 & pids+=($!); fi
+  done
+  for id in $(running_cts); do
+    if [ "$1" = first ]; then [ -n "${LAST[$id]:-}" ] && continue; else [ -z "${LAST[$id]:-}" ] && continue; fi
+    [ -n "${SKIP[$id]:-}" ] && { log "CT $id 건너뜀(--skip)"; continue; }
+    log "CT $id 종료(최대 ${CT_TIMEOUT}초)"
+    if [ "$DRY_RUN" = 0 ]; then pct shutdown "$id" --timeout "$CT_TIMEOUT" >/dev/null 2>&1 & pids+=($!); fi
+  done
+  [ ${#pids[@]} -gt 0 ] && wait "${pids[@]}"
+  return 0
+}
+last_ids="${!LAST[*]}"
+log "1차: 마지막 게스트(${last_ids:-없음})를 뺀 게스트 종료"
+shutdown_phase first
+if [ ${#LAST[@]} -gt 0 ]; then
+  log "2차: 마지막 게스트 종료"
+  shutdown_phase last
+fi
 
 # 3) 멈춤 판정: 아직 켜진 게스트(--skip 제외), 또는 10초 간격 두 번 모두 D 상태인 작업
 hung=()
@@ -943,9 +980,9 @@ QDevice 가 멈췄을 때도 확인해 둡니다. Portainer 에서 qnetd 서비�
 
 메인이 아닌 노드(pve02)의 OS 디스크를 바꾸거나 기계가 죽어 Proxmox 를 다시 설치했을 때, 남은 노드(pve01)에서 스크립트 하나로 원래 이름·IP·게스트·쿠버네티스 노드로 되돌립니다. 메인 노드는 API 주소와 공유 저장소 원본이 고정이라 이 절차의 범위 밖입니다.
 
-시작하기 전에 원격 NAS 의 qnetd 와 etcd 세 번째 투표자([쿠버네티스 etcd 세 번째 투표자를 원격 NAS 컨테이너로 붙이는 방법](/posts/55/))가 살아 있어야 합니다. 노드 하나를 클러스터에서 빼는 순간 남은 표는 이 둘이 채우므로, 없으면 Proxmox 와 쿠버네티스 클러스터가 과반을 잃습니다.
+시작하려면 남은 노드가 Proxmox 과반이고 남은 etcd 멤버가 과반이어야 합니다. 노드 세 대에 control plane 을 하나씩 둔 구성(etcd 3멤버)이면 한 대를 다시 만들 때 남은 두 노드가 Proxmox 과반(3표 중 2표)이고 남은 etcd 두 멤버가 과반(3 중 2)이므로, `pvecm expected` 도 etcd 멤버를 미리 빼는 것도 필요 없습니다. 옛 control plane 의 etcd 멤버는 정리 단계(`node-rebuild.yml`)가 지웁니다. 두 노드 구성이면 원격 NAS 의 qnetd 와 etcd 세 번째 투표자([쿠버네티스 etcd 세 번째 투표자를 원격 NAS 컨테이너로 붙이는 방법](/posts/55/))가 그 표를 채우므로 둘이 살아 있어야 합니다.
 
-둘이 없는 구성에서 계획된 교체라면, 옛 노드를 끄기 전에 그 노드에 있는 control plane 의 etcd 멤버를 빼 두고(남은 멤버 하나로 과반), 끈 뒤 남은 노드에서 `pvecm expected 1` 로 과반을 만든 다음 시작합니다. 합류하면 표가 2 로 돌아오므로 `expected` 는 따로 되돌리지 않습니다. 멤버를 빼지 못하고 껐다면 두 쿠버네티스 API 가 모두 멈춥니다. 남은 control plane 마다 `/etc/kubernetes/manifests/etcd.yaml` 을 밖으로 옮겨 etcd 를 멈추고, `/var/lib/etcd` 를 복사해 둔 뒤, etcd 명령에 `--force-new-cluster` 한 줄을 넣은 매니페스트로 띄워 멤버가 자기 하나이고 healthy 인지 보고, 원래 매니페스트로 되돌립니다. 그동안 워커의 파드는 계속 돕니다. `pve_qdevice_host` 를 비우면 `pve-cluster.yml` 은 QDevice 를 두지 않고, 남은 QDevice 설정은 모든 노드가 online 일 때 지웁니다.
+두 노드 구성에서 qnetd 와 투표자가 없을 때 계획된 교체라면, 옛 노드를 끄기 전에 그 노드에 있는 control plane 의 etcd 멤버를 빼 두고(남은 멤버 하나로 과반), 끈 뒤 남은 노드에서 `pvecm expected 1` 로 과반을 만든 다음 시작합니다. 합류하면 표가 2 로 돌아오므로 `expected` 는 따로 되돌리지 않습니다. 멤버를 빼지 못하고 껐거나, 세 노드 구성에서 두 노드가 함께 죽어 etcd 과반을 잃었다면 두 쿠버네티스 API 가 모두 멈춥니다. 남은 노드에서 `pvecm expected 1` 로 Proxmox 과반을 만들고, 남은 control plane 마다 `/etc/kubernetes/manifests/etcd.yaml` 을 밖으로 옮겨 etcd 를 멈추고, `/var/lib/etcd` 를 복사해 둔 뒤, etcd 명령에 `--force-new-cluster` 한 줄을 넣은 매니페스트로 띄워 멤버가 자기 하나이고 healthy 인지 보고, 원래 매니페스트로 되돌립니다. 그동안 워커의 파드는 계속 돕니다. `pve_qdevice_host` 를 비우면 `pve-cluster.yml` 은 QDevice 를 두지 않고, 남은 QDevice 설정은 모든 노드가 online 일 때 지웁니다.
 
 재구축에 쓰는 변수를 `group_vars/all.yml` 에 더합니다. `ct_ssh_pubkeys` 에는 [내부망 DNS 글](/posts/41/)의 실행 PC 키와 함께, 노드가 저장소를 받고 게스트에 접속할 GitHub 계정 공개키를 넣습니다. `pve-controller.yml` 은 주석이 `eu4ng@server` 로 끝나는 줄을 이 키로 찾으므로, 키 주석을 바꾸면 플레이북의 검색어도 같이 바꿉니다.
 
@@ -958,11 +995,10 @@ ct_ssh_pubkeys:                               # CT root·VM 접속 계정에 넣
 node_rebuild_recreate_pvcs:
   daejeon: [timescaledb/pgdata-timescaledb-0, timescaledb/pgdata-timescaledb-1]
 node_rebuild_patroni: { namespace: timescaledb, container: timescaledb, config: /etc/patroni/patroni.yml }   # 위 PVC 의 Patroni(멤버 이름 = 파드 이름)
-k8s_clusters:                                 # 기존 클러스터 항목에 한 줄씩 더합니다
-  hub:
-    etcd_witness_peer: "{{ pve_qdevice_host }}:2380"    # 원격 etcd 투표자 peer 주소. 재구축 뒤 경로 확인에 씀
-  daejeon:
-    etcd_witness_peer: "{{ pve_qdevice_host }}:12380"
+# 원격 etcd 투표자를 붙인 클러스터만: 기존 클러스터 항목에 투표자 peer 주소를 더하면 재구축 뒤 그 경로도 확인합니다
+# k8s_clusters:
+#   hub:
+#     etcd_witness_peer: "[NAS_TAILSCALE_IP]:2380"
 ```
 {: file="group_vars/all.yml" }
 {% endraw %}

@@ -324,7 +324,7 @@ spec:
       affinity:                            # Matter 서버·OTBR 에 127.0.0.1 로 붙으므로 그 파드들과 같은 노드에 둡니다(그쪽이 HA 를 따라옴)
         podAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
-            # 메인 서버(pve01) 선호(Kyverno prefer-primary-host, essential 100)보다 낮게 둡니다. 같으면 HA 가 Matter 가 남은 pve02 에
+            # 상시 서비스 서버(pve03) 선호(Kyverno prefer-role-host, essential 100)보다 낮게 둡니다. 같으면 HA 가 Matter 가 남은 다른 서버에
             # 붙어 돌아오지 못합니다. HA 를 옮긴 뒤에는 Matter·OTBR 을 바로 재시작해 따라오게 합니다(필수 동거라 HA 노드에 뜸)
             - weight: 50
               podAffinityTerm:
@@ -611,8 +611,8 @@ OTBR_URL=http://127.0.0.1:8081                      # 같은 노드의 hostNetwo
 # 로그인 실패 차단도 Cloudflare 주소가 아니라 그 접속자에게 겁니다.
 CLOUDFLARE_IPV4="173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22"
 # HA 가 보는 요청 출처(프록시) 주소와 Cloudflare. 비우면 HTTP 설정 생략. 엣지 HA 를 서비스 VIP(keepalived, externalIPs)로 받으면 요청이
-# VIP 를 가진 엣지 control plane 주소로 SNAT 되어 오므로 그 주소들을, hostNetwork 노드 주소로 직접 받으면 허브 노드 주소들을 적습니다.
-TRUSTED_PROXIES="[PROXY_IP_1] [PROXY_IP_2] $CLOUDFLARE_IPV4"
+# VIP 를 가진 엣지 control plane 주소로 SNAT 되어 오므로 control plane 노드 주소 모두를, hostNetwork 노드 주소로 직접 받으면 허브 노드 주소 모두를 적습니다.
+TRUSTED_PROXIES="[PROXY_IP_1] [PROXY_IP_2] [PROXY_IP_3] $CLOUDFLARE_IPV4"
 LOGIN_ATTEMPTS=5                                    # 로그인 실패가 이 횟수면 그 IP 를 차단
 HA_TOKEN_SECRET=home-assistant/ha-api-token         # 토큰을 담은 Secret (네임스페이스/이름, 키 token)
 KUBECTL="kubectl --kubeconfig $HOME/k8s-[SITE].yaml"   # 이 HA 가 있는 클러스터에 접근하는 kubectl
@@ -854,7 +854,7 @@ log "완료. 상태가 loaded 가 아니면 HA 로그를 확인합니다."
 
 </details>
 
-스크립트 위쪽의 `TRUSTED_PROXIES` 에 HA 가 요청의 출처로 보는 프록시 주소를 넣습니다. 5단계의 허브 Traefik 과 지역 Traefik 은 모두 서비스 VIP 로 HA 에 붙고, 서비스 VIP 를 거친 요청은 VIP 를 가진 엣지 control plane 의 주소로 바뀌어([SNAT](/posts/59/)) HA 에 도착하므로 `[PROXY_IP_1] [PROXY_IP_2]` 자리에 엣지 control plane 노드 IP 들을 적습니다. VIP 는 control plane 사이를 옮겨 다니므로 모든 control plane 을 적습니다. 밖에서 오는 요청은 그 앞에 Cloudflare 를 거치므로, 기본값처럼 스크립트의 Cloudflare 대역(`$CLOUDFLARE_IPV4`)도 남겨 둡니다. 빼면 HA 가 Cloudflare 주소를 접속자로 보고 로그인 실패 차단도 그 주소에 겁니다. `KUBECTL` 에는 엣지 kubeconfig(`$HOME/k8s-[SITE].yaml`)를 적습니다.
+스크립트 위쪽의 `TRUSTED_PROXIES` 에 HA 가 요청의 출처로 보는 프록시 주소를 넣습니다. 5단계의 허브 Traefik 과 지역 Traefik 은 모두 서비스 VIP 로 HA 에 붙고, 서비스 VIP 를 거친 요청은 VIP 를 가진 엣지 control plane 의 주소로 바뀌어([SNAT](/posts/59/)) HA 에 도착하므로 `[PROXY_IP_1] [PROXY_IP_2] [PROXY_IP_3]` 자리에 엣지 control plane 노드 주소를 모두 적습니다(control plane 이 세 대면 세 개). VIP 는 control plane 사이를 옮겨 다니므로 하나라도 빠지면 그 노드가 VIP 를 가진 동안 HA 가 프록시를 접속자로 봅니다. 밖에서 오는 요청은 그 앞에 Cloudflare 를 거치므로, 기본값처럼 스크립트의 Cloudflare 대역(`$CLOUDFLARE_IPV4`)도 남겨 둡니다. 빼면 HA 가 Cloudflare 주소를 접속자로 보고 로그인 실패 차단도 그 주소에 겁니다. `KUBECTL` 에는 엣지 kubeconfig(`$HOME/k8s-[SITE].yaml`)를 적습니다.
 
 ```bash
 # 실행. MQTT 비밀번호(homeassistant 계정)는 실행 중 입력합니다

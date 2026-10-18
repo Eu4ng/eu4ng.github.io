@@ -22,12 +22,13 @@ local=/{{ name }}.{{ lan_dns_domain }}/
 address=/{{ name }}.{{ lan_dns_domain }}/{{ c.service_vip }}
 {% endfor %}
 {% endfor %}
-{# 호스트 이름(<이름>.<도메인>): inventory 의 모든 호스트(Proxmox 노드, DNS CT, 시험 VM …)와 k8s_clusters 의 노드.
+{# 호스트 이름(<이름>.<도메인>): inventory 의 모든 호스트(Proxmox 노드, DNS CT, 시험 VM …), lan_dns_hosts, k8s_clusters 의 노드.
    노드를 바꾸면 k8s-cluster.yml 끝에서 이 설정을 다시 만들므로, 스크립트·문서는 IP 대신 이 이름을 씁니다. #}
 {% set hosts = {} %}
 {% for h in groups['all'] if hostvars[h].ansible_host is defined %}
 {% set _ = hosts.update({h: hostvars[h].ansible_host}) %}
 {% endfor %}
+{% set _ = hosts.update(lan_dns_hosts) %}
 {% for c in k8s_clusters.values() %}
 {% for n in c.nodes %}
 {% set _ = hosts.update({n.name: n.ip}) %}

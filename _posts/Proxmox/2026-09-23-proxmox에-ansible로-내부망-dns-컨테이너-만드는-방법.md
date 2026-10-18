@@ -142,6 +142,7 @@ lan_dns_instances:
 lan_dns_template: debian-13-standard_13.6-1_amd64.tar.zst   # pveam available --section system
 lan_dns_domain: [DOMAIN]
 lan_dns_names: [argocd, grafana, headlamp, proxmox, auth, ha, z2m]   # 허브 서비스 이름(lan_dns_targets 로 답함). 지역 서비스 이름은 k8s_clusters.<지역>.lan_dns_names
+lan_dns_hosts: {}                             # Traefik 을 거치지 않고 장치로 바로 가는 이름 → 주소(SFTP 처럼 HTTP 가 아닌 접속). 예: { drive: [NAS_IP] }
 lan_dns_targets: ["{{ k8s_clusters.hub.vip }}"]            # 허브 control plane VIP. VIP 를 가진 control plane 의 Traefik(hostPort 443)이 받습니다
 lan_dns_upstream: [1.1.1.1, 1.0.0.1]                        # 그 외 이름을 넘길 DNS
 lan_dns_client_pct_vmids: [201]               # inventory 밖에서 내부망 DNS(호스트·역할 이름)를 쓸 CT(메인 서버에 있는 CT). 없으면 []
@@ -161,6 +162,7 @@ dnsmasq 설정 템플릿이 답하는 이름은 다음과 같습니다. 그 밖�
 | `lan_dns_names` 의 허브 서비스(`argocd` 등) | 허브 VIP(`lan_dns_targets`) |
 | `k8s_clusters.<지역>.lan_dns_names` 의 지역 서비스(`ha-dj` 등) | 그 지역의 서비스 VIP(`service_vip`) |
 | inventory 의 모든 호스트와 `k8s_clusters` 의 노드(`pve01`, `lan-dns-2`, `k8s-hub-cp-1` 등) | 그 호스트의 주소 |
+| `lan_dns_hosts` 의 이름(`drive` 등) | 적어 둔 장치 주소 |
 | `k8s-<dns_name>`(`k8s-hub` 등) | 그 클러스터의 API VIP |
 | `kubectl-<dns_name>`(`kubectl-hub` 등) | 그 클러스터의 첫 control plane(`retire` 가 붙은 노드 제외) |
 | `iot-<dns_name>`(`iot-dj` 등) | 그 클러스터의 서비스 VIP(Service `externalIPs`) |
@@ -193,12 +195,13 @@ local=/{{ name }}.{{ lan_dns_domain }}/
 address=/{{ name }}.{{ lan_dns_domain }}/{{ c.service_vip }}
 {% endfor %}
 {% endfor %}
-{# 호스트 이름(<이름>.<도메인>): inventory 의 모든 호스트(Proxmox 노드, DNS CT, 시험 VM …)와 k8s_clusters 의 노드.
+{# 호스트 이름(<이름>.<도메인>): inventory 의 모든 호스트(Proxmox 노드, DNS CT, 시험 VM …), lan_dns_hosts, k8s_clusters 의 노드.
    노드를 바꾸면 k8s-cluster.yml 끝에서 이 설정을 다시 만들므로, 스크립트·문서는 IP 대신 이 이름을 씁니다. #}
 {% set hosts = {} %}
 {% for h in groups['all'] if hostvars[h].ansible_host is defined %}
 {% set _ = hosts.update({h: hostvars[h].ansible_host}) %}
 {% endfor %}
+{% set _ = hosts.update(lan_dns_hosts) %}
 {% for c in k8s_clusters.values() %}
 {% for n in c.nodes %}
 {% set _ = hosts.update({n.name: n.ip}) %}

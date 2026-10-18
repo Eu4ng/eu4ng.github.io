@@ -26,7 +26,7 @@ ipTIME C500GS IP 카메라를 공유기 방화벽으로 외부 인터넷과 완�
 | 항목 | 버전 / 사양 |
 | :--- | :--- |
 | IP 카메라 | ipTIME C500GS (5MP, H.265, Wi-Fi) |
-| 엣지 Kubernetes | `v1.37` (kubeadm, k8s-dj-worker-1: 6 vCPU / 8GiB, k8s-dj-worker-2: 4 vCPU / 8GiB) |
+| 엣지 Kubernetes | `v1.37` (kubeadm, k8s-dj-worker-1: 6 vCPU / 8GiB, k8s-dj-worker-2: 4 vCPU / 8GiB, k8s-dj-worker-3: 6 vCPU / 12GiB) |
 | 스트리밍 중계기 | `alexxit/go2rtc:latest` |
 | 수집기 / 딥러닝 | `ultralytics/ultralytics:latest-cpu` (YOLOv8n + ByteTrack, PyAV) |
 | 시계열 DB | TimescaleDB `2.30.1-pg17` |
@@ -247,7 +247,7 @@ NVR 은 상시 무중단 녹화를 담당하는 **녹화 파드(`nvr`)**와, 알
    - 연결 상태는 `nvr/bedroom2-camera/availability` 에 유지 메시지(`{"state": "online"}`)로 냅니다. 발행을 시작하면 `online`, 카메라 프레임이 60초 동안 없거나 수집기가 멈추면 `offline` 이고, 수집기가 끊기면 브로커가 Last Will 로 `offline` 을 냅니다. HA 센서는 이 토픽을 따라 `사용할 수 없음` 이 되고, DB 에는 속성 `availability` 행으로 남습니다.
    - 칸은 동시에 감지된 최대 인원만큼 생기고, 사람이 없는 칸의 **감지** 센서는 `감지되지 않음` 이 됩니다.
    - 실시간 감지 당시의 판단 결과(박스, 인원수)를 사후에 직접 눈으로 비교·검증할 수 있도록, 추적한 프레임마다 초록 박스를 그린 **실시간 측정 영상**(`_live`)을 날짜마다 MKV 로 씁니다. 보조 스트림 해상도를 그대로 쓰므로 초당 2ms 내외로 가볍게 저장됩니다.
-   - `podAffinity` 로 녹화 파드와 동일한 워커 노드에 배치되어 `/mnt/nvr` 볼륨을 공유하며, 두 파드 모두 `priorityClassName: essential` 과 30초 축출 toleration 이 적용되어 pve01 다운 시 pve02 로 함께 자동 이전됩니다.
+   - `podAffinity` 로 녹화 파드와 동일한 워커 노드에 배치되어 `/mnt/nvr` 볼륨을 공유하며, 두 파드 모두 `priorityClassName: essential` 과 30초 축출 toleration 이 적용되어 평소 있는 서버(상시 서비스를 맡는 pve03)가 죽으면 다른 서버의 워커로 함께 자동 이전됩니다.
 
 GitOps 저장소(`k8s-gitops`)의 `iot/edge/nvr/`에 베이스 매니페스트와 스크립트를 두고, `iot/clusters/daejeon/nvr/`에 오버레이를 둡니다.
 
