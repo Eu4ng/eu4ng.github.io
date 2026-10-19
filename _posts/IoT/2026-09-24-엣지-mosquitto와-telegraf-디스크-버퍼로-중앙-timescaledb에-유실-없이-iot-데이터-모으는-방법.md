@@ -231,7 +231,7 @@ allow_anonymous false
 password_file /mosquitto/config/passwd
 persistence true                       # 유지(retained) 메시지와 구독자 세션을 재시작 뒤에도 보존합니다
 persistence_location /mosquitto/data/
-autosave_interval 300
+autosave_interval 30                   # 큐·세션을 30초마다 디스크에 씁니다. 정상 종료가 아니면(노드 장애) 마지막 저장 뒤의 것만 잃습니다. 기본 1800
 max_queued_messages 100000             # 구독자(Telegraf)가 잠시 없을 때 계정별로 보관할 QoS1 메시지 수. 기본 1000 은 몇 분이면 찹니다
 log_dest stdout
 log_type error
