@@ -62,14 +62,14 @@ unset TUNNEL_SERVICE_TOKEN_ID TUNNEL_SERVICE_TOKEN_SECRET
 
 ## 2. 백업 이미지 만들기
 
-postgres 이미지에 restic, cloudflared, OpenSSH 클라이언트를 더한 이미지 하나로 두 클러스터가 모두 백업합니다. postgres 이미지를 바탕으로 한 것은 허브에서 TimescaleDB 를 서버와 같은 메이저 버전의 `pg_dump` 로 받기 위해서입니다. 스크립트는 환경 변수만 보고, 볼륨 디렉터리는 파일 스냅샷으로, DB 는 `pg_dump` 출력을 파일 없이 바로 스냅샷으로 올립니다. 보존 개수도 환경 변수로 받아, 매시간 도는 허브 DB 백업은 `KEEP_HOURLY` 로 시간별 스냅샷을 더 남깁니다.
+postgres 이미지에 restic, cloudflared, OpenSSH 클라이언트를 더한 이미지 하나로 두 클러스터가 모두 백업합니다. postgres 이미지를 바탕으로 한 것은 허브에서 TimescaleDB 를 서버와 같은 메이저 버전의 `pg_dump` 로 받기 위해서입니다. 스크립트는 환경 변수만 보고, 볼륨 디렉터리는 파일 스냅샷으로, DB 는 `pg_dump` 출력을 파일 없이 바로 스냅샷으로 올립니다. 저장소는 restic 이 "없다"(종료 코드 10)고 할 때만 만들어, 비밀번호가 틀리거나 연결이 끊긴 날 엉뚱한 저장소를 새로 만들지 않습니다. `pg_dump` 는 restic 이 직접 띄우게 해(`--stdin-from-command`) 덤프가 실패하면 스냅샷을 남기지 않고 Job 이 실패합니다. 죽은 Job 이 남긴 오래된 잠금은 시작할 때 풀고, 앞 Job 이 늦게 끝나 잠금이 겹치면 20분까지 기다립니다. 보존 개수도 환경 변수로 받아, 매시간 도는 허브 DB 백업은 `KEEP_HOURLY` 로 시간별 스냅샷을 더 남깁니다.
 
 ```dockerfile
 # 쿠버네티스 상태 백업 이미지. restic 으로 암호화·중복 제거된 스냅샷을 원격 NAS(SFTP)에 올립니다.
 # SFTP 는 Cloudflare Tunnel(cloudflared access ssh)을 거치므로 NAS 의 공인 IP·포트를 열지 않습니다.
 # postgres 이미지를 바탕으로 해 TimescaleDB 를 pg_dump 로 받을 수 있습니다(서버와 같은 메이저 17).
 # 태그는 BACKUP_VERSION 을 씁니다 (.github/workflows/build-backup.yml).
-ARG BACKUP_VERSION=2
+ARG BACKUP_VERSION=4
 FROM postgres:17.11-alpine3.24
 ARG RESTIC_VERSION=0.19.1
 ARG CLOUDFLARED_VERSION=2026.9.1
@@ -101,13 +101,19 @@ SFTP_CMD="ssh -i /secrets/ssh/id_ed25519 -o UserKnownHostsFile=/secrets/ssh/know
 SFTP_CMD="$SFTP_CMD -o ServerAliveInterval=60 -o ServerAliveCountMax=240"
 SFTP_CMD="$SFTP_CMD -o 'ProxyCommand=cloudflared access ssh --hostname %h' $user_host -s sftp"
 
-r() { restic -o sftp.command="$SFTP_CMD" "$@"; }
+# 여러 Job 이 한 저장소를 쓰므로, 앞 Job 이 늦게 끝나 잠금이 겹치면 실패하지 않고 기다립니다.
+r() { restic --retry-lock 20m -o sftp.command="$SFTP_CMD" "$@"; }
 
 echo "== 저장소 확인: $RESTIC_REPOSITORY"
-if ! r cat config >/dev/null 2>&1; then
-  echo "저장소가 없어 만듭니다"
-  r init
-fi
+# 종료 코드 10 은 저장소가 없다는 뜻입니다(restic 0.17+). 비밀번호가 틀리거나 연결이 안 될 때 init 하지 않습니다.
+rc=0; r cat config >/dev/null || rc=$?
+case $rc in
+  0) ;;
+  10) echo "저장소가 없어 만듭니다"; r init ;;
+  *) echo "저장소 확인 실패(종료 코드 $rc)" >&2; exit "$rc" ;;
+esac
+# 죽은 작업이 남긴 오래된 잠금만 지웁니다(살아 있는 잠금은 두고).
+r unlock
 
 if [ -n "${BACKUP_PATHS:-}" ]; then
   echo "== 파일 백업: $BACKUP_PATHS"
@@ -117,7 +123,8 @@ fi
 
 if [ -n "${PGHOST:-}" ]; then
   echo "== DB 백업: $PGDATABASE@$PGHOST"
-  pg_dump -Fc | r backup --host "$RESTIC_HOST" --tag db --stdin --stdin-filename "$PGDATABASE.dump"
+  # pg_dump 가 실패하면 restic 이 스냅샷을 남기지 않고 실패로 끝납니다(파이프는 그 실패를 가렸습니다).
+  r backup --host "$RESTIC_HOST" --tag db --stdin-filename "$PGDATABASE.dump" --stdin-from-command -- pg_dump -Fc
 fi
 
 echo "== 보존 정책"
@@ -371,7 +378,7 @@ spec:
                   topologyKey: kubernetes.io/hostname
           containers:
             - name: backup
-              image: ghcr.io/eu4ng/backup:2
+              image: ghcr.io/eu4ng/backup:4
               envFrom: [{ secretRef: { name: backup-credentials } }]   # RESTIC_REPOSITORY, RESTIC_PASSWORD, TUNNEL_SERVICE_TOKEN_*
               env:
                 - { name: RESTIC_HOST, value: edge }
@@ -414,7 +421,7 @@ spec:
                   topologyKey: kubernetes.io/hostname
           containers:
             - name: backup
-              image: ghcr.io/eu4ng/backup:2
+              image: ghcr.io/eu4ng/backup:4
               envFrom: [{ secretRef: { name: backup-credentials } }]   # RESTIC_REPOSITORY, RESTIC_PASSWORD, TUNNEL_SERVICE_TOKEN_*
               env:
                 - { name: RESTIC_HOST, value: edge }
@@ -457,7 +464,7 @@ spec:
                   topologyKey: kubernetes.io/hostname
           containers:
             - name: backup
-              image: ghcr.io/eu4ng/backup:2
+              image: ghcr.io/eu4ng/backup:4
               envFrom: [{ secretRef: { name: backup-credentials } }]   # RESTIC_REPOSITORY, RESTIC_PASSWORD, TUNNEL_SERVICE_TOKEN_*
               env:
                 - { name: RESTIC_HOST, value: edge }
@@ -500,7 +507,7 @@ spec:
                   topologyKey: kubernetes.io/hostname
           containers:
             - name: backup
-              image: ghcr.io/eu4ng/backup:2
+              image: ghcr.io/eu4ng/backup:4
               envFrom: [{ secretRef: { name: backup-credentials } }]   # RESTIC_REPOSITORY, RESTIC_PASSWORD, TUNNEL_SERVICE_TOKEN_*
               env:
                 - { name: RESTIC_HOST, value: edge }
@@ -543,7 +550,7 @@ spec:
                   topologyKey: kubernetes.io/hostname
           containers:
             - name: backup
-              image: ghcr.io/eu4ng/backup:2
+              image: ghcr.io/eu4ng/backup:4
               envFrom: [{ secretRef: { name: backup-credentials } }]   # RESTIC_REPOSITORY, RESTIC_PASSWORD, TUNNEL_SERVICE_TOKEN_*
               env:
                 - { name: RESTIC_HOST, value: edge }
@@ -586,7 +593,7 @@ spec:
                   topologyKey: kubernetes.io/hostname
           containers:
             - name: backup
-              image: ghcr.io/eu4ng/backup:2
+              image: ghcr.io/eu4ng/backup:4
               envFrom: [{ secretRef: { name: backup-credentials } }]   # RESTIC_REPOSITORY, RESTIC_PASSWORD, TUNNEL_SERVICE_TOKEN_*
               env:
                 - { name: RESTIC_HOST, value: edge }
@@ -631,7 +638,7 @@ spec:
           securityContext: { fsGroup: 70 }         # 이미지 사용자(70)가 ssh 키 Secret 을 읽도록 그룹을 줍니다
           containers:
             - name: backup
-              image: ghcr.io/eu4ng/backup:2
+              image: ghcr.io/eu4ng/backup:4
               envFrom: [{ secretRef: { name: backup-credentials } }]   # RESTIC_*, TUNNEL_SERVICE_TOKEN_*, PGPASSWORD
               env:
                 - { name: RESTIC_HOST, value: edge }
@@ -694,7 +701,7 @@ spec:
           securityContext: { fsGroup: 70 }         # 이미지 사용자(70)가 ssh 키 Secret 을 읽도록 그룹을 줍니다
           containers:
             - name: backup
-              image: ghcr.io/eu4ng/backup:2
+              image: ghcr.io/eu4ng/backup:4
               envFrom:
                 - secretRef: { name: backup-credentials }   # RESTIC_*, TUNNEL_SERVICE_TOKEN_*, PGPASSWORD
               env:
@@ -747,7 +754,7 @@ spec:
                   topologyKey: kubernetes.io/hostname
           containers:
             - name: backup
-              image: ghcr.io/eu4ng/backup:2
+              image: ghcr.io/eu4ng/backup:4
               envFrom: [{ secretRef: { name: backup-credentials } }]
               env:
                 - { name: RESTIC_HOST, value: hub }
@@ -790,7 +797,7 @@ spec:
                   topologyKey: kubernetes.io/hostname
           containers:
             - name: backup
-              image: ghcr.io/eu4ng/backup:2
+              image: ghcr.io/eu4ng/backup:4
               envFrom: [{ secretRef: { name: backup-credentials } }]
               env:
                 - { name: RESTIC_HOST, value: hub }
@@ -869,7 +876,7 @@ spec:
         - { name: POSTGRES_PASSWORD, value: drill }
         - { name: POSTGRES_DB, value: postgres }
     - name: drill
-      image: ghcr.io/eu4ng/backup:2
+      image: ghcr.io/eu4ng/backup:4
       securityContext: { runAsUser: 0 }          # 0400 으로 마운트된 SSH 키를 읽으려면 root 여야 합니다
       envFrom: [{ secretRef: { name: backup-credentials } }]
       env:
