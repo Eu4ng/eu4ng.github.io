@@ -40,10 +40,10 @@ permalink: /posts/41/
 
 ## 1. Proxmox API 토큰 만들기
 
-Ansible 은 Proxmox API 로 컨테이너를 만듭니다. 메인 서버에서 토큰을 발급하고 값을 실행 PC 의 파일에 둡니다. 클러스터는 사용자와 토큰을 모든 노드가 같이 쓰므로 한 번만 만듭니다. 값은 발급 때 한 번만 보입니다.
+Ansible 은 Proxmox API 로 컨테이너를 만듭니다. Proxmox 노드 한 대에서 토큰을 발급하고 값을 실행 PC 의 파일에 둡니다. 클러스터는 사용자와 토큰을 모든 노드가 같이 쓰므로 한 번만 만듭니다. 값은 발급 때 한 번만 보입니다.
 
 ```bash
-# 메인 서버에서 토큰 발급 (privsep 0: root 와 같은 권한)
+# 노드 한 대에서 토큰 발급 (privsep 0: root 와 같은 권한)
 ssh root@[PROXMOX_IP] 'pveum user token add root@pam ansible --privsep 0'
 
 # 실행 PC 에 값 저장 (저장소에 넣지 않습니다)
@@ -101,10 +101,6 @@ all:
           ansible_host: [PVE02_IP]
           ansible_user: root
           vm_template_vmid: 9001  # VMID 는 클러스터 전체에서 하나라 노드마다 템플릿 번호가 다릅니다
-      children:
-        proxmox_primary:          # 메인 서버. 클러스터를 만들고, 기존 CT·VM 이 있는 노드
-          hosts:
-            pve01:
     lan_dns:                      # playbooks/lan-dns.yml 이 만드는 CT (Proxmox 노드마다 하나, group_vars 의 lan_dns_instances)
       hosts:
         lan-dns:
@@ -116,7 +112,7 @@ all:
 ```
 {: file="inventory.yml" }
 
-- **확인:** `ansible-inventory --graph` 에 `@proxmox` 아래 `pve01`, `pve02`(와 `@proxmox_primary`), `@lan_dns` 아래 `lan-dns`, `lan-dns-2` 가 보입니다.
+- **확인:** `ansible-inventory --graph` 에 `@proxmox` 아래 `pve01`, `pve02`, `@lan_dns` 아래 `lan-dns`, `lan-dns-2` 가 보입니다.
 
 ## 3. 변수 채우기
 
@@ -124,8 +120,11 @@ all:
 
 {% raw %}
 ```yaml
-proxmox_api_host: [PROXMOX_IP]
-proxmox_node: "{{ groups.proxmox_primary[0] }}"   # CT·VM 을 만드는 노드(pvesh get /nodes 의 이름). inventory 의 proxmox_primary
+# 기준 노드: 클러스터 전체 작업을 하는 노드(playbooks/main-node.yml 이 살아 있는 과반 쪽 노드로 고름). 그 플레이를 import 하지 않은
+# 플레이북에서는 inventory 의 첫 노드입니다. 노드 이름은 pvesh get /nodes 의 이름
+proxmox_node: "{{ (groups.pve_main | default(groups.proxmox))[0] }}"
+proxmox_api_host: "{{ hostvars[proxmox_node].ansible_host }}"
+cluster_bootstrap_node: pve01                 # 클러스터가 아직 없을 때만 여기서 pvecm create. 있으면 과반 쪽 노드에 합류(pve-cluster.yml)
 ct_template_storage: local                    # CT 템플릿을 두는 스토리지
 ct_disk_storage: local-lvm                    # CT 디스크를 두는 스토리지
 ct_bridge: vmbr0
@@ -145,7 +144,7 @@ lan_dns_names: [argocd, grafana, headlamp, proxmox, auth, ha, z2m]   # 허브 �
 lan_dns_hosts: {}                             # Traefik 을 거치지 않고 장치로 바로 가는 이름 → 주소(SFTP 처럼 HTTP 가 아닌 접속). 예: { drive: [NAS_IP] }
 lan_dns_targets: ["{{ k8s_clusters.hub.vip }}"]            # 허브 control plane VIP. VIP 를 가진 control plane 의 Traefik(hostPort 443)이 받습니다
 lan_dns_upstream: [1.1.1.1, 1.0.0.1]                        # 그 외 이름을 넘길 DNS
-lan_dns_client_pct_vmids: [201]               # inventory 밖에서 내부망 DNS(호스트·역할 이름)를 쓸 CT(메인 서버에 있는 CT). 없으면 []
+lan_dns_client_pct_vmids: [201]               # inventory 밖에서 내부망 DNS(호스트·역할 이름)를 쓸 CT(그 CT 가 있는 노드에서 설정). 없으면 []
 
 # ---- k8s-cluster: 쿠버네티스 클러스터 ----
 # 노드·VIP 는 kubeadm 클러스터 글의 1단계에서 채웁니다. 그 전에는 허브 VIP 만 둡니다
@@ -226,12 +225,13 @@ address=/{{ name }}.{{ lan_dns_domain }}/{{ ip }}
 > 와일드카드(`address=/[DOMAIN]/`)는 쓰지 않습니다. 같은 도메인의 다른 공개 이름(NAS 등)이 전부 노드로 가고, 공유기가 그 도메인을 DHCP 검색 도메인으로 주는 환경에서는 `github.com.[DOMAIN]` 같은 조회까지 노드로 풀려 클러스터 안의 외부 접속이 깨집니다.
 {: .prompt-danger }
 
-플레이북은 다섯 플레이입니다. 모든 노드에 CT 템플릿 내려받기, 노드마다 CT 만들고 켜기, CT 안에 dnsmasq 설정, 호스트에 남은 옛 dnsmasq 제거와 DNS CT 마다 조회 검사, inventory 밖의 CT(`lan_dns_client_pct_vmids`)가 두 DNS 를 쓰도록 `pct set --nameserver` 로 지정하기입니다. 여러 번 실행해도 결과가 같습니다.
+플레이북은 맨 앞에서 `main-node.yml` 을 불러 기준 노드를 고르고([Proxmox 두 대를 클러스터로 묶고 원격 NAS에 QDevice 붙이는 방법](/posts/53/)의 5단계), 다섯 플레이가 이어집니다. 모든 노드에 CT 템플릿 내려받기, 노드마다 CT 만들고 켜기, CT 안에 dnsmasq 설정, 기준 노드에서 호스트에 남은 옛 dnsmasq 제거와 DNS CT 마다 조회 검사, inventory 밖의 CT(`lan_dns_client_pct_vmids`)가 두 DNS 를 쓰도록 `pct set --nameserver` 로 지정하기입니다. 마지막 플레이는 모든 노드에서 돌고, 그 CT 가 있는 노드만 설정하고 나머지는 건너뜁니다. 여러 번 실행해도 결과가 같습니다.
 
 CT 에는 `features: [nesting=1]` 을 줍니다. Debian 13(systemd 257) 컨테이너는 nesting 이 없으면 `tmp.mount`, `run-lock.mount`, `dev-mqueue.mount` 가 실패합니다. dnsmasq 유닛에는 드롭인(`dnsmasq.service.d/restart.conf`)을 두어 네트워크가 준비된 뒤(`network-online.target`) 시작하고, 죽으면 5초 뒤 다시 시작하게(`Restart=on-failure`) 합니다. 기본 유닛은 한 번 죽으면 다시 뜨지 않아 재부팅 뒤 그 컨테이너의 DNS 가 멈춘 채로 남았습니다.
 
 ```bash
 # 플레이북과 템플릿 내려받기
+curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/main-node.yml -o playbooks/main-node.yml
 curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/lan-dns.yml -o playbooks/lan-dns.yml
 curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/dnsmasq-lan.conf.j2 -o templates/dnsmasq-lan.conf.j2
 ```
@@ -244,6 +244,8 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/dnsmasq-lan.conf.j2 -o
 # 내부망 DNS 컨테이너. 밖에 여는 서비스 이름만 클러스터 노드 IP 로 답해, 집 안에서는 Cloudflare 를 거치지 않고 노드로 직접 붙게 합니다.
 #   ansible-playbook playbooks/lan-dns.yml   (PROXMOX_* 환경변수 필요, README 참고)
 ---
+- import_playbook: main-node.yml
+
 - name: CT 템플릿 준비
   hosts: proxmox
   gather_facts: false
@@ -348,8 +350,8 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/dnsmasq-lan.conf.j2 -o
         state: restarted
         daemon_reload: true
 
-- name: 호스트 정리와 확인
-  hosts: proxmox_primary
+- name: 호스트 정리와 확인 (기준 노드에서)
+  hosts: pve_main
   gather_facts: false
   vars:
     first_name: "{{ lan_dns_names[0] }}.{{ lan_dns_domain }}"
@@ -388,14 +390,15 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/dnsmasq-lan.conf.j2 -o
       loop: "{{ dns_check.results }}"
       loop_control: { label: "{{ item.item.name }}" }
 
-- name: 내부망 DNS 를 쓰는 CT (inventory 밖, 호스트에서 pct 로 설정)
-  hosts: proxmox_primary
+- name: 내부망 DNS 를 쓰는 CT (inventory 밖, 그 CT 가 지금 있는 노드에서 pct 로 설정)
+  hosts: proxmox
   gather_facts: false
   tasks:
     # CT 의 resolv.conf 는 Proxmox 가 시작할 때 CT 설정으로 씁니다. 지금 도는 CT 에도 바로 적용되게 파일도 같은 내용으로 바꿉니다.
     # 두 DNS CT 가 모두 죽어도 바깥 이름은 풀리게 마지막에 upstream 하나를 둡니다
     - name: DNS 서버 지정
       ansible.builtin.shell: |
+        [ -e /etc/pve/lxc/{{ item }}.conf ] || exit 0   # /etc/pve/lxc 는 이 노드의 CT 만 보입니다(옮겨 다니는 CT)
         want="{{ (lan_dns_instances | map(attribute='ip') | list + lan_dns_upstream[:1]) | join(' ') }}"
         [ "$(pct config {{ item }} | sed -n 's/^nameserver: //p')" = "$want" ] && exit 0
         pct set {{ item }} --nameserver "$want" --searchdomain {{ lan_dns_domain }}

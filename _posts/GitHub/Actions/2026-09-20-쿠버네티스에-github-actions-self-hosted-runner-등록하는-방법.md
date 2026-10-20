@@ -88,7 +88,7 @@ RUNNERS=(
   "arc-linux-xs      1  2Gi"   # 원격 서비스(추출·모델 서버)를 기다리기만 하는 작업용. wiki-papers paper job 실측 0.5GiB
   "arc-linux-low     2  4Gi"
   "arc-linux-medium  4  8Gi"
-  "arc-linux-high    8 16Gi"
+  "arc-linux-high    6 12Gi 8 15Gi"   # 16Gi worker 의 allocatable(약 15.5Gi)에 들어가게 보장값을 낮추고 상한은 그 안에서 크게
 )
 # 러너 파드의 우선순위 등급(PriorityClass 이름, 비우면 기본 0). 러너는 기본 우선순위가 0 이라 그보다 낮은 등급의 서비스 파드
 # (예: 음수 등급으로 둔 추출·모델 서버)를 선점해 내쫓습니다 — 그러면 러너 위의 작업이 그 서비스를 기다리다 멈춥니다. 러너를 그
@@ -385,13 +385,13 @@ bash install-arc.sh [GITHUB_CONFIG_URL]
 4. 토큰을 `arc-runners-[저장소 또는 조직 이름]` 네임스페이스의 Secret으로 저장
 5. 아래 표의 러너 세 종류를 설치하고, GitHub에 등록되어 listener 파드가 실행될 때까지 대기
 
-| `runs-on` | CPU | 메모리 |
-| :--- | :--- | :--- |
-| `arc-linux-low` | 2 | 4Gi |
-| `arc-linux-medium` | 4 | 8Gi |
-| `arc-linux-high` | 8 | 16Gi |
+| `runs-on` | CPU | 메모리 | 상한 |
+| :--- | :--- | :--- | :--- |
+| `arc-linux-low` | 2 | 4Gi | 보장값과 같음 |
+| `arc-linux-medium` | 4 | 8Gi | 보장값과 같음 |
+| `arc-linux-high` | 6 | 12Gi | CPU 8, 메모리 15Gi |
 
-러너 파드 하나가 쓰는 자원이며, 이 값만큼 보장받고 그 이상은 쓰지 못합니다. 워크플로우의 `container`와 `docker` 명령으로 실행한 컨테이너에도 같은 상한이 적용됩니다. 종류와 값은 스크립트 맨 위의 `RUNNERS` 목록에서 줄을 추가, 수정, 삭제하고 다시 실행하면 바뀝니다.
+러너 파드 하나가 쓰는 자원이며, CPU·메모리만큼 보장받고 상한 이상은 쓰지 못합니다. `arc-linux-high` 는 16GiB worker 의 실제로 쓸 수 있는 메모리(allocatable, 약 15.5Gi)에 들어가도록 보장값을 낮추고 상한을 그 안에서 크게 잡았습니다. 워크플로우의 `container`와 `docker` 명령으로 실행한 컨테이너에도 같은 상한이 적용됩니다. 종류와 값은 스크립트 맨 위의 `RUNNERS` 목록에서 줄을 추가, 수정, 삭제하고 다시 실행하면 바뀝니다.
 
 > 자원이 들어갈 노드가 없으면 러너 파드는 `Pending` 상태로 대기하고 워크플로우도 시작되지 않습니다. 가장 큰 worker의 사양보다 작게 잡습니다.
 {: .prompt-warning }

@@ -16,7 +16,7 @@ RUNNERS=(
   "arc-linux-xs      1  2Gi"   # 원격 서비스(추출·모델 서버)를 기다리기만 하는 작업용. wiki-papers paper job 실측 0.5GiB
   "arc-linux-low     2  4Gi"
   "arc-linux-medium  4  8Gi"
-  "arc-linux-high    8 16Gi"
+  "arc-linux-high    6 12Gi 8 15Gi"   # 16Gi worker 의 allocatable(약 15.5Gi)에 들어가게 보장값을 낮추고 상한은 그 안에서 크게
 )
 # 러너 파드의 우선순위 등급(PriorityClass 이름, 비우면 기본 0). 러너는 기본 우선순위가 0 이라 그보다 낮은 등급의 서비스 파드
 # (예: 음수 등급으로 둔 추출·모델 서버)를 선점해 내쫓습니다 — 그러면 러너 위의 작업이 그 서비스를 기다리다 멈춥니다. 러너를 그

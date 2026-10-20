@@ -207,7 +207,7 @@ Portainer 의 **Stacks** > **Add stack** 에서 이 파일로 스택을 만듭�
 
 ## 4. 인벤토리와 변수 채우기
 
-인벤토리의 `proxmox` 그룹이 클러스터 노드이고, 호스트 이름이 곧 노드 이름입니다. `proxmox_primary` 가 클러스터를 만드는 메인 서버입니다. VM ID 는 클러스터 전체에서 하나라, 노드마다 만드는 VM 템플릿의 번호를 새 노드에서 바꿉니다.
+인벤토리의 `proxmox` 그룹이 클러스터 노드이고, 호스트 이름이 곧 노드 이름입니다. 특정 노드를 메인으로 고정하지 않습니다. 클러스터가 아직 없으면 `cluster_bootstrap_node` 가 만들고, 있으면 과반 쪽 노드에 합류하며, 클러스터 전체 작업을 하는 기준 노드는 플레이북이 고릅니다(5단계). VM ID 는 클러스터 전체에서 하나라, 노드마다 만드는 VM 템플릿의 번호를 새 노드에서 바꿉니다.
 
 ```yaml
 all:
@@ -221,15 +221,16 @@ all:
           ansible_host: [PVE02_IP]
           ansible_user: root
           vm_template_vmid: 9001  # VMID 는 클러스터 전체에서 하나라 노드마다 템플릿 번호가 다릅니다
-      children:
-        proxmox_primary:          # 메인 서버. 클러스터를 만들고, 기존 CT·VM 이 있는 노드
-          hosts:
-            pve01:
 ```
 {: file="inventory.yml" }
 
 {% raw %}
 ```yaml
+# 기준 노드: 클러스터 전체 작업을 하는 노드(playbooks/main-node.yml 이 살아 있는 과반 쪽 노드로 고름). 그 플레이를 import 하지 않은
+# 플레이북에서는 inventory 의 첫 노드입니다. 노드 이름은 pvesh get /nodes 의 이름
+proxmox_node: "{{ (groups.pve_main | default(groups.proxmox))[0] }}"
+proxmox_api_host: "{{ hostvars[proxmox_node].ansible_host }}"
+cluster_bootstrap_node: pve01                 # 클러스터가 아직 없을 때만 여기서 pvecm create. 있으면 과반 쪽 노드에 합류(pve-cluster.yml)
 proxmox_domain: [DOMAIN]                      # Proxmox 호스트의 FQDN 도메인(pve01.[DOMAIN])
 pve_cluster_name: homelab                     # pvecm create 로 만드는 클러스터 이름
 pve_qdevice_host: [NAS_TAILSCALE_IP]          # QDevice(corosync-qnetd) 주소: NAS 의 Tailscale IP
@@ -239,7 +240,7 @@ tailscale_authkey_file: "{{ lookup('env', 'HOME') }}/.config/tailscale/authkey" 
 # 모든 노드가 다른 노드를 다시 만들 수 있게 준비합니다(playbooks/pve-controller.yml, 7단계)
 pve_controller_repo: git@github.com:[GITHUB_USER]/proxmox-ansible.git   # 노드마다 받는 이 저장소
 pve_controller_dir: /root/proxmox-ansible     # 각 노드의 저장소 사본. 가상 환경은 그 안의 .venv
-pve_controller_key_source: "{{ groups.proxmox_primary[0] }}"   # GitHub 계정 키의 원본 파일이 있는 노드(/root/.ssh/id_ed25519)
+pve_controller_key_source: "{{ proxmox_node }}"   # GitHub 계정 키의 원본 파일이 있는 노드(/root/.ssh/id_ed25519)
 pve_controller_pip: [ansible-core==2.20.1, proxmoxer==2.2.0, requests]   # 실행 PC 와 같은 버전
 pve_controller_token_file: /root/.config/proxmox/token   # 노드별 API 토큰 root@pam!rebuild-<노드> 의 secret
 # 호스트 재부팅 스크립트(scripts/pve-reboot.sh)가 다른 게스트를 모두 내린 뒤 마지막에 내릴 NAS VM. 그 VM 이 있는 노드의 /etc/default/pve-reboot 에
@@ -270,17 +271,18 @@ collections:
 ansible-galaxy collection install -r requirements.yml
 ```
 
-- **확인:** `ansible-inventory --graph` 에 `@proxmox` 아래 두 노드와 `@proxmox_primary` 가 보입니다.
+- **확인:** `ansible-inventory --graph` 에 `@proxmox` 아래 두 노드가 보입니다.
 
 ## 5. 플레이북 실행
 
-플레이북은 여섯 플레이와 마지막에 불러오는 `pve-controller.yml` 입니다. 노드 준비(구독 없는 apt 저장소, 호스트 이름, CPU 절전 정책), 클러스터 만들기, 합류, Tailscale, QDevice, 확인 순서이고, `pve-controller.yml` 은 모든 노드를 다른 노드를 다시 만들 수 있는 노드로 준비합니다(7단계). 합류와 QDevice 는 이미 되어 있으면 건너뜁니다. Tailscale 로그인에 실패하면 한 노드라도 거기서 멈추고, 다시 실행하면 이어 갑니다. CPU 절전 정책은 부팅 때 도는 systemd 유닛(`cpu-epp`)으로, amd-pstate-epp 의 governor 를 `powersave`, EPP 를 `balance_power` 로 둡니다. 한가할 때 클럭이 내려가 유휴 전력이 줄고, 부하가 와도 클럭을 덜 공격적으로 올려 발열과 팬 소음이 줄어듭니다(처음에는 `balance_performance` 였는데, 16코어 노드가 부하에 95 °C 까지 올라 팬이 시끄러워 낮췄습니다)(값은 `group_vars/all.yml` 의 `pve_cpu_governor`·`pve_cpu_epp`).
+플레이북은 여섯 플레이와 중간에 불러오는 `main-node.yml`, 마지막에 불러오는 `pve-controller.yml` 입니다. 노드 준비(구독 없는 apt 저장소, 호스트 이름, CPU 절전 정책), 클러스터 만들기, 합류, (`main-node.yml`), Tailscale, QDevice, 확인 순서이고, `pve-controller.yml` 은 모든 노드를 다른 노드를 다시 만들 수 있는 노드로 준비합니다(7단계). 클러스터가 없을 때만 `cluster_bootstrap_node` 에서 만들고, 있으면 과반 쪽 노드에 합류합니다. 합류와 QDevice 는 이미 되어 있으면 건너뜁니다. Tailscale 로그인에 실패하면 한 노드라도 거기서 멈추고, 다시 실행하면 이어 갑니다. CPU 절전 정책은 부팅 때 도는 systemd 유닛(`cpu-epp`)으로, amd-pstate-epp 의 governor 를 `powersave`, EPP 를 `balance_power` 로 둡니다. 한가할 때 클럭이 내려가 유휴 전력이 줄고, 부하가 와도 클럭을 덜 공격적으로 올려 발열과 팬 소음이 줄어듭니다(처음에는 `balance_performance` 였는데, 16코어 노드가 부하에 95 °C 까지 올라 팬이 시끄러워 낮췄습니다)(값은 `group_vars/all.yml` 의 `pve_cpu_governor`·`pve_cpu_epp`).
 
 Tailscale 플레이는 로그인 뒤 두 노드를 서브넷 라우터로 만듭니다. IP 포워딩을 켜고 `tailscale set --advertise-routes` 로 집 LAN 을 광고합니다. 두 노드가 같은 대역을 광고하면 Tailscale 은 한 노드를 주 라우터로 쓰고 다른 노드를 대기로 둡니다. 원격 노드는 LAN 대역으로 가는 응답을 주 라우터로만 보내므로, VM 이 tailnet 으로 보내는 패킷은 자기 Proxmox 노드의 Tailscale IP 로 바꿔([마스커레이드](/posts/68/)) 내보냅니다. 이 규칙은 부팅 때 `tailscaled` 뒤에 적용되도록 systemd 유닛(`tailscale-lan-masquerade`)으로 둡니다.
 
 ```bash
 # 플레이북과 이름 바꾸기·재부팅 스크립트 내려받기
 mkdir -p scripts
+curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/main-node.yml -o playbooks/main-node.yml
 curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/pve-cluster.yml -o playbooks/pve-cluster.yml
 curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/pve-controller.yml -o playbooks/pve-controller.yml
 curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/pve-rename-node.sh -o scripts/pve-rename-node.sh
@@ -295,7 +297,8 @@ ansible-playbook playbooks/pve-cluster.yml
 
 {% raw %}
 ```yaml
-# Proxmox 호스트들을 클러스터 하나로 묶습니다. inventory 의 proxmox 그룹이 노드이고, proxmox_primary 에서 클러스터를 만든 뒤 나머지가 합류합니다.
+# Proxmox 호스트들을 클러스터 하나로 묶습니다. inventory 의 proxmox 그룹이 노드이고, 클러스터가 없으면
+# cluster_bootstrap_node 에서 만들고 나머지는 과반 쪽 노드에 합류합니다.
 # 호스트 이름을 inventory 이름(FQDN <이름>.{{ proxmox_domain }})으로 맞추고, apt 저장소를 구독 없는 저장소로 맞춥니다.
 # 노드 이름은 클러스터에 들어간 뒤에는 바꿀 수 없어, 합류 전에 scripts/pve-rename-node.sh 로 바꿉니다(게스트는 켠 채로 둬도 됩니다).
 # 호스트 CPU 주파수 정책(cpu-epp.service: governor·EPP, 값은 group_vars 의 pve_cpu_*)과 재부팅 스크립트도 둡니다.
@@ -343,8 +346,37 @@ ansible-playbook playbooks/pve-cluster.yml
         dest: /etc/default/pve-reboot
         mode: "0644"
         content: |
-          # proxmox-ansible pve-cluster.yml (group_vars 의 xpenology.vmid). scripts/pve-reboot.sh 가 읽음
+          # proxmox-ansible pve-cluster.yml (group_vars 의 xpenology.vmid, k8s_clusters). scripts/pve-reboot.sh 가 읽음
           LAST_VMIDS="{{ xpenology.vmid if xpenology.pve == inventory_hostname else '' }}"
+          # 이 호스트의 쿠버네티스 노드(재부팅 전에 drain) "클러스터:노드,노드"
+          K8S_DRAIN="{% for c, k in k8s_clusters.items() %}{% set mine = k.nodes | selectattr('pve', 'eq', inventory_hostname) | map(attribute='name') | list %}{% if mine %}{{ c }}:{{ mine | join(',') }} {% endif %}{% endfor %}"
+          # kubectl 을 돌릴 다른 호스트의 control plane "클러스터:IP,IP"(앞에서부터 붙는 곳)
+          K8S_KUBECTL="{% for c, k in k8s_clusters.items() %}{% set cps = k.nodes | rejectattr('pve', 'eq', inventory_hostname) | selectattr('role', 'eq', 'control-plane') | map(attribute='ip') | list %}{% if cps %}{{ c }}:{{ cps | join(',') }} {% endif %}{% endfor %}"
+    # 부팅 뒤 pve-reboot.sh 가 drain 한 노드를 Ready 가 되면 uncordon 하고 CoreDNS 수를 맞춥니다(표식이 없으면 바로 끝남).
+    # HA 게스트는 되돌리지 않습니다(nofailback). worker-3 은 NAS 를 기다려 약 6분 뒤 켜지므로 30분까지 기다립니다
+    - name: 재부팅 뒤 쿠버네티스 노드 복귀 유닛
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/pve-k8s-return.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Uncordon k8s nodes drained by pve-reboot.sh (proxmox-ansible pve-cluster.yml)
+          Wants=network-online.target
+          After=network-online.target pve-guests.service
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/sbin/pve-reboot.sh --return
+          TimeoutStartSec=35min
+
+          [Install]
+          WantedBy=multi-user.target
+      register: k8s_return_unit
+    - name: 재부팅 뒤 쿠버네티스 노드 복귀 켜기
+      ansible.builtin.systemd:
+        name: pve-k8s-return.service
+        enabled: true
+        daemon_reload: "{{ k8s_return_unit is changed }}"
     # governor 를 먼저 바꿔야 EPP 를 고를 수 있습니다(performance governor 에서는 EPP 가 performance 하나뿐)
     - name: CPU 주파수 정책 (부팅 때 적용)
       ansible.builtin.copy:
@@ -394,7 +426,7 @@ ansible-playbook playbooks/pve-cluster.yml
       register: fqdn
       changed_when: false
       failed_when: fqdn.stdout != inventory_hostname ~ '.' ~ proxmox_domain
-    - name: root 키 (없을 때만. 합류할 때 메인 서버에 ssh 로 붙는 데 씀)
+    - name: root 키 (없을 때만. 합류할 때 기준 노드에 ssh 로 붙는 데 씀)
       ansible.builtin.command: ssh-keygen -q -t rsa -b 4096 -N '' -f /root/.ssh/id_rsa
       args:
         creates: /root/.ssh/id_rsa
@@ -403,35 +435,65 @@ ansible-playbook playbooks/pve-cluster.yml
         src: /root/.ssh/id_rsa.pub
       register: root_pubkey
 
+# 클러스터가 아직 없으면 cluster_bootstrap_node 에서 만들고, 있으면 과반 쪽 노드(기준 노드가 그중이면 기준 노드)에 합류합니다.
+# 특정 노드에 묶지 않아 어느 노드를 다시 설치해도 남은 노드로 다시 붙습니다(옛 기록은 scripts/pve-node-rebuild.sh 가 먼저 지움).
 - name: 클러스터 만들기
-  hosts: proxmox_primary
+  hosts: proxmox
   gather_facts: false
   any_errors_fatal: true
   tasks:
-    - name: 클러스터 만들기 (없을 때만)
+    - name: 과반 여부 (클러스터에 든 노드만)
+      ansible.builtin.command: pvecm status
+      register: pvecm
+      changed_when: false
+      failed_when: false
+      check_mode: false   # 읽기만 하므로 --check 에서도 실행
+      when: corosync.stat.exists
+    - name: 합류 기준 노드 정하기
+      ansible.builtin.set_fact:
+        cluster_anchor: >-
+          {%- set ns = namespace(members=[], quorate=[]) -%}
+          {%- for h in ansible_play_hosts -%}
+          {%- if hostvars[h].corosync.stat.exists -%}
+          {%- set ns.members = ns.members + [h] -%}
+          {%- if (hostvars[h].pvecm.stdout | default('')) is search('Quorate:\s+Yes') -%}{%- set ns.quorate = ns.quorate + [h] -%}{%- endif -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {%- if not ns.members -%}{{ cluster_bootstrap_node }}
+          {%- elif proxmox_node in ns.quorate -%}{{ proxmox_node }}
+          {%- else -%}{{ ns.quorate | first | default('') }}{%- endif -%}
+      run_once: true
+    - name: 과반 쪽 노드가 없으면 멈춤
+      ansible.builtin.assert:
+        that: cluster_anchor | length > 0
+        fail_msg: 클러스터에 든 노드는 있는데 과반(Quorate)인 노드가 없습니다. 남은 노드에서 pvecm status 를 확인합니다.
+      run_once: true
+    - name: 클러스터 만들기 (클러스터가 아직 없을 때만, cluster_bootstrap_node 에서)
       ansible.builtin.command: pvecm create {{ pve_cluster_name }} --link0 {{ ansible_host }}
       args:
         creates: /etc/pve/corosync.conf
-    - name: 다른 노드의 root 키 허용 (pvecm add --use_ssh 용)
+      when: inventory_hostname == cluster_anchor and not corosync.stat.exists
+    - name: 합류할 노드의 root 키 허용 (pvecm add --use_ssh 용, 기준 노드에서)
       ansible.posix.authorized_key:
         user: root
         key: "{{ hostvars[item].root_pubkey.content | b64decode }}"
         comment: "{{ item }}"
-      loop: "{{ groups.proxmox | difference(groups.proxmox_primary) }}"
+      loop: "{{ ansible_play_hosts | difference([cluster_anchor]) }}"
+      when: inventory_hostname == cluster_anchor and not hostvars[item].corosync.stat.exists
 
 - name: 클러스터 합류
-  hosts: proxmox:!proxmox_primary
+  hosts: proxmox
   gather_facts: false
   serial: 1
   vars:
-    primary_ip: "{{ hostvars[groups.proxmox_primary[0]].ansible_host }}"
+    anchor_ip: "{{ hostvars[cluster_anchor].ansible_host }}"
   tasks:
-    - name: 메인 서버에 클러스터가 있는지
+    - name: 기준 노드에 클러스터가 있는지
       ansible.builtin.stat:
         path: /etc/pve/corosync.conf
-      delegate_to: "{{ groups.proxmox_primary[0] }}"
-      register: primary_corosync
-      failed_when: not primary_corosync.stat.exists
+      delegate_to: "{{ cluster_anchor }}"
+      register: anchor_corosync
+      failed_when: not anchor_corosync.stat.exists
     - name: 합류 여부
       ansible.builtin.stat:
         path: /etc/pve/corosync.conf
@@ -439,24 +501,27 @@ ansible-playbook playbooks/pve-cluster.yml
     - name: 합류
       when: not corosync.stat.exists
       block:
-        # 네트워크로 받지 않고(ssh-keyscan) 메인 서버에서 직접 읽은 키를 넣습니다. 합류(pvecm add --use_ssh)가 이 키로 메인 서버를 검증합니다
-        - name: 메인 서버 호스트 키 읽기
+        # 네트워크로 받지 않고(ssh-keyscan) 기준 노드에서 직접 읽은 키를 넣습니다. 합류(pvecm add --use_ssh)가 이 키로 기준 노드를 검증합니다
+        - name: 기준 노드 호스트 키 읽기
           ansible.builtin.slurp:
             src: /etc/ssh/ssh_host_ed25519_key.pub
-          delegate_to: "{{ groups.proxmox_primary[0] }}"
-          register: primary_host_key
-        - name: 메인 서버 호스트 키 등록
+          delegate_to: "{{ cluster_anchor }}"
+          register: anchor_host_key
+        - name: 기준 노드 호스트 키 등록
           ansible.builtin.known_hosts:
             path: /root/.ssh/known_hosts
-            name: "{{ primary_ip }}"
-            key: "{{ primary_ip }} {{ (primary_host_key.content | b64decode).split()[:2] | join(' ') }}"
+            name: "{{ anchor_ip }}"
+            key: "{{ anchor_ip }} {{ (anchor_host_key.content | b64decode).split()[:2] | join(' ') }}"
         - name: 합류 (게스트가 없는 노드만 가능)
-          ansible.builtin.command: pvecm add {{ primary_ip }} --link0 {{ ansible_host }} --use_ssh
+          ansible.builtin.command: pvecm add {{ anchor_ip }} --link0 {{ ansible_host }} --use_ssh
           register: join
           failed_when: "'successfully added node' not in join.stdout"   # 실패해도 종료 코드 0 으로 끝나는 경우가 있어 출력으로 판단합니다
         # 같은 이름으로 다시 들어온 노드는 옛 인증서·호스트 키 기록과 새 것이 섞이지 않게 클러스터 전체 인증서 목록을 다시 만듭니다
         - name: 인증서·호스트 키 목록 갱신
           ansible.builtin.command: pvecm updatecerts
+
+# 여기부터 클러스터 전체 작업은 살아 있는 과반 쪽 기준 노드에서 합니다
+- import_playbook: main-node.yml
 
 # 원격지(서울 NAS)의 QDevice 에 닿기 위한 사설망. 인증 키는 실행 PC 의 파일에서 읽어 명령에만 넘깁니다(로그에 남기지 않음)
 # 지금은 QDevice·원격 etcd 투표자가 Tailscale 주소라 필수 경로입니다. 한 노드라도 실패하면 멈추고, 다시 실행하면 이어 갑니다
@@ -599,7 +664,7 @@ ansible-playbook playbooks/pve-cluster.yml
   gather_facts: false
   any_errors_fatal: true
   vars:
-    primary: "{{ groups.proxmox_primary[0] }}"
+    primary: "{{ proxmox_node }}"
   tasks:
     - name: corosync-qdevice
       ansible.builtin.apt:
@@ -664,7 +729,7 @@ ansible-playbook playbooks/pve-cluster.yml
       when: inventory_hostname == primary and qdevice_action in ['setup', 'reset']
 
 - name: 확인
-  hosts: proxmox_primary
+  hosts: pve_main
   gather_facts: false
   tasks:
     - name: 클러스터 상태
@@ -696,7 +761,80 @@ ansible-playbook playbooks/pve-cluster.yml
 
 </details>
 
+`main-node.yml` 은 클러스터 전체 작업(저장소 등록, 확인, QDevice 등)을 할 기준 노드를 고르는 플레이입니다. 특정 노드에 묶지 않아 어느 노드가 죽어도 남은 노드로 플레이북이 돕니다. `pve-cluster.yml` 을 비롯한 다른 플레이북이 `import_playbook` 으로 불러 쓰고, 고른 노드는 그룹 `pve_main` 과 변수 `proxmox_node` 가 됩니다. 고르는 순서는 다음과 같습니다.
+
+1. 환경 변수 `PVE_MAIN` 이 있으면 그 노드
+2. 없으면 플레이북을 실행하는 노드(노드에서 직접 돌릴 때)
+3. 그것도 아니면(다른 PC) 인벤토리 순서에서 처음으로 과반 쪽(`Quorate: Yes`)인 노드
+
+고른 노드가 과반 쪽이 아니거나 닿지 않으면 멈춥니다. 다른 노드를 쓰려면 `PVE_MAIN=<노드>` 로 실행합니다. 이 플레이북만 실행하면 고른 노드를 보여 줍니다.
+
+```bash
+ansible-playbook playbooks/main-node.yml
+```
+
+<details markdown="1">
+<summary>playbooks/main-node.yml 전문</summary>
+
+{% raw %}
+```yaml
+# 클러스터 전체 작업(저장소 등록, 확인, QDevice 등)을 할 기준 노드를 고릅니다. 특정 노드에 묶지 않아 어느 노드가 죽어도
+# 남은 노드로 플레이북이 돕니다. 다른 플레이북이 맨 앞에서 import 하고, 고른 노드는 그룹 pve_main 과 변수 proxmox_node 가 됩니다.
+#   - 환경 변수 PVE_MAIN 이 있으면 그 노드
+#   - 없으면 플레이북을 실행하는 노드(노드에서 직접 돌릴 때, scripts/pve-node-rebuild.sh 등)
+#   - 그것도 아니면(다른 PC) inventory 순서에서 처음으로 과반 쪽(Quorate: Yes)인 노드
+# 고른 노드가 과반 쪽이 아니면 멈춥니다. 직접 실행하면 고른 노드만 보여 줍니다: ansible-playbook playbooks/main-node.yml
+---
+- name: 기준 노드 고르기
+  hosts: localhost
+  gather_facts: false
+  vars:
+    pinned: "{{ lookup('ansible.builtin.env', 'PVE_MAIN') or (groups.proxmox | select('eq', lookup('ansible.builtin.pipe', 'hostname -s')) | first | default('')) }}"
+  tasks:
+    - name: 노드마다 과반 쪽인지
+      ansible.builtin.command: pvecm status
+      delegate_to: "{{ item }}"
+      loop: "{{ [pinned] if pinned else groups.proxmox }}"
+      register: quorum
+      changed_when: false
+      failed_when: false
+      ignore_unreachable: true
+      check_mode: false   # 읽기만 하므로 --check 에서도 실행
+    - name: 고르기
+      ansible.builtin.set_fact:
+        pve_main: >-
+          {{ quorum.results | rejectattr('unreachable', 'defined') | selectattr('stdout', 'defined')
+             | selectattr('stdout', 'search', 'Quorate:\s+Yes') | map(attribute='item') | first | default('') }}
+    - name: 과반 쪽 노드가 없으면 멈춤
+      ansible.builtin.assert:
+        that: pve_main | length > 0
+        fail_msg: >-
+          {{ (pinned ~ ' 이 과반 쪽이 아니거나 닿지 않습니다') if pinned else '과반 쪽인 노드가 없습니다' }}.
+          다른 노드를 쓰려면 PVE_MAIN=<노드> 로 실행합니다.
+    - name: 그룹 pve_main
+      ansible.builtin.add_host:
+        name: "{{ pve_main }}"
+        groups: [pve_main]
+      changed_when: false
+    - name: 기준 노드
+      ansible.builtin.debug:
+        msg: "기준 노드 {{ pve_main }}{{ ' (PVE_MAIN·실행 노드)' if pinned else '' }}"
+```
+{: file="playbooks/main-node.yml" }
+{% endraw %}
+
+</details>
+
 플레이북은 재부팅 스크립트를 각 노드의 `/usr/local/sbin/pve-reboot.sh` 에 둡니다. 호스트를 재부팅하거나 하드웨어 작업으로 끌 때는 일반 `reboot`·`poweroff` 대신 이 스크립트를 씁니다. 게스트를 두 차례로 먼저 내리고(나머지 게스트를 모두 내린 뒤 NAS VM 을 마지막에), 내려가지 않는 게스트가 있으면 sysrq 로 즉시 재부팅하거나 끕니다. NAS 를 먼저 내리면 그 NFS 저장소에 디스크를 둔 VM 이 I/O 에서 굳기 때문입니다. 마지막에 내릴 게스트는 플레이북이 `xpenology` 변수로 배포하는 `/etc/default/pve-reboot` 의 `LAST_VMIDS` 이고, 실행할 때 `--last <vmid>` 로 더할 수 있습니다. NAS 가 있는 노드를 재부팅하면 다른 노드에서 그 NFS 저장소를 쓰는 VM 도 그동안 디스크 I/O 가 멈추므로, 그런 VM 은 미리 내리거나 멈춤을 감수합니다.
+
+게스트를 내리기 전에 그 호스트에 있는 쿠버네티스 노드를 drain 합니다. 노드가 갑자기 꺼지면 StatefulSet 파드는 Terminating 으로 묶여 다른 노드로 넘어가지 못하기 때문입니다. 스크립트는 다른 호스트의 control plane 에 ssh 해서 kubectl 을 돌립니다. 어느 노드를 drain 하고 어느 control plane 에 붙을지는 플레이북이 `k8s_clusters` 변수로 만든 `/etc/default/pve-reboot` 의 `K8S_DRAIN`·`K8S_KUBECTL` 입니다. 순서는 이렇습니다.
+
+1. 그 노드에 Patroni 주 DB(네임스페이스 `timescaledb` 의 `role=primary` 파드)가 있으면 drain 하지 않는 멤버로 switchover 하고, 새 주 DB 가 될 때까지 기다립니다.
+2. `kubectl drain --ignore-daemonsets --delete-emptydir-data --timeout=300s` 로 노드를 비웁니다. 실패하면 cordon 을 되돌리고 재부팅하지 않고 끝냅니다.
+3. drain 한 노드를 `/var/lib/pve-reboot/drained` 에 적어 둡니다. 부팅 뒤 `pve-k8s-return.service`(`pve-reboot.sh --return`)가 노드가 Ready 가 되면 uncordon 하고, 노드마다 하나씩 두는 CoreDNS 의 수를 다시 맞춥니다.
+4. Proxmox HA 에 등록한 게스트는 끄지 않고, 메모리가 가장 많이 남은 노드로 `ha-manager crm-command migrate` 합니다. maintenance 모드는 풀 때 게스트가 원래 노드로 되돌아가므로 쓰지 않습니다.
+
+장애 시험처럼 노드가 갑자기 사라진 상황을 만들 때는 `--no-drain` 으로 이 단계를 건너뜁니다.
 
 ```bash
 # 판정만 보기
@@ -707,7 +845,7 @@ systemd-run --unit pve-reboot --collect /usr/local/sbin/pve-reboot.sh
 journalctl -fu pve-reboot
 ```
 
-- **확인:** `--dry-run` 이 내릴 게스트 목록과 재부팅 경로(일반 또는 sysrq)를 출력합니다.
+- **확인:** `--dry-run` 이 넘길 주 DB, drain 으로 옮길 파드(서버 dry-run), 옮길 HA 게스트, 내릴 게스트 목록과 재부팅 경로(일반 또는 sysrq)를 출력합니다. dry-run 은 볼륨을 떼지 않으므로 Longhorn 볼륨이 붙은 노드는 instance-manager 의 PodDisruptionBudget 에서 15초 뒤 멈춘 것으로 나옵니다. 실제 drain 에서는 볼륨이 떨어지면 Longhorn 이 그 PDB 를 풉니다.
 
 <details markdown="1">
 <summary>scripts/pve-reboot.sh 전문</summary>
@@ -948,7 +1086,7 @@ pct list
 
 </details>
 
-> 합류하면 새 노드의 `/etc/pve` 가 클러스터 것으로 바뀝니다. 새 노드에만 있던 사용자, API 토큰, 스토리지 정의는 사라지고 메인 서버의 것을 같이 씁니다.
+> 합류하면 새 노드의 `/etc/pve` 가 클러스터 것으로 바뀝니다. 새 노드에만 있던 사용자, API 토큰, 스토리지 정의는 사라지고 합류한 기준 노드의 것을 같이 씁니다.
 {: .prompt-warning }
 
 - **확인:** `PLAY RECAP` 에 `failed=0` 이고, 마지막 `상태` 태스크에 `Nodes: 2` 와 `Qdevice` 가 보입니다. 한 번 더 실행하면 모든 노드가 `changed=0` 입니다.
@@ -978,7 +1116,7 @@ QDevice 가 멈췄을 때도 확인해 둡니다. Portainer 에서 qnetd 서비�
 
 ## 7. 노드 디스크 교체·재구축
 
-메인이 아닌 노드(pve02)의 OS 디스크를 바꾸거나 기계가 죽어 Proxmox 를 다시 설치했을 때, 남은 노드(pve01)에서 스크립트 하나로 원래 이름·IP·게스트·쿠버네티스 노드로 되돌립니다. 메인 노드는 API 주소와 공유 저장소 원본이 고정이라 이 절차의 범위 밖입니다.
+어느 노드든(예: pve02) OS 디스크를 바꾸거나 기계가 죽어 Proxmox 를 다시 설치했을 때, 남은 노드(예: pve01)에서 스크립트 하나로 원래 이름·IP·게스트·쿠버네티스 노드로 되돌립니다. 스크립트를 실행하는 노드 자신은 다시 만들 수 없고, 그 노드가 기준 노드가 되어 API 주소·키 원본·저장소 등록을 맡습니다(`main-node.yml`).
 
 시작하려면 남은 노드가 Proxmox 과반이고 남은 etcd 멤버가 과반이어야 합니다. 노드 세 대에 control plane 을 하나씩 둔 구성(etcd 3멤버)이면 한 대를 다시 만들 때 남은 두 노드가 Proxmox 과반(3표 중 2표)이고 남은 etcd 두 멤버가 과반(3 중 2)이므로, `pvecm expected` 도 etcd 멤버를 미리 빼는 것도 필요 없습니다. 옛 control plane 의 etcd 멤버는 정리 단계(`node-rebuild.yml`)가 지웁니다. 두 노드 구성이면 원격 NAS 의 qnetd 와 etcd 세 번째 투표자([쿠버네티스 etcd 세 번째 투표자를 원격 NAS 컨테이너로 붙이는 방법](/posts/55/))가 그 표를 채우므로 둘이 살아 있어야 합니다.
 
@@ -1135,7 +1273,7 @@ echo "  /root/proxmox-ansible/scripts/pve-node-rebuild.sh ${ip:-<이 노드 IP>}
 
 ## 마무리
 
-Proxmox 서버 두 대를 클러스터로 묶고 원격 NAS 의 qnetd 로 세 번째 표를 주어, 한 대가 꺼지거나 NAS 가 멈춰도 남은 쪽이 과반을 유지하게 했습니다. 두 노드는 집 LAN 을 tailnet 에 광고하는 서브넷 라우터가 되어, 원격 NAS 와 LAN 의 VM 이 Tailscale 로 서로 닿습니다. 새 서버를 더할 때는 인벤토리에 추가하고 같은 플레이북을 다시 실행합니다. 메인이 아닌 노드의 디스크를 바꾸면 남은 노드에서 재구축 스크립트 하나로 원래 상태로 되돌립니다. 이 글은 Proxmox 관리 기능의 과반만 다룹니다. 노드마다 로컬 디스크를 쓰므로 게스트를 다른 노드로 자동으로 옮기는 Proxmox HA 는 설정하지 않았습니다.
+Proxmox 서버 두 대를 클러스터로 묶고 원격 NAS 의 qnetd 로 세 번째 표를 주어, 한 대가 꺼지거나 NAS 가 멈춰도 남은 쪽이 과반을 유지하게 했습니다. 두 노드는 집 LAN 을 tailnet 에 광고하는 서브넷 라우터가 되어, 원격 NAS 와 LAN 의 VM 이 Tailscale 로 서로 닿습니다. 새 서버를 더할 때는 인벤토리에 추가하고 같은 플레이북을 다시 실행합니다. 노드의 디스크를 바꾸면 남은 노드에서 재구축 스크립트 하나로 원래 상태로 되돌립니다. 이 글은 Proxmox 관리 기능의 과반만 다룹니다. 노드마다 로컬 디스크를 쓰므로 게스트를 다른 노드로 자동으로 옮기는 Proxmox HA 는 설정하지 않았습니다.
 
 ## 참고 자료
 

@@ -1,6 +1,6 @@
 # 모든 Proxmox 노드를 "다른 노드를 다시 만들 수 있는 노드"로 준비합니다. 한 노드의 디스크를 바꿔 다시 설치해도
 # 남은 노드에서 scripts/pve-node-rebuild.sh 하나로 복구하려면 그 노드에 저장소·ansible·API 토큰·접속 키가 있어야 합니다.
-#   - GitHub 계정 키(eu4ng@server, 원본은 pve_controller_key_source 의 /root/.ssh/id_ed25519)를 모든 노드에 같은 파일로 둡니다(600).
+#   - GitHub 계정 키(eu4ng@server, 원본은 pve_controller_key_source(기준 노드)의 /root/.ssh/id_ed25519)를 모든 노드에 같은 파일로 둡니다(600).
 #     이 키로 저장소를 받고, 게스트(VM·CT)에도 이 키의 공개키를 넣습니다(group_vars 의 ct_ssh_pubkeys).
 #   - 저장소를 pve_controller_dir 에 받고(이미 있으면 pull), 그 안의 .venv 에 ansible·proxmoxer·컬렉션을 설치합니다.
 #   - 노드별 API 토큰 root@pam!rebuild-<노드> 를 만들어 secret 을 pve_controller_token_file(600)에 둡니다. 파일이 있으면 API 로
@@ -11,6 +11,8 @@
 # 계정 키를 노드마다 두는 위험(한 노드가 뚫리면 GitHub 계정과 모든 게스트가 같이 노출)과 대안은 README 의 "노드 재구축" 절.
 #   ansible-playbook playbooks/pve-controller.yml
 ---
+- import_playbook: main-node.yml
+
 - name: 복구 컨트롤러 준비
   hosts: proxmox
   gather_facts: false

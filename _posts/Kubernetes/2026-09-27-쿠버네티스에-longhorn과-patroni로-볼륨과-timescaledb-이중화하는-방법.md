@@ -52,9 +52,9 @@ k8s_clusters:
   hub:
     nodes:
       # ... control plane 항목
-      - { name: k8s-hub-worker-1, pve: pve01, role: worker, vmid: 123, ip: [WORKER1_IP], cores: 12, memory: 24576, disk: 100G, longhorn_disk: 20 }
+      - { name: k8s-hub-worker-1, pve: pve01, role: worker, vmid: 123, ip: [WORKER1_IP], cores: 12, memory: 16384, disk: 100G, longhorn_disk: 20 }
       - { name: k8s-hub-worker-2, pve: pve02, role: worker, vmid: 124, ip: [WORKER2_IP], cores: 8,  memory: 16384, disk: 60G,  longhorn_disk: 20 }
-      - { name: k8s-hub-worker-3, pve: pve03, role: worker, vmid: 126, ip: [WORKER3_IP], cores: 6,  memory: 12288, disk: 40G,  longhorn_disk: 100, longhorn_storage: nas, startup: "order=2" }
+      - { name: k8s-hub-worker-3, pve: pve03, role: worker, vmid: 126, ip: [WORKER3_IP], cores: 6,  memory: 16384, disk: 40G,  longhorn_disk: 100, longhorn_storage: nas, startup: "order=2" }
 ```
 {: file="group_vars/all.yml" }
 
