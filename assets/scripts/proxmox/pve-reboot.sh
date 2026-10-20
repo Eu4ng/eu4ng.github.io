@@ -15,7 +15,7 @@
 # NAS 를 먼저 내리면 그 NFS 저장소(nas)에 디스크를 둔 VM 이 I/O 에서 굳습니다. 마지막 게스트는 --last 또는
 # /etc/default/pve-reboot 의 LAST_VMIDS(pve-cluster.yml 이 group_vars 의 xpenology.vmid 로 배포)로 정합니다.
 # pve03 을 재부팅하면 NAS 가 멈추므로 다른 노드에서 nas 저장소를 쓰는 VM(docker VM 206 등)도 그동안 디스크 I/O 가 멈춥니다.
-# pve03 의 worker-3 은 이 스크립트가 NAS 보다 먼저 내리고, 그 디스크가 있는 iSCSI VG(/etc/default/nas-iscsi)를 끄고 로그아웃한 뒤 NAS 를
+# pve03 의 worker-3 은 이 스크립트가 NAS 보다 먼저 내리고, 그 디스크가 있는 iSCSI VG(/etc/default/nas-iscsi)의 Ceph OSD 를 멈추고 VG 를 끄고 로그아웃한 뒤 NAS 를
 # 내립니다. 다른 노드의 nas VM 은 미리 내리거나 멈춤을 감수합니다.
 #
 # 게스트를 내리기 전에 이 호스트에 있는 쿠버네티스 노드를 drain 합니다. 그 노드에 Patroni 주 DB(namespace timescaledb,
@@ -23,7 +23,8 @@
 # (pve-node-rebuild.sh 와 같은 방식), 실패하면 cordon 을 풀고 중단합니다. drain 한 노드는 /var/lib/pve-reboot/drained 에
 # 적고, 부팅 뒤 pve-k8s-return.service(이 스크립트의 --return)가 노드가 Ready 가 되면 uncordon 하고 CoreDNS 수를 다시
 # 맞춥니다. 어느 노드를 drain 하고 어느 control plane 에 붙을지는 /etc/default/pve-reboot 의 K8S_DRAIN·K8S_KUBECTL 입니다.
-# Proxmox HA 게스트는 끄지 않고 다른 노드로 옮깁니다(ha-manager crm-command migrate). 대상은 메모리가 가장 많이 남은
+# Proxmox HA 게스트는 끄지 않고 다른 노드로 옮깁니다(ha-manager crm-command migrate). 대상은 keep-apart(HA resource-affinity
+# negative) 상대가 있는 노드를 뺀 것 중 메모리가 가장 많이 남은
 # 온라인 노드입니다. maintenance 모드는 풀 때 원래 노드로 되돌아가므로 쓰지 않습니다. 모두 옮겨지지 않으면(300초) 중단합니다.
 #
 # 사용법(호스트에서 root). 실행 중에 이 호스트의 게스트(ssh 를 건너온 CT 포함)가 내려가 세션이 끊기므로 systemd-run 으로 띄웁니다:
@@ -37,7 +38,7 @@
 #   --vm-timeout <초>  VM 종료 대기(기본 180)
 #   --ct-timeout <초>  CT 종료 대기(기본 60)
 #   --no-drain         drain·switchover·HA 이전을 하지 않음(장애 시험용: 노드가 갑자기 사라진 것과 같게)
-#   --return           부팅 뒤 할 일만 함: drained 표식의 노드가 Ready 가 되면 uncordon, CoreDNS 수 맞추기(pve-k8s-return.service)
+#   --return           부팅 뒤 할 일만 함: drained 표식의 노드가 Ready 가 되면 uncordon, CoreDNS 수 맞추기, Ceph noout 끄기(pve-k8s-return.service)
 # 종료 코드: 0 재부팅·종료 시작(또는 dry-run, --return 완료), 1 쿼럼 없음·drain 실패 등으로 중단, 2 인자 오류
 set -uo pipefail
 
@@ -103,8 +104,14 @@ coredns_fit() {
 }
 
 # ---- 부팅 뒤(--return): 표식의 노드가 Ready 가 되면 uncordon ----
+# 재부팅 전에 켠 Ceph noout 을 끈다. 노드 복귀를 기다린 뒤에 부른다(pve03 은 그사이 nas-iscsi-start 가 OSD 를 켬)
+unset_noout() {
+  if [ -f /etc/pve/ceph.conf ] && command -v ceph >/dev/null && ceph osd dump 2>/dev/null | grep -q '^flags.*noout'; then
+    log "Ceph noout 끄기"; run ceph osd unset noout >/dev/null 2>&1 || log "noout 을 끄지 못함(ceph osd unset noout)"
+  fi
+}
 if [ "$RETURN" = 1 ]; then
-  [ -s "$MARK" ] || { log "drain 표식이 없어 할 일이 없습니다"; exit 0; }
+  [ -s "$MARK" ] || { log "drain 표식이 없어 할 일이 없습니다"; unset_noout; exit 0; }
   deadline=$((SECONDS + RETURN_TIMEOUT)) left=1
   while [ "$left" = 1 ] && [ $SECONDS -lt $deadline ]; do
     left=0
@@ -124,6 +131,7 @@ if [ "$RETURN" = 1 ]; then
   done
   for c in $(sort -u "$MARK.dns" 2>/dev/null); do coredns_fit "$c" || left=1; done
   rm -f "$MARK.dns"
+  unset_noout
   if [ "$left" = 1 ]; then log "Ready 가 되지 않았거나 uncordon 하지 못한 노드: $(tr '\n' ' ' < "$MARK")"; exit 1; fi
   log "모든 노드 uncordon 완료"; exit 0
 fi
@@ -190,19 +198,34 @@ SELF=$(hostname -s)
 for sid in $(ha-manager config 2>/dev/null | awk '/^(vm|ct):/{print $1 $2}'); do HA_ID[${sid#*:}]=1; done
 # 이 노드에서 켜져 있는(started) HA 서비스. 멈춰 둔 HA 서비스는 옮기지 않음(started 가 되지 않아 기다림이 끝나지 않음)
 ha_here() { ha-manager status 2>/dev/null | awk -v n="$SELF" '$1=="service" && $3=="("n"," && $4=="started)" {print $2}'; }
+# keep-apart(resource-affinity negative, 켜진 규칙) 상대 서비스
+ha_apart() {
+  ha-manager rules config --output-format json 2>/dev/null | jq -r --arg s "$1" '.[]
+    | select(.type == "resource-affinity" and .affinity == "negative" and ((.disable // 0) | tostring) != "1")
+    | (.resources | split(",")) | select(index($s)) | .[] | select(. != $s)' | sort -u
+}
+# 서비스가 started 로 있는 노드
+ha_node_of() { ha-manager status 2>/dev/null | awk -v s="$1" '$1=="service" && $2==s && $4=="started)" {gsub(/[(,]/, "", $3); print $3}'; }
 if [ "$DRAIN" = 1 ] && [ ${#HA_ID[@]} -gt 0 ]; then
   sids=$(ha_here)
   if [ -n "$sids" ]; then
-    target=$(pvesh get /cluster/resources --type node --output-format json | jq -r --arg s "$SELF" \
-      '[.[] | select(.status=="online" and .node!=$s)] | max_by(.maxmem - .mem) | .node // empty')
-    [ -n "$target" ] || { log "HA 게스트를 받을 노드가 없어 중단합니다"; exit 1; }
-    for sid in $sids; do log "HA $sid → $target 이전"; run ha-manager crm-command migrate "$sid" "$target"; done
+    declare -A DEST
+    for sid in $sids; do
+      # 메모리가 가장 많이 남은 온라인 노드. keep-apart 상대가 started 인 노드와 이번에 상대를 보낼 노드는 뺀다
+      excl=$SELF
+      for p in $(ha_apart "$sid"); do excl="$excl ${DEST[$p]:-} $(ha_node_of "$p")"; done
+      target=$(pvesh get /cluster/resources --type node --output-format json | jq -r --arg x "$excl" \
+        '($x | split(" ")) as $ex | [.[] | select(.status=="online" and (.node | IN($ex[]) | not))] | max_by(.maxmem - .mem) | .node // empty')
+      [ -n "$target" ] || { log "HA $sid 를 받을 노드가 없어 중단합니다(뺀 노드: $excl)"; exit 1; }
+      DEST[$sid]=$target
+      log "HA $sid → $target 이전"; run ha-manager crm-command migrate "$sid" "$target"
+    done
     if [ "$DRY_RUN" = 0 ]; then
       ok=0
       for _ in $(seq $((HA_TIMEOUT / 5))); do
         st=$(ha-manager status 2>/dev/null)
         moved=1
-        for sid in $sids; do grep -qE "^service $sid \($target, started\)" <<< "$st" || moved=0; done
+        for sid in $sids; do grep -qE "^service $sid \(${DEST[$sid]}, started\)" <<< "$st" || moved=0; done
         [ "$moved" = 1 ] && [ -z "$(ha_here)" ] && { ok=1; break; }
         sleep 5
       done
@@ -234,6 +257,10 @@ shutdown_phase() {   # $1: first(LAST 제외) | last(LAST 만)
   [ ${#pids[@]} -gt 0 ] && wait "${pids[@]}"
   return 0
 }
+# Ceph 가 있으면 이 노드의 OSD 가 빠진 동안 다른 OSD 로 다시 복제하지 않게 noout 을 켠다(부팅 뒤 --return 이 끔)
+if [ -f /etc/pve/ceph.conf ] && command -v ceph >/dev/null; then
+  log "Ceph noout 켜기"; run ceph osd set noout >/dev/null 2>&1 || log "noout 을 켜지 못함(계속)"
+fi
 last_ids="${!LAST[*]}"
 log "1차: 마지막 게스트(${last_ids:-없음})를 뺀 게스트 종료"
 shutdown_phase first
@@ -243,6 +270,15 @@ if [ -r /etc/default/nas-iscsi ]; then
     . /etc/default/nas-iscsi
     if iscsiadm -m session 2>/dev/null | grep -q " $TARGET "; then
       log "NAS iSCSI 정리: VG $VG 끄기, $TARGET 로그아웃"
+      # 그 VG 위의 Ceph OSD 가 LV 를 쥐고 있으면 VG 를 끌 수 없다
+      if command -v ceph-volume >/dev/null; then
+        for i in $(ceph-volume lvm list --format json 2>/dev/null | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+print(" ".join(k for k, v in d.items() if any(x.get("vg_name") == sys.argv[1] for x in v)))' "$VG"); do
+          log "Ceph OSD $i 종료"; run systemctl stop "ceph-osd@$i"
+        done
+      fi
       run vgchange -an "$VG" >/dev/null || log "VG $VG 를 끄지 못함(쓰는 디스크가 남았는지 확인)"
       run iscsiadm -m node -T "$TARGET" -p "$PORTAL" --logout >/dev/null
     fi
