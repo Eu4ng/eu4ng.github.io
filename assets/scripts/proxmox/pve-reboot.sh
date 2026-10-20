@@ -15,7 +15,8 @@
 # NAS 를 먼저 내리면 그 NFS 저장소(nas)에 디스크를 둔 VM 이 I/O 에서 굳습니다. 마지막 게스트는 --last 또는
 # /etc/default/pve-reboot 의 LAST_VMIDS(pve-cluster.yml 이 group_vars 의 xpenology.vmid 로 배포)로 정합니다.
 # pve03 을 재부팅하면 NAS 가 멈추므로 다른 노드에서 nas 저장소를 쓰는 VM(docker VM 206 등)도 그동안 디스크 I/O 가 멈춥니다.
-# pve03 의 worker-3 은 이 스크립트가 NAS 보다 먼저 내립니다. 다른 노드의 nas VM 은 미리 내리거나 멈춤을 감수합니다.
+# pve03 의 worker-3 은 이 스크립트가 NAS 보다 먼저 내리고, 그 디스크가 있는 iSCSI VG(/etc/default/nas-iscsi)를 끄고 로그아웃한 뒤 NAS 를
+# 내립니다. 다른 노드의 nas VM 은 미리 내리거나 멈춤을 감수합니다.
 #
 # 게스트를 내리기 전에 이 호스트에 있는 쿠버네티스 노드를 drain 합니다. 그 노드에 Patroni 주 DB(namespace timescaledb,
 # 라벨 role=primary)가 있으면 먼저 다른 멤버로 switchover 합니다. drain 은 다른 호스트의 control plane 에 ssh 해서 하고
@@ -236,6 +237,17 @@ shutdown_phase() {   # $1: first(LAST 제외) | last(LAST 만)
 last_ids="${!LAST[*]}"
 log "1차: 마지막 게스트(${last_ids:-없음})를 뺀 게스트 종료"
 shutdown_phase first
+# NAS 의 iSCSI LUN 위 VG(nas-iscsi.yml)는 NAS 를 내리기 전에 끄고 로그아웃한다. 먼저 내리지 않으면 I/O 가 D 상태로 굳는다
+if [ -r /etc/default/nas-iscsi ]; then
+  (
+    . /etc/default/nas-iscsi
+    if iscsiadm -m session 2>/dev/null | grep -q " $TARGET "; then
+      log "NAS iSCSI 정리: VG $VG 끄기, $TARGET 로그아웃"
+      run vgchange -an "$VG" >/dev/null || log "VG $VG 를 끄지 못함(쓰는 디스크가 남았는지 확인)"
+      run iscsiadm -m node -T "$TARGET" -p "$PORTAL" --logout >/dev/null
+    fi
+  )
+fi
 if [ ${#LAST[@]} -gt 0 ]; then
   log "2차: 마지막 게스트 종료"
   shutdown_phase last

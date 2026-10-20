@@ -113,7 +113,8 @@
       loop: "{{ clones.results }}"
       loop_control: { label: "{{ item.item.name }}" }
       when: item.changed
-    # longhorn_storage 가 NFS(nas_vm_storage)면 qcow2(파일), lvmthin 이면 raw 입니다. HDD 위 NFS 디스크에는 ssd 표시를 붙이지 않습니다
+    # longhorn_storage 가 NFS(nas_vm_storage)면 qcow2(파일), lvmthin 이면 raw 입니다. HDD 저장소(longhorn_hdd_storages)에는 ssd 표시를 붙이지 않습니다.
+    # 이미 있는 디스크는 옮기지 않습니다. 저장소를 바꾸면 켠 채로 qm disk move <vmid> scsi1 <저장소> --delete 1 로 옮깁니다
     - name: Longhorn 디스크 (scsi1, 없을 때만. 켜진 VM 에 핫플러그)
       community.proxmox.proxmox_disk:
         vmid: "{{ item.vmid }}"
@@ -122,7 +123,7 @@
         size: "{{ item.longhorn_disk }}"
         format: "{{ 'qcow2' if lh_storage == nas_vm_storage.name else 'raw' }}"
         discard: "on"
-        ssd: "{{ lh_storage != nas_vm_storage.name }}"
+        ssd: "{{ lh_storage not in longhorn_hdd_storages }}"
         state: present
       vars:
         lh_storage: "{{ item.longhorn_storage | default(vm_disk_storage) }}"
@@ -144,7 +145,7 @@
         cores: "{{ item.cores }}"
         memory: "{{ item.memory }}"
         cpuunits: "{{ k8s_vm_cpuunits }}"
-        onboot: true
+        onboot: "{{ item.onboot | default(true) }}"   # false 면 부팅 때 다른 것이 켬(group_vars 의 onboot 설명)
         startup: "{{ item.startup | default(omit) }}"   # 부팅 순서(group_vars 의 startup 설명)
         ipconfig: { ipconfig0: "ip={{ item.ip }}/24,gw={{ ct_gateway }}" }
         nameservers: "{{ k8s_nameservers }}"
