@@ -77,9 +77,9 @@ k8s_clusters:
       - { name: k8s-hub-cp-1, pve: pve01, role: control-plane, vmid: 121, ip: [HUB_CP_1_IP], cores: 2,  memory: 4096,  disk: 32G }
       - { name: k8s-hub-cp-2, pve: pve02, role: control-plane, vmid: 122, ip: [HUB_CP_2_IP], cores: 2,  memory: 4096,  disk: 32G }
       - { name: k8s-hub-cp-3, pve: pve03, role: control-plane, vmid: 125, ip: [HUB_CP_3_IP], cores: 2,  memory: 4096,  disk: 32G, startup: "order=1" }
-      - { name: k8s-hub-worker-1, pve: pve01, role: worker,    vmid: 123, ip: [HUB_WORKER_1_IP], cores: 12, memory: 24576, disk: 100G, longhorn_disk: 20 }
+      - { name: k8s-hub-worker-1, pve: pve01, role: worker,    vmid: 123, ip: [HUB_WORKER_1_IP], cores: 12, memory: 16384, disk: 100G, longhorn_disk: 20 }
       - { name: k8s-hub-worker-2, pve: pve02, role: worker,    vmid: 124, ip: [HUB_WORKER_2_IP], cores: 8,  memory: 16384, disk: 60G,  longhorn_disk: 20 }
-      - { name: k8s-hub-worker-3, pve: pve03, role: worker,    vmid: 126, ip: [HUB_WORKER_3_IP], cores: 6,  memory: 12288, disk: 40G,  longhorn_disk: 100, longhorn_storage: nas, startup: "order=2" }
+      - { name: k8s-hub-worker-3, pve: pve03, role: worker,    vmid: 126, ip: [HUB_WORKER_3_IP], cores: 6,  memory: 16384, disk: 40G,  longhorn_disk: 100, longhorn_storage: nas, startup: "order=2" }
     dns_name: hub                             # 내부망 DNS 역할 이름 k8s-hub(VIP), kubectl-hub(kubectl 을 돌릴 control plane). templates/dnsmasq-lan.conf.j2
     vip: [HUB_VIP]                            # API 엔드포인트(keepalived VRRP, playbooks/tasks/keepalived.yml). control plane 중 한 대가 가짐
     vrrp_id: 100                              # keepalived virtual_router_id. 같은 LAN 의 클러스터마다 달라야 함
@@ -92,7 +92,7 @@ k8s_clusters:
       - { name: k8s-dj-cp-3,     pve: pve03, role: control-plane, vmid: 135, ip: [EDGE_CP_3_IP], cores: 2, memory: 2048, disk: 32G, startup: "order=1" }
       - { name: k8s-dj-worker-1, pve: pve01, role: worker,        vmid: 133, ip: [EDGE_WORKER_1_IP], cores: 6, memory: 8192, disk: 40G, longhorn_disk: 40 }
       - { name: k8s-dj-worker-2, pve: pve02, role: worker,        vmid: 134, ip: [EDGE_WORKER_2_IP], cores: 4, memory: 8192, disk: 40G, longhorn_disk: 40 }
-      - { name: k8s-dj-worker-3, pve: pve03, role: worker,        vmid: 136, ip: [EDGE_WORKER_3_IP], cores: 6, memory: 12288, disk: 40G, longhorn_disk: 200, longhorn_storage: nas, startup: "order=2" }
+      - { name: k8s-dj-worker-3, pve: pve03, role: worker,        vmid: 136, ip: [EDGE_WORKER_3_IP], cores: 6, memory: 8192, disk: 40G, longhorn_disk: 200, longhorn_storage: nas, startup: "order=2" }
     dns_name: dj                              # 내부망 DNS 역할 이름 k8s-dj, kubectl-dj, iot-dj(서비스 VIP)
     vip: [EDGE_VIP]
     vrrp_id: 130

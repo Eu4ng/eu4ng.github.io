@@ -56,7 +56,7 @@ k8s_clusters:
       - { name: k8s-[SITE_SHORT]-cp-3,     pve: pve03, role: control-plane, vmid: 135, ip: [EDGE_CP3_IP], cores: 2, memory: 2048, disk: 32G, startup: "order=1" }
       - { name: k8s-[SITE_SHORT]-worker-1, pve: pve01, role: worker,        vmid: 133, ip: [EDGE_WORKER1_IP], cores: 6, memory: 8192, disk: 40G, longhorn_disk: 40 }
       - { name: k8s-[SITE_SHORT]-worker-2, pve: pve02, role: worker,        vmid: 134, ip: [EDGE_WORKER2_IP], cores: 4, memory: 8192, disk: 40G, longhorn_disk: 40 }
-      - { name: k8s-[SITE_SHORT]-worker-3, pve: pve03, role: worker,        vmid: 136, ip: [EDGE_WORKER3_IP], cores: 6, memory: 12288, disk: 40G, longhorn_disk: 200, longhorn_storage: nas, startup: "order=2" }
+      - { name: k8s-[SITE_SHORT]-worker-3, pve: pve03, role: worker,        vmid: 136, ip: [EDGE_WORKER3_IP], cores: 6, memory: 8192, disk: 40G, longhorn_disk: 200, longhorn_storage: nas, startup: "order=2" }
     dns_name: [SITE_SHORT]                    # 내부망 DNS 역할 이름 k8s-[SITE_SHORT](API VIP), kubectl-[SITE_SHORT], iot-[SITE_SHORT](서비스 VIP)
     vip: [EDGE_API_VIP]                       # API 엔드포인트(keepalived VRRP). control plane 중 한 대가 가짐
     vrrp_id: 130                              # keepalived virtual_router_id. 같은 LAN 의 클러스터마다 달라야 함(허브와 다르게)
