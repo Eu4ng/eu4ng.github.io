@@ -94,7 +94,6 @@ vars_json() {
       'node_ip': hostvars['$NODE'].ansible_host | default(''),
       'in_proxmox': '$NODE' in groups.proxmox,
       'self_in_proxmox': '$SELF' in groups.proxmox,
-      'primary': groups.proxmox_primary,
       'domain': proxmox_domain,
       'guests': (lan_dns_instances + ollama_backends + scratch_vms + (k8s_clusters.values() | map(attribute='nodes') | flatten))
                 | selectattr('pve', 'eq', '$NODE') | list,
@@ -171,7 +170,6 @@ preflight() {
   [ "$(v .in_proxmox)" = true ] || die "$NODE 는 inventory 의 proxmox 그룹에 없습니다."
   [ "$(v .self_in_proxmox)" = true ] || die "이 노드($SELF)가 inventory 의 proxmox 그룹에 없습니다."
   [ "$NODE" != "$SELF" ] || die "실행 중인 노드 자신($SELF)은 다시 만들 수 없습니다. 다른 Proxmox 노드에서 실행합니다."
-  v '.primary[]' | grep -qx "$NODE" && die "$NODE 는 메인 노드라 이 절차의 범위 밖입니다(proxmox_api_host·NFS 원본 등이 메인 노드 고정)."
   case "$REASON" in
     disk-replaced) ;;
     failed) [ "$FENCED" = 1 ] || die "--reason failed 는 옛 기계의 전원 차단·디스크 분리를 한 뒤 --fenced 를 붙여야 진행합니다." ;;

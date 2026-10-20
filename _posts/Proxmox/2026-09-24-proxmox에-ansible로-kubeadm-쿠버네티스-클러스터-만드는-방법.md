@@ -247,7 +247,7 @@ ansible-playbook playbooks/vm-template.yml
 - 확인: 모든 노드 Ready, 노드 수
 - 내부망 DNS: `lan-dns.yml` 을 다시 실행해 노드·역할 이름을 새로 만듦
 
-keepalived 는 control plane 마다 systemd 서비스로 뜨고, control plane 끼리 VRRP 광고를 unicast 로 주고받아 우선순위가 가장 높은 한 대가 VIP 를 가집니다. 평소에는 첫 번째 Proxmox 노드 쪽 control plane(우선순위 110, 나머지는 100)이 가지고, 그 노드의 apiserver 가 `6443` 에서 연결을 받지 않으면 우선순위가 20 내려가 다른 control plane 으로 넘어갑니다. 돌아오면 다시 가져갑니다(첫 control plane 의 keepalived 를 멈추면 1초 안에 VIP 가 두 번째로 넘어가고, 다시 켜면 4초 안에 돌아옵니다). 쿠버네티스 API 없이 주인을 정하므로 etcd 과반을 잃어 API 가 멈춰도 살아 있는 control plane 이 VIP 를 계속 가집니다. apiserver 검사가 실패해도 VIP 를 놓지 않고 우선순위만 내리는 것도 같은 이유입니다. API 리스로 리더를 뽑는 방식이 이때 VIP 를 놓는 이유는 [가상 IP(VIP)와 ARP로 서버 장애를 넘기는 원리](/posts/69/)에 정리했습니다. 클러스터를 처음 만들 때는 apiserver 가 아직 없으므로 `kubeadm init` 전에 keepalived 를 켜 두고 응답은 기다리지 않습니다. 엣지처럼 `service_vip` 가 있는 클러스터는 같은 keepalived 가 서비스 VIP 도 함께 가집니다. `vrrp_id` 는 VRRP 의 `virtual_router_id` 라 같은 LAN 의 클러스터마다 다르게 둡니다. 예전에 kube-vip 으로 만든 클러스터는 첫 작업이 kube-vip static pod 를 모든 control plane 에서 먼저 내리고 keepalived 로 바꿉니다. VIP 만 다시 맞출 때는 `--tags vip` 로 실행합니다.
+keepalived 는 control plane 마다 systemd 서비스로 뜨고, control plane 끼리 VRRP 광고를 unicast 로 주고받아 우선순위가 가장 높은 한 대가 VIP 를 가집니다. 우선순위는 모두 100 이고 `nopreempt` 라, VIP 를 가진 control plane 이 계속 가지고 있다가 그 노드의 apiserver 가 `6443` 에서 연결을 받지 않고 다른 control plane 의 apiserver 는 받으면 FAULT 상태로 VIP 를 놓아 그쪽으로 넘어갑니다. `nopreempt` 에서는 우선순위를 깎는 것만으로는 다른 노드가 가져가지 않아서, 검사 스크립트가 다른 control plane 까지 보고 판정합니다. 돌아온 노드가 VIP 를 다시 빼앗지 않아 특정 노드에 묶이지 않습니다. 쿠버네티스 API 없이 주인을 정하므로 etcd 과반을 잃어 API 가 멈춰도 살아 있는 control plane 이 VIP 를 계속 가집니다. 모든 control plane 의 apiserver 가 응답하지 않으면 검사가 성공으로 답해 VIP 를 놓지 않는 것도 같은 이유입니다. API 리스로 리더를 뽑는 방식이 이때 VIP 를 놓는 이유는 [가상 IP(VIP)와 ARP로 서버 장애를 넘기는 원리](/posts/69/)에 정리했습니다. 클러스터를 처음 만들 때는 apiserver 가 아직 없으므로 `kubeadm init` 전에 keepalived 를 켜 두고 응답은 기다리지 않습니다. 엣지처럼 `service_vip` 가 있는 클러스터는 같은 keepalived 가 서비스 VIP 도 함께 가집니다. `vrrp_id` 는 VRRP 의 `virtual_router_id` 라 같은 LAN 의 클러스터마다 다르게 둡니다. 예전에 kube-vip 으로 만든 클러스터는 첫 작업이 kube-vip static pod 를 모든 control plane 에서 먼저 내리고 keepalived 로 바꿉니다. VIP 만 다시 맞출 때는 `--tags vip` 로 실행합니다.
 
 CoreDNS 는 kubeadm 기본값(2벌)이면 API 가 멈췄을 때 엔드포인트가 갱신되지 않아, 죽은 노드의 CoreDNS 로 가는 조회가 실패합니다. 플레이북은 CoreDNS 를 cordon 하지 않은 노드 수만큼 두고, 한 노드에 하나씩만 뜨게(`podAntiAffinity`, control plane taint 허용) 한 뒤 kube-dns Service 에 `trafficDistribution: PreferSameNode` 를 걸어 같은 노드의 CoreDNS 를 먼저 쓰게 합니다. `kubeadm upgrade` 가 이 설정을 되돌리므로 업그레이드 뒤와 cordon 한 노드를 다시 들인 뒤에 `--tags dns` 로 다시 실행합니다.
 
@@ -1042,9 +1042,9 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/templates/keepalived/k
 ```yaml
 # control plane 노드의 keepalived(VRRP). k8s-cluster.yml 이 include 합니다. API VIP(kc.vip)와, service_vip 가 있는 클러스터는 서비스 VIP 도 가집니다.
 # kube-vip 은 리더를 쿠버네티스 API 리스로 뽑아서 etcd 과반이 깨져 API 가 멈추면 VIP 를 놓았습니다(살아 있는 노드의 서비스까지 끊김).
-# keepalived 는 API 없이 control plane 끼리 VRRP unicast 로 정합니다. 평소에는 메인 서버(proxmox_node, pve01) 쪽 control plane(우선순위 110)이 가지고, 그 노드의
-# apiserver(6443)가 응답하지 않으면 우선순위가 20 내려가 다른 control plane 으로 넘어갑니다. 모두 응답하지 않으면(과반을 잃어 apiserver 가
-# 재시작을 반복) 살아 있는 노드가 VIP 를 계속 가집니다 — 검사 실패를 FAULT 가 아니라 우선순위 감점으로 두는 이유입니다.
+# keepalived 는 API 없이 control plane 끼리 VRRP unicast 로 정합니다. 우선순위는 모두 100 이고 nopreempt 라 VIP 를 가진 노드가 계속 가지며, 그 노드의
+# apiserver(6443)가 응답하지 않고 다른 control plane 의 apiserver 는 응답하면 FAULT 로 VIP 를 놓아 그쪽으로 넘어갑니다(nopreempt 라 우선순위
+# 감점으로는 넘어가지 않음). 모두 응답하지 않으면(과반을 잃어 apiserver 가 재시작을 반복) 검사가 성공으로 답해 살아 있는 노드가 VIP 를 계속 가집니다.
 # 서비스 VIP 로 들어온 요청은 kube-proxy 가 Service 의 externalIPs 규칙으로 받습니다(k8s-gitops iot/clusters/<지역>).
 - name: kube-vip 내리기 (같은 클러스터의 모든 control plane 에서 먼저. 두 방식이 한 VIP 를 동시에 갖지 않게)
   ansible.builtin.shell: |
@@ -1073,8 +1073,14 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/templates/keepalived/k
     mode: "0755"
     content: |
       #!/bin/bash
-      # 이 노드의 apiserver 가 6443 에서 연결을 받는지(keepalived track_script, 실패하면 우선순위 감점)
-      exec timeout 2 bash -c '</dev/tcp/127.0.0.1/6443'
+      # keepalived track_script. 이 노드의 apiserver 가 6443 에서 연결을 받으면 성공입니다. 받지 못하면 다른 control plane 중
+      # 하나라도 받을 때만 실패해 FAULT 로 VIP 를 놓습니다(nopreempt 라 우선순위 감점으로는 넘어가지 않음).
+      # 모두 받지 못하면 성공으로 두어 누군가는 VIP 를 계속 가집니다(etcd 과반을 잃은 경우)
+      timeout 1 bash -c '</dev/tcp/127.0.0.1/6443' && exit 0
+      for ip in {{ kc.nodes | rejectattr('retire', 'defined') | selectattr('role', 'equalto', 'control-plane') | rejectattr('name', 'equalto', inventory_hostname) | map(attribute='ip') | join(' ') }}; do
+        timeout 1 bash -c "</dev/tcp/$ip/6443" && exit 1
+      done
+      exit 0
 - name: keepalived 설정
   ansible.builtin.template:
     src: ../templates/keepalived/keepalived.conf.j2
@@ -1117,22 +1123,23 @@ global_defs {
     enable_script_security
 }
 
-# 이 노드의 apiserver 가 응답하지 않으면 우선순위를 20 내립니다. FAULT 로 VIP 를 놓지 않습니다(모든 control plane 이 실패해도 누군가는 가짐)
+# 이 노드의 apiserver 가 응답하지 않고 다른 control plane 은 응답하면 FAULT 로 VIP 를 놓습니다. 모두 응답하지 않으면 놓지 않습니다
+# (검사 스크립트가 판정, 모든 control plane 이 실패해도 누군가는 가짐). weight 를 두지 않는 것은 nopreempt 라 우선순위 감점으로는 넘어가지 않기 때문입니다
 vrrp_script apiserver {
     script "/etc/keepalived/check-apiserver.sh"
     interval 2
-    timeout 3
+    timeout 4
     fall 3
     rise 2
-    weight -20
 }
 
 vrrp_instance k8s_{{ k8s_cluster_name }} {
     state BACKUP
     interface {{ k8s_vip_interface }}
     virtual_router_id {{ kc.vrrp_id }}
-    # 메인 서버(proxmox_node, pve01) 쪽 control plane 이 평소 VIP 를 가집니다. 돌아오면 다시 가져갑니다(preempt 기본)
-    priority {{ 110 if me.pve | default(proxmox_node) == proxmox_node else 100 }}
+    # 우선순위는 모두 같고 nopreempt 라, VIP 를 가진 노드가 죽거나 FAULT 일 때만 넘어가고 돌아온 노드가 다시 빼앗지 않습니다(특정 노드에 묶지 않음)
+    priority 100
+    nopreempt
     advert_int 1
     # 멀티캐스트 대신 상대 control plane 에 직접 보냅니다
     unicast_src_ip {{ me.ip }}
@@ -1192,7 +1199,7 @@ curl -k https://[HUB_VIP]:6443/livez
 ssh ubuntu@k8s-hub-worker-1.[DOMAIN] findmnt /var/lib/longhorn
 ```
 
-- **확인:** 노드 여섯 대가 `Ready` 이고 `VERSION` 이 `v1.37.0`, CoreDNS 파드가 노드마다 하나씩 `Running`, keepalived 가 세 control plane 에서 `active` 이고 VIP(`[HUB_VIP]/32`)는 `k8s-hub-cp-1` 의 `eth0` 에만 보이며, `livez` 가 `ok`, `findmnt` 에 두 번째 디스크(`/dev/sdb`)가 `/var/lib/longhorn` 에 ext4 로 마운트되어 보입니다.
+- **확인:** 노드 여섯 대가 `Ready` 이고 `VERSION` 이 `v1.37.0`, CoreDNS 파드가 노드마다 하나씩 `Running`, keepalived 가 세 control plane 에서 `active` 이고 VIP(`[HUB_VIP]/32`)는 control plane 한 대의 `eth0` 에만 보이며, `livez` 가 `ok`, `findmnt` 에 두 번째 디스크(`/dev/sdb`)가 `/var/lib/longhorn` 에 ext4 로 마운트되어 보입니다.
 
 다음은 [쿠버네티스에 Argo CD 설치하고 GitOps로 서비스 추가하는 방법](/posts/36/)부터 이어집니다. 지역 엣지는 허브 Argo CD 에 원격 클러스터로 등록합니다([Proxmox에 Ansible로 kubeadm 엣지 클러스터 만들고 Argo CD 원격 클러스터로 등록하는 방법](/posts/42/)). Longhorn 과 DB 이중화는 [쿠버네티스에 Longhorn과 Patroni로 볼륨과 TimescaleDB 이중화하는 방법](/posts/54/)에 정리했습니다.
 

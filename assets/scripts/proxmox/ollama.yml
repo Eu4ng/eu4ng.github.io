@@ -115,7 +115,10 @@
     - name: NFS export 설정 (/etc/exports.d/ollama.exports)
       ansible.builtin.copy:
         dest: /etc/exports.d/ollama.exports
-        content: "{{ ollama_models_dir }}/store [NFS_CLIENT_IP](rw,sync,no_subtree_check,all_squash,anonuid=100000,anongid=100000)\n"
+        content: |
+          {% for h in ollama_backends | map(attribute='pve') | unique | reject('eq', ollama_nfs_host) %}
+          {{ ollama_models_dir }}/store {{ hostvars[h].ansible_host }}(rw,sync,no_subtree_check,all_squash,anonuid=100000,anongid=100000)
+          {% endfor %}
         mode: "0644"
       register: nfs_export
       when: is_nfs_host

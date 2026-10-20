@@ -1,6 +1,8 @@
 # 내부망 DNS 컨테이너. 밖에 여는 서비스 이름만 클러스터 노드 IP 로 답해, 집 안에서는 Cloudflare 를 거치지 않고 노드로 직접 붙게 합니다.
 #   ansible-playbook playbooks/lan-dns.yml   (PROXMOX_* 환경변수 필요, README 참고)
 ---
+- import_playbook: main-node.yml
+
 - name: CT 템플릿 준비
   hosts: proxmox
   gather_facts: false
@@ -105,8 +107,8 @@
         state: restarted
         daemon_reload: true
 
-- name: 호스트 정리와 확인
-  hosts: proxmox_primary
+- name: 호스트 정리와 확인 (기준 노드에서)
+  hosts: pve_main
   gather_facts: false
   vars:
     first_name: "{{ lan_dns_names[0] }}.{{ lan_dns_domain }}"
@@ -145,14 +147,15 @@
       loop: "{{ dns_check.results }}"
       loop_control: { label: "{{ item.item.name }}" }
 
-- name: 내부망 DNS 를 쓰는 CT (inventory 밖, 호스트에서 pct 로 설정)
-  hosts: proxmox_primary
+- name: 내부망 DNS 를 쓰는 CT (inventory 밖, 그 CT 가 지금 있는 노드에서 pct 로 설정)
+  hosts: proxmox
   gather_facts: false
   tasks:
     # CT 의 resolv.conf 는 Proxmox 가 시작할 때 CT 설정으로 씁니다. 지금 도는 CT 에도 바로 적용되게 파일도 같은 내용으로 바꿉니다.
     # 두 DNS CT 가 모두 죽어도 바깥 이름은 풀리게 마지막에 upstream 하나를 둡니다
     - name: DNS 서버 지정
       ansible.builtin.shell: |
+        [ -e /etc/pve/lxc/{{ item }}.conf ] || exit 0   # /etc/pve/lxc 는 이 노드의 CT 만 보입니다(옮겨 다니는 CT)
         want="{{ (lan_dns_instances | map(attribute='ip') | list + lan_dns_upstream[:1]) | join(' ') }}"
         [ "$(pct config {{ item }} | sed -n 's/^nameserver: //p')" = "$want" ] && exit 0
         pct set {{ item }} --nameserver "$want" --searchdomain {{ lan_dns_domain }}

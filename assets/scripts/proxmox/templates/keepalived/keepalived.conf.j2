@@ -7,22 +7,23 @@ global_defs {
     enable_script_security
 }
 
-# 이 노드의 apiserver 가 응답하지 않으면 우선순위를 20 내립니다. FAULT 로 VIP 를 놓지 않습니다(모든 control plane 이 실패해도 누군가는 가짐)
+# 이 노드의 apiserver 가 응답하지 않고 다른 control plane 은 응답하면 FAULT 로 VIP 를 놓습니다. 모두 응답하지 않으면 놓지 않습니다
+# (검사 스크립트가 판정, 모든 control plane 이 실패해도 누군가는 가짐). weight 를 두지 않는 것은 nopreempt 라 우선순위 감점으로는 넘어가지 않기 때문입니다
 vrrp_script apiserver {
     script "/etc/keepalived/check-apiserver.sh"
     interval 2
-    timeout 3
+    timeout 4
     fall 3
     rise 2
-    weight -20
 }
 
 vrrp_instance k8s_{{ k8s_cluster_name }} {
     state BACKUP
     interface {{ k8s_vip_interface }}
     virtual_router_id {{ kc.vrrp_id }}
-    # 메인 서버(proxmox_node, pve01) 쪽 control plane 이 평소 VIP 를 가집니다. 돌아오면 다시 가져갑니다(preempt 기본)
-    priority {{ 110 if me.pve | default(proxmox_node) == proxmox_node else 100 }}
+    # 우선순위는 모두 같고 nopreempt 라, VIP 를 가진 노드가 죽거나 FAULT 일 때만 넘어가고 돌아온 노드가 다시 빼앗지 않습니다(특정 노드에 묶지 않음)
+    priority 100
+    nopreempt
     advert_int 1
     # 멀티캐스트 대신 상대 control plane 에 직접 보냅니다
     unicast_src_ip {{ me.ip }}

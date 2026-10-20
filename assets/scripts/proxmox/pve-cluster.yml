@@ -1,4 +1,5 @@
-# Proxmox 호스트들을 클러스터 하나로 묶습니다. inventory 의 proxmox 그룹이 노드이고, proxmox_primary 에서 클러스터를 만든 뒤 나머지가 합류합니다.
+# Proxmox 호스트들을 클러스터 하나로 묶습니다. inventory 의 proxmox 그룹이 노드이고, 클러스터가 없으면
+# cluster_bootstrap_node 에서 만들고 나머지는 과반 쪽 노드에 합류합니다.
 # 호스트 이름을 inventory 이름(FQDN <이름>.{{ proxmox_domain }})으로 맞추고, apt 저장소를 구독 없는 저장소로 맞춥니다.
 # 노드 이름은 클러스터에 들어간 뒤에는 바꿀 수 없어, 합류 전에 scripts/pve-rename-node.sh 로 바꿉니다(게스트는 켠 채로 둬도 됩니다).
 # 호스트 CPU 주파수 정책(cpu-epp.service: governor·EPP, 값은 group_vars 의 pve_cpu_*)과 재부팅 스크립트도 둡니다.
@@ -126,7 +127,7 @@
       register: fqdn
       changed_when: false
       failed_when: fqdn.stdout != inventory_hostname ~ '.' ~ proxmox_domain
-    - name: root 키 (없을 때만. 합류할 때 메인 서버에 ssh 로 붙는 데 씀)
+    - name: root 키 (없을 때만. 합류할 때 기준 노드에 ssh 로 붙는 데 씀)
       ansible.builtin.command: ssh-keygen -q -t rsa -b 4096 -N '' -f /root/.ssh/id_rsa
       args:
         creates: /root/.ssh/id_rsa
@@ -135,35 +136,65 @@
         src: /root/.ssh/id_rsa.pub
       register: root_pubkey
 
+# 클러스터가 아직 없으면 cluster_bootstrap_node 에서 만들고, 있으면 과반 쪽 노드(기준 노드가 그중이면 기준 노드)에 합류합니다.
+# 특정 노드에 묶지 않아 어느 노드를 다시 설치해도 남은 노드로 다시 붙습니다(옛 기록은 scripts/pve-node-rebuild.sh 가 먼저 지움).
 - name: 클러스터 만들기
-  hosts: proxmox_primary
+  hosts: proxmox
   gather_facts: false
   any_errors_fatal: true
   tasks:
-    - name: 클러스터 만들기 (없을 때만)
+    - name: 과반 여부 (클러스터에 든 노드만)
+      ansible.builtin.command: pvecm status
+      register: pvecm
+      changed_when: false
+      failed_when: false
+      check_mode: false   # 읽기만 하므로 --check 에서도 실행
+      when: corosync.stat.exists
+    - name: 합류 기준 노드 정하기
+      ansible.builtin.set_fact:
+        cluster_anchor: >-
+          {%- set ns = namespace(members=[], quorate=[]) -%}
+          {%- for h in ansible_play_hosts -%}
+          {%- if hostvars[h].corosync.stat.exists -%}
+          {%- set ns.members = ns.members + [h] -%}
+          {%- if (hostvars[h].pvecm.stdout | default('')) is search('Quorate:\s+Yes') -%}{%- set ns.quorate = ns.quorate + [h] -%}{%- endif -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {%- if not ns.members -%}{{ cluster_bootstrap_node }}
+          {%- elif proxmox_node in ns.quorate -%}{{ proxmox_node }}
+          {%- else -%}{{ ns.quorate | first | default('') }}{%- endif -%}
+      run_once: true
+    - name: 과반 쪽 노드가 없으면 멈춤
+      ansible.builtin.assert:
+        that: cluster_anchor | length > 0
+        fail_msg: 클러스터에 든 노드는 있는데 과반(Quorate)인 노드가 없습니다. 남은 노드에서 pvecm status 를 확인합니다.
+      run_once: true
+    - name: 클러스터 만들기 (클러스터가 아직 없을 때만, cluster_bootstrap_node 에서)
       ansible.builtin.command: pvecm create {{ pve_cluster_name }} --link0 {{ ansible_host }}
       args:
         creates: /etc/pve/corosync.conf
-    - name: 다른 노드의 root 키 허용 (pvecm add --use_ssh 용)
+      when: inventory_hostname == cluster_anchor and not corosync.stat.exists
+    - name: 합류할 노드의 root 키 허용 (pvecm add --use_ssh 용, 기준 노드에서)
       ansible.posix.authorized_key:
         user: root
         key: "{{ hostvars[item].root_pubkey.content | b64decode }}"
         comment: "{{ item }}"
-      loop: "{{ groups.proxmox | difference(groups.proxmox_primary) }}"
+      loop: "{{ ansible_play_hosts | difference([cluster_anchor]) }}"
+      when: inventory_hostname == cluster_anchor and not hostvars[item].corosync.stat.exists
 
 - name: 클러스터 합류
-  hosts: proxmox:!proxmox_primary
+  hosts: proxmox
   gather_facts: false
   serial: 1
   vars:
-    primary_ip: "{{ hostvars[groups.proxmox_primary[0]].ansible_host }}"
+    anchor_ip: "{{ hostvars[cluster_anchor].ansible_host }}"
   tasks:
-    - name: 메인 서버에 클러스터가 있는지
+    - name: 기준 노드에 클러스터가 있는지
       ansible.builtin.stat:
         path: /etc/pve/corosync.conf
-      delegate_to: "{{ groups.proxmox_primary[0] }}"
-      register: primary_corosync
-      failed_when: not primary_corosync.stat.exists
+      delegate_to: "{{ cluster_anchor }}"
+      register: anchor_corosync
+      failed_when: not anchor_corosync.stat.exists
     - name: 합류 여부
       ansible.builtin.stat:
         path: /etc/pve/corosync.conf
@@ -171,24 +202,27 @@
     - name: 합류
       when: not corosync.stat.exists
       block:
-        # 네트워크로 받지 않고(ssh-keyscan) 메인 서버에서 직접 읽은 키를 넣습니다. 합류(pvecm add --use_ssh)가 이 키로 메인 서버를 검증합니다
-        - name: 메인 서버 호스트 키 읽기
+        # 네트워크로 받지 않고(ssh-keyscan) 기준 노드에서 직접 읽은 키를 넣습니다. 합류(pvecm add --use_ssh)가 이 키로 기준 노드를 검증합니다
+        - name: 기준 노드 호스트 키 읽기
           ansible.builtin.slurp:
             src: /etc/ssh/ssh_host_ed25519_key.pub
-          delegate_to: "{{ groups.proxmox_primary[0] }}"
-          register: primary_host_key
-        - name: 메인 서버 호스트 키 등록
+          delegate_to: "{{ cluster_anchor }}"
+          register: anchor_host_key
+        - name: 기준 노드 호스트 키 등록
           ansible.builtin.known_hosts:
             path: /root/.ssh/known_hosts
-            name: "{{ primary_ip }}"
-            key: "{{ primary_ip }} {{ (primary_host_key.content | b64decode).split()[:2] | join(' ') }}"
+            name: "{{ anchor_ip }}"
+            key: "{{ anchor_ip }} {{ (anchor_host_key.content | b64decode).split()[:2] | join(' ') }}"
         - name: 합류 (게스트가 없는 노드만 가능)
-          ansible.builtin.command: pvecm add {{ primary_ip }} --link0 {{ ansible_host }} --use_ssh
+          ansible.builtin.command: pvecm add {{ anchor_ip }} --link0 {{ ansible_host }} --use_ssh
           register: join
           failed_when: "'successfully added node' not in join.stdout"   # 실패해도 종료 코드 0 으로 끝나는 경우가 있어 출력으로 판단합니다
         # 같은 이름으로 다시 들어온 노드는 옛 인증서·호스트 키 기록과 새 것이 섞이지 않게 클러스터 전체 인증서 목록을 다시 만듭니다
         - name: 인증서·호스트 키 목록 갱신
           ansible.builtin.command: pvecm updatecerts
+
+# 여기부터 클러스터 전체 작업은 살아 있는 과반 쪽 기준 노드에서 합니다
+- import_playbook: main-node.yml
 
 # 원격지(서울 NAS)의 QDevice 에 닿기 위한 사설망. 인증 키는 실행 PC 의 파일에서 읽어 명령에만 넘깁니다(로그에 남기지 않음)
 # 지금은 QDevice·원격 etcd 투표자가 Tailscale 주소라 필수 경로입니다. 한 노드라도 실패하면 멈추고, 다시 실행하면 이어 갑니다
@@ -331,7 +365,7 @@
   gather_facts: false
   any_errors_fatal: true
   vars:
-    primary: "{{ groups.proxmox_primary[0] }}"
+    primary: "{{ proxmox_node }}"
   tasks:
     - name: corosync-qdevice
       ansible.builtin.apt:
@@ -396,7 +430,7 @@
       when: inventory_hostname == primary and qdevice_action in ['setup', 'reset']
 
 - name: 확인
-  hosts: proxmox_primary
+  hosts: pve_main
   gather_facts: false
   tasks:
     - name: 클러스터 상태

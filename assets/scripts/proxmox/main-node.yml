@@ -1,0 +1,41 @@
+# 클러스터 전체 작업(저장소 등록, 확인, QDevice 등)을 할 기준 노드를 고릅니다. 특정 노드에 묶지 않아 어느 노드가 죽어도
+# 남은 노드로 플레이북이 돕니다. 다른 플레이북이 맨 앞에서 import 하고, 고른 노드는 그룹 pve_main 과 변수 proxmox_node 가 됩니다.
+#   - 환경 변수 PVE_MAIN 이 있으면 그 노드
+#   - 없으면 플레이북을 실행하는 노드(노드에서 직접 돌릴 때, scripts/pve-node-rebuild.sh 등)
+#   - 그것도 아니면(다른 PC) inventory 순서에서 처음으로 과반 쪽(Quorate: Yes)인 노드
+# 고른 노드가 과반 쪽이 아니면 멈춥니다. 직접 실행하면 고른 노드만 보여 줍니다: ansible-playbook playbooks/main-node.yml
+---
+- name: 기준 노드 고르기
+  hosts: localhost
+  gather_facts: false
+  vars:
+    pinned: "{{ lookup('ansible.builtin.env', 'PVE_MAIN') or (groups.proxmox | select('eq', lookup('ansible.builtin.pipe', 'hostname -s')) | first | default('')) }}"
+  tasks:
+    - name: 노드마다 과반 쪽인지
+      ansible.builtin.command: pvecm status
+      delegate_to: "{{ item }}"
+      loop: "{{ [pinned] if pinned else groups.proxmox }}"
+      register: quorum
+      changed_when: false
+      failed_when: false
+      ignore_unreachable: true
+      check_mode: false   # 읽기만 하므로 --check 에서도 실행
+    - name: 고르기
+      ansible.builtin.set_fact:
+        pve_main: >-
+          {{ quorum.results | rejectattr('unreachable', 'defined') | selectattr('stdout', 'defined')
+             | selectattr('stdout', 'search', 'Quorate:\s+Yes') | map(attribute='item') | first | default('') }}
+    - name: 과반 쪽 노드가 없으면 멈춤
+      ansible.builtin.assert:
+        that: pve_main | length > 0
+        fail_msg: >-
+          {{ (pinned ~ ' 이 과반 쪽이 아니거나 닿지 않습니다') if pinned else '과반 쪽인 노드가 없습니다' }}.
+          다른 노드를 쓰려면 PVE_MAIN=<노드> 로 실행합니다.
+    - name: 그룹 pve_main
+      ansible.builtin.add_host:
+        name: "{{ pve_main }}"
+        groups: [pve_main]
+      changed_when: false
+    - name: 기준 노드
+      ansible.builtin.debug:
+        msg: "기준 노드 {{ pve_main }}{{ ' (PVE_MAIN·실행 노드)' if pinned else '' }}"
