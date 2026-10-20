@@ -343,8 +343,37 @@ ansible-playbook playbooks/pve-cluster.yml
         dest: /etc/default/pve-reboot
         mode: "0644"
         content: |
-          # proxmox-ansible pve-cluster.yml (group_vars 의 xpenology.vmid). scripts/pve-reboot.sh 가 읽음
+          # proxmox-ansible pve-cluster.yml (group_vars 의 xpenology.vmid, k8s_clusters). scripts/pve-reboot.sh 가 읽음
           LAST_VMIDS="{{ xpenology.vmid if xpenology.pve == inventory_hostname else '' }}"
+          # 이 호스트의 쿠버네티스 노드(재부팅 전에 drain) "클러스터:노드,노드"
+          K8S_DRAIN="{% for c, k in k8s_clusters.items() %}{% set mine = k.nodes | selectattr('pve', 'eq', inventory_hostname) | map(attribute='name') | list %}{% if mine %}{{ c }}:{{ mine | join(',') }} {% endif %}{% endfor %}"
+          # kubectl 을 돌릴 다른 호스트의 control plane "클러스터:IP,IP"(앞에서부터 붙는 곳)
+          K8S_KUBECTL="{% for c, k in k8s_clusters.items() %}{% set cps = k.nodes | rejectattr('pve', 'eq', inventory_hostname) | selectattr('role', 'eq', 'control-plane') | map(attribute='ip') | list %}{% if cps %}{{ c }}:{{ cps | join(',') }} {% endif %}{% endfor %}"
+    # 부팅 뒤 pve-reboot.sh 가 drain 한 노드를 Ready 가 되면 uncordon 하고 CoreDNS 수를 맞춥니다(표식이 없으면 바로 끝남).
+    # HA 게스트는 되돌리지 않습니다(nofailback). worker-3 은 NAS 를 기다려 약 6분 뒤 켜지므로 30분까지 기다립니다
+    - name: 재부팅 뒤 쿠버네티스 노드 복귀 유닛
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/pve-k8s-return.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Uncordon k8s nodes drained by pve-reboot.sh (proxmox-ansible pve-cluster.yml)
+          Wants=network-online.target
+          After=network-online.target pve-guests.service
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/sbin/pve-reboot.sh --return
+          TimeoutStartSec=35min
+
+          [Install]
+          WantedBy=multi-user.target
+      register: k8s_return_unit
+    - name: 재부팅 뒤 쿠버네티스 노드 복귀 켜기
+      ansible.builtin.systemd:
+        name: pve-k8s-return.service
+        enabled: true
+        daemon_reload: "{{ k8s_return_unit is changed }}"
     # governor 를 먼저 바꿔야 EPP 를 고를 수 있습니다(performance governor 에서는 EPP 가 performance 하나뿐)
     - name: CPU 주파수 정책 (부팅 때 적용)
       ansible.builtin.copy:
@@ -698,6 +727,15 @@ ansible-playbook playbooks/pve-cluster.yml
 
 플레이북은 재부팅 스크립트를 각 노드의 `/usr/local/sbin/pve-reboot.sh` 에 둡니다. 호스트를 재부팅하거나 하드웨어 작업으로 끌 때는 일반 `reboot`·`poweroff` 대신 이 스크립트를 씁니다. 게스트를 두 차례로 먼저 내리고(나머지 게스트를 모두 내린 뒤 NAS VM 을 마지막에), 내려가지 않는 게스트가 있으면 sysrq 로 즉시 재부팅하거나 끕니다. NAS 를 먼저 내리면 그 NFS 저장소에 디스크를 둔 VM 이 I/O 에서 굳기 때문입니다. 마지막에 내릴 게스트는 플레이북이 `xpenology` 변수로 배포하는 `/etc/default/pve-reboot` 의 `LAST_VMIDS` 이고, 실행할 때 `--last <vmid>` 로 더할 수 있습니다. NAS 가 있는 노드를 재부팅하면 다른 노드에서 그 NFS 저장소를 쓰는 VM 도 그동안 디스크 I/O 가 멈추므로, 그런 VM 은 미리 내리거나 멈춤을 감수합니다.
 
+게스트를 내리기 전에 그 호스트에 있는 쿠버네티스 노드를 drain 합니다. 노드가 갑자기 꺼지면 StatefulSet 파드는 Terminating 으로 묶여 다른 노드로 넘어가지 못하기 때문입니다. 스크립트는 다른 호스트의 control plane 에 ssh 해서 kubectl 을 돌립니다. 어느 노드를 drain 하고 어느 control plane 에 붙을지는 플레이북이 `k8s_clusters` 변수로 만든 `/etc/default/pve-reboot` 의 `K8S_DRAIN`·`K8S_KUBECTL` 입니다. 순서는 이렇습니다.
+
+1. 그 노드에 Patroni 주 DB(네임스페이스 `timescaledb` 의 `role=primary` 파드)가 있으면 drain 하지 않는 멤버로 switchover 하고, 새 주 DB 가 될 때까지 기다립니다.
+2. `kubectl drain --ignore-daemonsets --delete-emptydir-data --timeout=300s` 로 노드를 비웁니다. 실패하면 cordon 을 되돌리고 재부팅하지 않고 끝냅니다.
+3. drain 한 노드를 `/var/lib/pve-reboot/drained` 에 적어 둡니다. 부팅 뒤 `pve-k8s-return.service`(`pve-reboot.sh --return`)가 노드가 Ready 가 되면 uncordon 하고, 노드마다 하나씩 두는 CoreDNS 의 수를 다시 맞춥니다.
+4. Proxmox HA 에 등록한 게스트는 끄지 않고, 메모리가 가장 많이 남은 노드로 `ha-manager crm-command migrate` 합니다. maintenance 모드는 풀 때 게스트가 원래 노드로 되돌아가므로 쓰지 않습니다.
+
+장애 시험처럼 노드가 갑자기 사라진 상황을 만들 때는 `--no-drain` 으로 이 단계를 건너뜁니다.
+
 ```bash
 # 판정만 보기
 /usr/local/sbin/pve-reboot.sh --dry-run
@@ -707,7 +745,7 @@ systemd-run --unit pve-reboot --collect /usr/local/sbin/pve-reboot.sh
 journalctl -fu pve-reboot
 ```
 
-- **확인:** `--dry-run` 이 내릴 게스트 목록과 재부팅 경로(일반 또는 sysrq)를 출력합니다.
+- **확인:** `--dry-run` 이 넘길 주 DB, drain 으로 옮길 파드(서버 dry-run), 옮길 HA 게스트, 내릴 게스트 목록과 재부팅 경로(일반 또는 sysrq)를 출력합니다. dry-run 은 볼륨을 떼지 않으므로 Longhorn 볼륨이 붙은 노드는 instance-manager 의 PodDisruptionBudget 에서 15초 뒤 멈춘 것으로 나옵니다. 실제 drain 에서는 볼륨이 떨어지면 Longhorn 이 그 PDB 를 풉니다.
 
 <details markdown="1">
 <summary>scripts/pve-reboot.sh 전문</summary>

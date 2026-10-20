@@ -46,8 +46,37 @@
         dest: /etc/default/pve-reboot
         mode: "0644"
         content: |
-          # proxmox-ansible pve-cluster.yml (group_vars 의 xpenology.vmid). scripts/pve-reboot.sh 가 읽음
+          # proxmox-ansible pve-cluster.yml (group_vars 의 xpenology.vmid, k8s_clusters). scripts/pve-reboot.sh 가 읽음
           LAST_VMIDS="{{ xpenology.vmid if xpenology.pve == inventory_hostname else '' }}"
+          # 이 호스트의 쿠버네티스 노드(재부팅 전에 drain) "클러스터:노드,노드"
+          K8S_DRAIN="{% for c, k in k8s_clusters.items() %}{% set mine = k.nodes | selectattr('pve', 'eq', inventory_hostname) | map(attribute='name') | list %}{% if mine %}{{ c }}:{{ mine | join(',') }} {% endif %}{% endfor %}"
+          # kubectl 을 돌릴 다른 호스트의 control plane "클러스터:IP,IP"(앞에서부터 붙는 곳)
+          K8S_KUBECTL="{% for c, k in k8s_clusters.items() %}{% set cps = k.nodes | rejectattr('pve', 'eq', inventory_hostname) | selectattr('role', 'eq', 'control-plane') | map(attribute='ip') | list %}{% if cps %}{{ c }}:{{ cps | join(',') }} {% endif %}{% endfor %}"
+    # 부팅 뒤 pve-reboot.sh 가 drain 한 노드를 Ready 가 되면 uncordon 하고 CoreDNS 수를 맞춥니다(표식이 없으면 바로 끝남).
+    # HA 게스트는 되돌리지 않습니다(nofailback). worker-3 은 NAS 를 기다려 약 6분 뒤 켜지므로 30분까지 기다립니다
+    - name: 재부팅 뒤 쿠버네티스 노드 복귀 유닛
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/pve-k8s-return.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Uncordon k8s nodes drained by pve-reboot.sh (proxmox-ansible pve-cluster.yml)
+          Wants=network-online.target
+          After=network-online.target pve-guests.service
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/sbin/pve-reboot.sh --return
+          TimeoutStartSec=35min
+
+          [Install]
+          WantedBy=multi-user.target
+      register: k8s_return_unit
+    - name: 재부팅 뒤 쿠버네티스 노드 복귀 켜기
+      ansible.builtin.systemd:
+        name: pve-k8s-return.service
+        enabled: true
+        daemon_reload: "{{ k8s_return_unit is changed }}"
     # governor 를 먼저 바꿔야 EPP 를 고를 수 있습니다(performance governor 에서는 EPP 가 performance 하나뿐)
     - name: CPU 주파수 정책 (부팅 때 적용)
       ansible.builtin.copy:
