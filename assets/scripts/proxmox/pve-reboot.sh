@@ -46,7 +46,7 @@ DRY_RUN=0 FORCE_SYSRQ=0 POWEROFF=0 VM_TIMEOUT=180 CT_TIMEOUT=60 DRAIN=1 RETURN=0
 DRAIN_TIMEOUT=300 HA_TIMEOUT=300 RETURN_TIMEOUT=1800 MARK=/var/lib/pve-reboot/drained
 declare -A SKIP=() LAST=() HA_ID=()
 # 노드별 기본값(pve-cluster.yml 이 배포). LAST_VMIDS="205" 처럼 공백으로 나눕니다.
-# K8S_DRAIN="hub:k8s-hub-cp-1,k8s-hub-worker-1 daejeon:…"(이 호스트의 노드), K8S_KUBECTL="hub:192.168.0.122,192.168.0.125 …"
+# K8S_DRAIN="hub:k8s-hub-cp-1,k8s-hub-worker-1 daejeon:…"(이 호스트의 노드), K8S_KUBECTL="hub:[CP1_IP],[CP2_IP] …"
 # (다른 호스트의 control plane, 앞에서부터 붙는 곳을 씀)
 K8S_DRAIN=${K8S_DRAIN:-} K8S_KUBECTL=${K8S_KUBECTL:-} PATRONI_NS=${PATRONI_NS:-timescaledb}
 [ -r /etc/default/pve-reboot ] && . /etc/default/pve-reboot
@@ -201,7 +201,7 @@ ha_here() { ha-manager status 2>/dev/null | awk -v n="$SELF" '$1=="service" && $
 # keep-apart(resource-affinity negative, 켜진 규칙) 상대 서비스
 ha_apart() {
   ha-manager rules config --output-format json 2>/dev/null | jq -r --arg s "$1" '.[]
-    | select(.type == "resource-affinity" and .affinity == "negative" and ((.disable // 0) | tostring) != "1")
+    | select(.type == "resource-affinity" and .affinity == "negative" and ((.disable // 0) | tostring) != "1" and ((.enabled // 1) | tostring) != "0")
     | (.resources | split(",")) | select(index($s)) | .[] | select(. != $s)' | sort -u
 }
 # 서비스가 started 로 있는 노드
