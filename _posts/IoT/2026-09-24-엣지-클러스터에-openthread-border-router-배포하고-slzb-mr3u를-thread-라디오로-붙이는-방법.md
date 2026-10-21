@@ -240,15 +240,17 @@ patches:
 ```
 {: file="iot/clusters/[SITE]/otbr/kustomization.yaml" }
 
-이미지가 비공개라 엣지의 `otbr` 네임스페이스에도 pull Secret 이 필요합니다. 허브에 있는 것을 그대로 복사합니다.
+이미지가 비공개라 엣지의 `otbr` 네임스페이스에도 pull Secret 이 필요합니다. 허브에 있는 것을 그대로 복사합니다. 엣지에서 IoT 이미지를 모든 워커에 미리 받아 두는 `image-prepull` DaemonSet 도 이 이미지를 받으므로, 그 네임스페이스에도 같이 복사합니다.
 
 ```bash
-# 허브 control plane: 허브의 ghcr-pull 을 엣지 otbr 네임스페이스로 복사
+# 허브 control plane: 허브의 ghcr-pull 을 엣지 otbr·image-prepull 네임스페이스로 복사
 E="--kubeconfig ~/k8s-[SITE].yaml"
-kubectl $E create namespace otbr --dry-run=client -o yaml | kubectl $E apply -f -
-kubectl -n mineru get secret ghcr-pull -o json \
-  | python3 -c 'import sys,json; d=json.load(sys.stdin); print(json.dumps({"apiVersion":"v1","kind":"Secret","type":d["type"],"metadata":{"name":"ghcr-pull","namespace":"otbr"},"data":d["data"]}))' \
-  | kubectl $E apply -f -
+for ns in otbr image-prepull; do
+  kubectl $E create namespace $ns --dry-run=client -o yaml | kubectl $E apply -f -
+  kubectl -n mineru get secret ghcr-pull -o json \
+    | NS=$ns python3 -c 'import sys,json,os; d=json.load(sys.stdin); print(json.dumps({"apiVersion":"v1","kind":"Secret","type":d["type"],"metadata":{"name":"ghcr-pull","namespace":os.environ["NS"]},"data":d["data"]}))' \
+    | kubectl $E apply -f -
+done
 
 # 커밋하고 push
 git add iot/edge/otbr iot/clusters/[SITE]/otbr

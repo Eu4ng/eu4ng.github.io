@@ -324,6 +324,10 @@ Telegraf 설정 하나를 모든 지역이 공유합니다. 지역 이름과 허
 
 브로커(Mosquitto) 자신이 내려가면 Last Will 을 낼 곳도 없어 그동안은 아무 행도 생기지 않습니다. 그래서 브로커 가동 시간(`$SYS/broker/uptime`, 10초마다)을 받아, 다시 떴을 때 시작 시각(수신 시각 − 가동 시간)이 앞보다 뒤로 간 것으로 재시작을 알아냅니다. starlark(`broker_status`)가 브로커 기기(`bedroom2-broker-mosquitto`)의 `offline`(마지막으로 살아 있던 시각)·`online`(다시 뜬 시각)과, 그동안 보고가 버려진 Zigbee 기기마다 `offline` 행을 만듭니다. Telegraf 1.38 부터는 `${...}` 만 환경 변수로 바꾸므로 토픽의 `$SYS` 는 그대로 둡니다.
 
+수집기 자신의 디스크 버퍼 사용률도 `readings` 에 남깁니다. `inputs.disk` 가 버퍼 PVC 의 사용률을 1분마다 재고, `processors.override` 와 starlark 의 `shape()` 가 이를 수집기 기기(`bedroom2-collector-telegraf`)의 `buffer_used_percent`(단위 %, protocol `internal`) 행으로 바꿉니다. 두 DB 가 모두 막히면 이 값도 버퍼에 쌓였다가 나중에 들어가므로, 막힌 동안에는 DB 에서 바로 보이지 않습니다.
+
+Home Assistant 이벤트를 다루는 `event()` 는 원본 대신 추적 정보가 없는 사본(`deepcopy`)을 내보냅니다. 원본을 내보내면 출력 네 개 중 하나만 막혀도 아직 전달되지 않은 메시지가 `max_undelivered_messages`(1,000건)에 닿아 입력이 멈추고, 막히지 않은 DB 의 `events` 까지 늦어집니다. 사본이면 막힌 출력의 몫만 그 출력의 디스크 버퍼에 쌓입니다.
+
 {% raw %}
 ```toml
 # 엣지 Telegraf. env 는 Secret telegraf-credentials(MQTT_USER, MQTT_PASSWORD, LOCAL_PG_PASSWORD, HUB_PG_PASSWORD)와
@@ -338,8 +342,9 @@ Telegraf 설정 하나를 모든 지역이 공유합니다. 지역 이름과 허
   interval = "10s"                    # 입력이 push 라 수집 주기는 의미 없고 flush 주기만 유효합니다
   flush_interval = "10s"
   metric_batch_size = 1000
-  metric_buffer_limit = 500000        # 출력별 상한(건). DB 가 안 닿는 동안 이만큼 디스크에 쌓고, 넘치면 오래된 것부터 버립니다
-  buffer_strategy = "disk"            # 파드가 재시작해도 버퍼가 남습니다
+  metric_buffer_limit = 500000        # 메모리 버퍼일 때만 쓰는 상한입니다. 디스크 버퍼(1.40)는 이 값을 무시하고 끝없이 쌓습니다(2026-10 격리 시험)
+  buffer_strategy = "disk"            # 파드가 재시작해도 버퍼가 남습니다. 쌓인 1건마다 메모리도 약 1.3KB 늘어 메모리 limit 이 버티는 시간을 정합니다.
+                                      # PVC 가 가득 차면 WAL 이 깨져 재시작을 되풀이하고, 그 출력의 버퍼를 지워야 되살아납니다(쌓인 것을 잃음)
   buffer_directory = "/var/lib/telegraf/buffer"
   omit_hostname = true                # 파드 이름이 태그로 붙지 않게 합니다
   skip_processors_after_aggregators = true   # 집계기를 쓰지 않습니다 (1.40 기본값 변경 경고를 없앰)
@@ -486,6 +491,25 @@ Telegraf 설정 하나를 모든 지역이 공유합니다. 지역 이름과 허
     topic = "zigbee2mqtt/+/set"
     tags = "_/device/_"
 
+# 수집기 자신의 디스크 버퍼(PVC) 사용률. DB 가 안 닿는 동안 버퍼가 얼마나 찼는지 보려고 readings 에 수집기 bedroom2-collector-telegraf 의
+# buffer_used_percent(%) 로 남깁니다(브로커 bedroom2-broker-mosquitto 와 같은 방). 두 DB 가 모두 막히면 이 값도 버퍼에 쌓여 나중에 들어갑니다.
+[[inputs.disk]]
+  interval = "60s"
+  name_override = "collector_disk"
+  mount_points = ["/var/lib/telegraf/buffer"]
+  fieldinclude = ["used_percent"]
+  tagexclude = ["device", "path", "fstype", "mode", "label"]
+
+# 위 디스크 값을 readings 행 모양으로 바꿉니다. order 를 주지 않은 처리기는 order 가 있는 starlark 보다 먼저 돕니다.
+# 필드 이름(used_percent → buffer_used_percent)은 starlark 의 shape() 가 바꿉니다.
+[[processors.override]]
+  namepass = ["collector_disk"]
+  name_override = "readings"
+  [processors.override.tags]
+    device = "bedroom2-collector-telegraf"
+    protocol = "internal"
+    source = "telegraf"
+
 # 필드 하나를 행 하나로 쪼개고 값을 value(숫자)와 value_text(문자열)로 나눕니다. 실물 기기 태그 이름도 여기서 통일합니다.
 # 메시지에 property 태그가 있으면(HA) 그 값이 속성 이름이고, 없으면(Zigbee2MQTT) 필드 이름이 속성 이름입니다.
 # 단위는 HA 메시지에는 unit 태그로 실려 오고, Zigbee2MQTT 는 기기 정의(z2m_devices)에서, 호스트는 발견 설정(host_sensors)에서 기억해 둔 값을 붙입니다.
@@ -613,6 +637,8 @@ def remember_devices(metric):
 # 호스트 값(source telegraf)의 예비 단위. 발견 설정에서 배운 단위가 우선이고, 설정이 아직 오지 않았을 때(새 필드가 생긴 직후, Telegraf 재시작 직후)
 # 필드 이름 끝으로 정합니다. 필드 이름은 <부품>_<값> 규칙이고, 값은 proxmox-ansible scripts/host-metrics-discovery.py 의 SENSORS 표와 같아야 합니다.
 # _percent 를 _used 보다 먼저 봅니다(mem_used_percent 가 B 로 잡히지 않게). 여기 없는 끝(_load, _cores, _threads, _ok)은 단위가 없습니다
+COLLECTOR_FIELDS = {"used_percent": "buffer_used_percent"}   # 수집기 디스크 값(inputs.disk)의 필드 이름 → property
+
 HOST_UNITS = [("_percent", "%"), ("_usage", "%"), ("_temp", "°C"), ("_power", "W"), ("_clock", "MHz"),
               ("_used", "B"), ("_total", "B"), ("_uptime", "s"), ("_rate", "Mbit/s"), ("_loss", "%"), ("_latency", "ms")]
 
@@ -691,6 +717,7 @@ def bridge_status(metric):
 
 # 브로커 자신의 연결 상태(readings 의 availability). 이름은 서버가 놓인 방을 따릅니다(호스트 bedroom2-host-… 와 같음)
 BROKER_DEVICE = "bedroom2-broker-mosquitto"
+COLLECTOR_DEVICE = "bedroom2-collector-telegraf"   # processors.override 의 device 와 같아야 합니다
 BROKER_JITTER = 5                     # 시작 시각(수신 − 가동 시간)은 전달 지연만큼 흔들립니다. 이보다 크게 뒤로 가야 재시작입니다
 BROKER_FRESH = 60                     # Telegraf 가 막 떴을 때 브로커 가동 시간이 이보다 짧으면 브로커도 막 다시 뜬 것으로 봅니다
 
@@ -736,6 +763,10 @@ def broker_status(metric):
     return out
 
 def event(metric):
+    # 원본 대신 추적 정보가 없는 사본을 내보냅니다. 원본은 여기서 전달 완료가 되어 readings 처럼 DB 기록 전에 브로커에 확인 응답이 갑니다.
+    # 원본을 내보내면 출력 넷 중 하나만 막혀도 미전달 1,000건(max_undelivered_messages)에서 이 입력이 멈춰 다른 DB 의 events 도 늦어지고,
+    # 브로커 큐가 넘치면 새 메시지를 버립니다. 사본이면 막힌 출력의 몫은 그 출력의 디스크 버퍼(PVC)에 쌓입니다.
+    metric = deepcopy(metric)
     tags = clean_tags(metric)
     if "device" in tags:
         if not valid_name(tags["device"]):
@@ -860,7 +891,7 @@ def shape(metric):
         m.time = metric.time
         for tk, tv in tags.items():
             m.tags[tk] = tv
-        m.tags["property"] = prop or k
+        m.tags["property"] = prop or (COLLECTOR_FIELDS.get(k, k) if name == COLLECTOR_DEVICE else k)
         if "unit" not in tags and units.get(m.tags["property"]):
             m.tags["unit"] = units[m.tags["property"]]
         elif "unit" not in tags and tags.get("source") == "telegraf" and host_unit(m.tags["property"]):
@@ -984,6 +1015,12 @@ spec:
       labels: { app: telegraf }
     spec:
       priorityClassName: essential             # 서버 한 대가 죽어도 유지(iot/shared/priority-classes)
+      affinity:
+        podAffinity:                            # 브로커와 같은 노드에만 뜹니다. 둘이 다른 노드면 그 사이 연결이 하나 더 끊길 수 있습니다
+          requiredDuringSchedulingIgnoredDuringExecution:   # 뜰 때만 봅니다. mosquitto 를 옮긴 뒤에는 telegraf 를 rollout restart 합니다(README 장애 조치)
+            - labelSelector: { matchLabels: { app: mosquitto } }
+              namespaces: [mosquitto]
+              topologyKey: kubernetes.io/hostname
       tolerations:                              # 노드가 죽으면 30초 뒤 다른 노드에서 다시 띄웁니다(기본 300초)
         - { key: node.kubernetes.io/not-ready, operator: Exists, effect: NoExecute, tolerationSeconds: 30 }
         - { key: node.kubernetes.io/unreachable, operator: Exists, effect: NoExecute, tolerationSeconds: 30 }
@@ -1012,8 +1049,8 @@ spec:
             httpGet: { path: /, port: 8888 }
             periodSeconds: 10
           resources:
-            requests: { cpu: 50m, memory: 128Mi }
-            limits:   { cpu: 500m, memory: 384Mi }    # 버퍼 색인과 배치 1,000건을 메모리에 들고 있을 때의 상한
+            requests: { cpu: 50m, memory: 256Mi }
+            limits:   { cpu: 500m, memory: 2Gi }      # 디스크 버퍼도 쌓인 1건마다 약 1.3KB 를 메모리에 둡니다. 두 DB 가 다 막히면 약 8시간, 하나면 약 17시간을 버팁니다
       volumes:
         - name: config
           configMap: { name: telegraf-config }
@@ -1035,9 +1072,23 @@ spec:
   accessModes: [ReadWriteOnce]
   resources:
     requests:
-      storage: 2Gi           # metric_buffer_limit 500,000건 × 수백 바이트 ≈ 수백 MB 에 여유를 둔 값
+      storage: 2Gi           # 건당 약 600B. 메모리 limit(2Gi)에 닿는 약 140만 건이 0.85GB 라, 디스크가 차기 전에 OOM 이 먼저 옵니다
 ```
 {: file="iot/edge/telegraf/pvc.yaml" }
+
+메모리 limit 과 PVC 크기는 Telegraf 1.40.1 의 디스크 버퍼를 격리 환경에서 시험해 정했습니다. 출력 네 개(지역·허브의 `readings`·`events`)에 운영과 같은 트래픽을 흘리고 DB 를 막아 본 결과는 아래와 같습니다.
+
+- DB 읽기 전용(60분), 허브 주소 연결 시간 초과(30분), 파드 재시작 모두 버퍼에 쌓였다가 DB 가 돌아오자 빠짐없이 들어갔습니다(버린 건수 0). 막힌 출력의 몫만 그 출력의 버퍼에 쌓이고 다른 출력은 계속 씁니다.
+- `metric_buffer_limit` 은 디스크 버퍼의 상한이 아닙니다. 2,000 으로 두어도 7만 건 넘게 쌓였고 버린 건수는 0 이었습니다.
+- 디스크는 `readings` 1건에 약 600B 를 씁니다. 평소 트래픽에서 출력 하나당 시간당 약 8.3만 건, 약 48MB 가 쌓입니다.
+- 디스크 버퍼여도 쌓인 1건마다 메모리가 약 1.3KB 늘어납니다. 그래서 버티는 시간은 PVC 가 아니라 메모리 limit 이 정합니다. limit 2Gi 에서 두 DB 가 모두 막히면 약 8시간, 하나만 막히면 약 17시간을 버티고, 그때 디스크는 약 0.85GB 라 2Gi PVC 가 차기 전에 OOM 이 먼저 옵니다.
+- OOM 으로 죽어도 디스크 버퍼는 남아 재시작 뒤 모두 들어갑니다. 다만 브로커에 확인 응답을 보냈지만 아직 버퍼에 쓰지 못한 메시지는 잃습니다(시험에서 1건). starlark 가 추적 정보가 없는 새 메트릭을 만들어 확인 응답이 DB 기록 전에 나가는 구조의 한계입니다. 브로커가 다시 보낸 메시지 일부는 중복으로 들어가고(시험에서 20건), 아래 `dedup_readings` 작업이 정리합니다.
+- 버퍼는 건마다 바로 디스크에 쓰는 방식(`disk-write-through`)이라, 한꺼번에 많은 메시지가 오면 받아들이는 속도가 초당 수십 행으로 묶이고 나머지는 브로커의 영속 세션에 남았다가 천천히 들어옵니다. DB 로 비우는 속도는 빨라 7만 건을 2분 안에 비웁니다.
+
+> PVC 가 가득 차면 버퍼의 WAL 이 깨져 `panic: log corrupt` 로 재시작을 되풀이하고, 공간을 비워도 되살아나지 않습니다. 로그에 `wal file is corrupt, you have to manually delete the wal` 이 나오며, 그 출력의 버퍼 폴더를 지워야 다시 뜨고 그 버퍼에 쌓인 것은 잃습니다. 그래서 디스크보다 메모리 limit 이 먼저 닿도록 두 값을 함께 맞춥니다.
+{: .prompt-danger }
+
+Telegraf 는 `podAffinity`(required)로 Mosquitto 와 같은 노드에만 뜹니다. 둘이 다른 노드면 그 사이 연결이 하나 더 끊길 수 있기 때문입니다. 이 조건은 스케줄할 때만 보므로 Mosquitto 를 다른 노드로 옮긴 뒤에는 `kubectl -n telegraf rollout restart deploy/telegraf` 로 Telegraf 를 따라 옮깁니다. descheduler 를 쓰면 제외 목록에 telegraf 를 넣어 Telegraf 만 따로 옮겨지지 않게 합니다.
 
 `tags_as_foreign_keys = false` 라 태그가 모두 본 테이블의 컬럼이 됩니다. 행 하나만 봐도 어느 지역의 어느 기기인지 알 수 있어 지역 DB 와 허브 DB 를 서로 채우거나 비교하고 중복을 걸러 내기 쉽습니다. 테이블은 첫 메시지가 올 때 Telegraf 가 DB 마다 `create_templates` 대로 만들고(하이퍼테이블. `readings` 는 1일 청크·1일 뒤 압축, `events` 는 7일 청크·30일 뒤 압축), 새 태그가 보이면 끝에 컬럼을 추가합니다. 컬럼 순서를 정해 두려고 `CREATE TABLE` 에 컬럼을 직접 적었으며, 아래 표가 그 순서입니다.
 
@@ -1325,7 +1376,7 @@ git push
 
 ## 7. 단절 드릴
 
-허브가 끊긴 상황을 만들어 버퍼가 실제로 동작하는지 봅니다. 엣지 worker 에서 파드가 허브 DB 포트로 나가는 패킷을 막고, 그 동안 메시지를 여러 건 발행하고, 도중에 Telegraf 파드까지 지운 뒤, 차단을 풀고 두 DB 에 무엇이 들어왔는지 확인합니다. 지운 Telegraf 파드가 다른 worker 에 다시 뜰 수 있으므로 차단은 worker 두 대에 모두 겁니다.
+허브가 끊긴 상황을 만들어 버퍼가 실제로 동작하는지 봅니다. 엣지 worker 에서 파드가 허브 DB 포트로 나가는 패킷을 막고, 그 동안 메시지를 여러 건 발행하고, 도중에 Telegraf 파드까지 지운 뒤, 차단을 풀고 두 DB 에 무엇이 들어왔는지 확인합니다. Telegraf 는 Mosquitto 와 같은 노드에 뜨지만, 어느 노드인지 찾지 않아도 되게 차단은 worker 두 대에 모두 겁니다.
 
 ```bash
 # 엣지 worker 두 대 모두: 파드 → 허브 DB 차단 (파드 트래픽은 FORWARD 체인을 지납니다)

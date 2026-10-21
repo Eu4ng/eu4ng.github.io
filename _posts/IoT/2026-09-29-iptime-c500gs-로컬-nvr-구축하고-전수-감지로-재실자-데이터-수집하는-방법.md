@@ -27,8 +27,8 @@ ipTIME C500GS IP 카메라를 공유기 방화벽으로 외부 인터넷과 완�
 | :--- | :--- |
 | IP 카메라 | ipTIME C500GS (5MP, H.265, Wi-Fi) |
 | 엣지 Kubernetes | `v1.37` (kubeadm, k8s-dj-worker-1: 6 vCPU / 8GiB, k8s-dj-worker-2: 4 vCPU / 8GiB, k8s-dj-worker-3: 6 vCPU / 12GiB) |
-| 스트리밍 중계기 | `alexxit/go2rtc:latest` |
-| 수집기 / 딥러닝 | `ultralytics/ultralytics:latest-cpu` (YOLOv8n + ByteTrack, PyAV) |
+| 스트리밍 중계기 | `alexxit/go2rtc:1.9.14` (digest 고정) |
+| 수집기 / 딥러닝 | `ultralytics/ultralytics:8.4.182-cpu` (digest 고정, YOLOv8n + ByteTrack, PyAV) |
 | 시계열 DB | TimescaleDB `2.30.1-pg17` |
 | 녹화 저장소 | Longhorn 볼륨 `nvr-storage` 18Gi (2벌 복제, 파드 안 `/mnt/nvr`) |
 | 작성 기준일 | `2026-09-29` |
