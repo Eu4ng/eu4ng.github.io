@@ -107,7 +107,7 @@ k8s_etcd_peer_sans: "{{ groups.proxmox | map('extract', hostvars) | selectattr('
 k8s_vm_cpuunits: 1000                         # 호스트 CPU 가 모자랄 때의 몫(기본 100). 같은 호스트의 다른 CT·VM 이 CPU 를 다 써도 etcd·kubelet 이 밀리지 않게 높게 둠
 k8s_vip_interface: eth0
 keepalived_vips: "{{ [kc.vip] + ([kc.service_vip] if kc.service_vip is defined else []) }}"   # control plane 의 keepalived 가 함께 가질 VIP
-k8s_nameservers: [[LAN_DNS_IP], [LAN_DNS_2_IP]]
+k8s_nameservers: [[LAN_DNS_IP], [LAN_DNS_2_IP], [LAN_DNS_3_IP]]
 k8s_version: v1.37                            # pkgs.k8s.io 저장소의 마이너 버전
 k8s_package_version: 1.37.0-1.1               # kubelet·kubeadm·kubectl 버전, 새 클러스터의 control plane 버전(kubeadm init --kubernetes-version). kubelet 이 apiserver 보다 새로우면 안 됨
 k8s_pod_cidr: 10.244.0.0/16                   # Flannel 기본값

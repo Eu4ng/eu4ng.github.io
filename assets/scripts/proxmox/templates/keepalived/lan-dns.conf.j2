@@ -1,0 +1,39 @@
+# {{ ansible_managed }} — proxmox-ansible playbooks/lan-dns.yml
+{% set peers = lan_dns_instances | rejectattr('name', 'equalto', inventory_hostname) | map(attribute='ip') | list %}
+global_defs {
+    router_id {{ inventory_hostname }}
+    script_user root
+    enable_script_security
+}
+
+# 이 CT 의 dnsmasq 가 답하지 않고 다른 DNS CT 는 답하면 FAULT 로 VIP 를 놓습니다. 모두 답하지 않으면 놓지 않습니다
+# (k8s-cluster.yml 의 API VIP 와 같은 방식. nopreempt 라 weight 로는 넘어가지 않아 검사 스크립트가 판정)
+vrrp_script dnsmasq {
+    script "/etc/keepalived/check-dnsmasq.sh"
+    interval 2
+    timeout 4
+    fall 3
+    rise 2
+}
+
+vrrp_instance lan_dns {
+    state BACKUP
+    interface eth0
+    virtual_router_id {{ lan_dns_vrrp_id }}
+    # 우선순위는 모두 같고 nopreempt 라, VIP 를 가진 CT 가 죽거나 FAULT 일 때만 넘어가고 돌아온 CT 가 다시 빼앗지 않습니다
+    priority 100
+    nopreempt
+    advert_int 1
+    unicast_src_ip {{ ansible_host }}
+    unicast_peer {
+{% for ip in peers %}
+        {{ ip }}
+{% endfor %}
+    }
+    virtual_ipaddress {
+        {{ lan_dns_vip }}/32 dev eth0
+    }
+    track_script {
+        dnsmasq
+    }
+}

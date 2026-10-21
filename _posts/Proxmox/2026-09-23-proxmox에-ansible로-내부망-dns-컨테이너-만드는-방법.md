@@ -1,13 +1,13 @@
 ---
 layout: post
 title: Proxmox에 Ansible로 내부망 DNS 컨테이너 만드는 방법
-description: 집 안에서는 Cloudflare 를 거치지 않고 클러스터로 직접 붙도록, Proxmox 노드마다 dnsmasq 컨테이너를 하나씩 Ansible 플레이북으로 만들고 서비스·호스트·역할 이름을 내부 주소로 답하게 하는 방법을 정리했습니다.
+description: 집 안에서는 Cloudflare 를 거치지 않고 클러스터로 직접 붙도록, Proxmox 노드마다 dnsmasq 컨테이너를 하나씩 Ansible 플레이북으로 만들어 keepalived VIP 를 나눠 갖게 하고, 서비스·호스트·역할 이름을 내부 주소로 답하게 하는 방법을 정리했습니다.
 author: Eu4ng
 tags: [proxmox, ansible, lxc, dnsmasq, dns, homelab]
 permalink: /posts/41/
 ---
 
-집 밖에서는 Cloudflare 프록시를 거쳐 `https://[서비스].[DOMAIN]` 으로 들어오지만, 같은 공유기 안에서도 그 경로를 타면 100Mbps 외부 회선을 왕복하고 인터넷이 끊기면 아예 접속이 안 됩니다. [내부망 전용 DNS](/posts/67/) 를 두어 우리가 여는 이름을 내부 주소로 답하게 하면 집 안 기기는 1Gbps 로 클러스터에 직접 붙습니다. 허브 서비스 이름은 허브 쿠버네티스의 VIP 로, 지역 엣지의 서비스 이름은 그 지역의 서비스 VIP 로 답하고, 모든 호스트·노드 이름과 역할 이름(`kubectl-hub` 등)도 답해 스크립트와 문서가 IP 대신 이름을 쓰게 합니다. DNS 는 Proxmox 호스트에 직접 깔지 않고 Proxmox 노드마다 전용 [LXC 컨테이너](/posts/65/)를 하나씩 두어, 서버 한 대가 꺼져도 이름이 풀리게 합니다. 컨테이너 생성부터 dnsmasq 설정까지 Ansible 플레이북 하나로 만들어, 서버를 옮길 때 백업·복원 대신 플레이북을 다시 실행합니다.
+집 밖에서는 Cloudflare 프록시를 거쳐 `https://[서비스].[DOMAIN]` 으로 들어오지만, 같은 공유기 안에서도 그 경로를 타면 100Mbps 외부 회선을 왕복하고 인터넷이 끊기면 아예 접속이 안 됩니다. [내부망 전용 DNS](/posts/67/) 를 두어 우리가 여는 이름을 내부 주소로 답하게 하면 집 안 기기는 1Gbps 로 클러스터에 직접 붙습니다. 허브 서비스 이름은 허브 쿠버네티스의 VIP 로, 지역 엣지의 서비스 이름은 그 지역의 서비스 VIP 로 답하고, 모든 호스트·노드 이름과 역할 이름(`kubectl-hub` 등)도 답해 스크립트와 문서가 IP 대신 이름을 쓰게 합니다. DNS 는 Proxmox 호스트에 직접 깔지 않고 Proxmox 노드마다 전용 [LXC 컨테이너](/posts/65/)를 하나씩(세 개) 두어, 서버 한 대가 꺼져도 이름이 풀리게 합니다. 공유기 DHCP 에는 DNS 를 두 개만 넣을 수 있으므로, 세 컨테이너가 keepalived 로 [가상 IP(VIP)](/posts/69/) 하나를 나눠 갖게 하고 DHCP 에는 VIP 와 컨테이너 주소 하나를 줍니다. 컨테이너 생성부터 dnsmasq 설정까지 Ansible 플레이북 하나로 만들어, 서버를 옮길 때 백업·복원 대신 플레이북을 다시 실행합니다.
 
 1. Proxmox API 토큰 만들기
 2. Ansible 설치와 저장소 준비
@@ -25,7 +25,7 @@ permalink: /posts/41/
 
 | 항목 | 버전 |
 | :--- | :--- |
-| Proxmox VE | `9.2` (두 노드) |
+| Proxmox VE | `9.2` (세 노드) |
 | Ansible | `13.1` (ansible-core `2.20`, community.proxmox 포함) |
 | CT 템플릿 | `debian-13-standard` |
 | 공유기 | `ipTIME T5008SE` |
@@ -33,10 +33,10 @@ permalink: /posts/41/
 
 다음 항목이 준비되어 있어야 합니다.
 
-- Proxmox 두 대를 묶은 클러스터 ([Proxmox 두 대를 클러스터로 묶고 원격 NAS에 QDevice 붙이는 방법](/posts/53/)). 그 글은 이 글의 1~2단계(API 토큰, 저장소 골격)를 먼저 요구하므로 1~2단계 → 그 글 → 3단계 순서로 진행합니다.
+- Proxmox 노드 세 대를 묶은 클러스터 ([Proxmox 두 대를 클러스터로 묶고 원격 NAS에 QDevice 붙이는 방법](/posts/53/)과 같은 방법으로 세 번째 노드도 합류시킵니다). 그 글은 이 글의 1~2단계(API 토큰, 저장소 골격)를 먼저 요구하므로 1~2단계 → 그 글 → 3단계 순서로 진행합니다.
 - Proxmox 호스트의 root SSH 접속과, 플레이북을 실행할 PC(리눅스)의 SSH 키(`~/.ssh/id_ed25519.pub`). 이 키가 컨테이너의 root 에 들어갑니다.
 - 내부에서 직접 붙을 대상. 허브 서비스는 VIP 를 가진 control plane 의 443 포트에서 받는 Traefik 입니다([쿠버네티스 서비스를 VPN 없이 외부에서 HTTPS로 접속하는 방법](/posts/40/)). 지역 서비스는 그 지역 엣지의 서비스 VIP 에서 받는 지역 Traefik 입니다.
-- 컨테이너에 줄 비어 있는 고정 IP 두 개 (`[LAN_DNS_IP]`, `[LAN_DNS_2_IP]`)
+- 컨테이너에 줄 비어 있는 고정 IP 세 개 (`[LAN_DNS_IP]`, `[LAN_DNS_2_IP]`, `[LAN_DNS_3_IP]`)와 VIP 로 쓸 비어 있는 고정 IP 하나 (`[LAN_DNS_VIP]`). 모두 같은 서브넷이고 공유기 DHCP 범위 밖이어야 합니다.
 
 ## 1. Proxmox API 토큰 만들기
 
@@ -101,6 +101,10 @@ all:
           ansible_host: [PVE02_IP]
           ansible_user: root
           vm_template_vmid: 9001  # VMID 는 클러스터 전체에서 하나라 노드마다 템플릿 번호가 다릅니다
+        pve03:
+          ansible_host: [PVE03_IP]
+          ansible_user: root
+          vm_template_vmid: 9002
     lan_dns:                      # playbooks/lan-dns.yml 이 만드는 CT (Proxmox 노드마다 하나, group_vars 의 lan_dns_instances)
       hosts:
         lan-dns:
@@ -109,10 +113,13 @@ all:
         lan-dns-2:
           ansible_host: [LAN_DNS_2_IP]
           ansible_user: root
+        lan-dns-3:
+          ansible_host: [LAN_DNS_3_IP]
+          ansible_user: root
 ```
 {: file="inventory.yml" }
 
-- **확인:** `ansible-inventory --graph` 에 `@proxmox` 아래 `pve01`, `pve02`, `@lan_dns` 아래 `lan-dns`, `lan-dns-2` 가 보입니다.
+- **확인:** `ansible-inventory --graph` 에 `@proxmox` 아래 `pve01`, `pve02`, `pve03`, `@lan_dns` 아래 `lan-dns`, `lan-dns-2`, `lan-dns-3` 이 보입니다.
 
 ## 3. 변수 채우기
 
@@ -134,10 +141,14 @@ ct_ssh_pubkeys:                               # CT root·VM 접속 계정에 넣
 timezone: Asia/Seoul                          # 모든 호스트·CT·VM 의 시간대
 
 # ---- lan-dns: 내부망 DNS ----
-# 같은 설정의 DNS CT 를 Proxmox 노드마다 하나씩 둡니다. 공유기 DHCP 의 DNS 는 1차 lan-dns, 2차 lan-dns-2 (이름은 inventory 의 lan_dns 그룹과 같아야 함)
+# 같은 설정의 DNS CT 를 Proxmox 노드마다 하나씩 둡니다(이름은 inventory 의 lan_dns 그룹과 같아야 함). VM·CT 는 세 주소를 모두 씁니다.
+# 공유기 DHCP 는 DNS 를 두 개만 받으므로 세 CT 가 keepalived 로 나눠 갖는 VIP(lan_dns_vip)와 lan-dns-2 의 주소를 줍니다.
 lan_dns_instances:
   - { name: lan-dns,   vmid: 202, ip: [LAN_DNS_IP],   pve: pve01 }
   - { name: lan-dns-2, vmid: 203, ip: [LAN_DNS_2_IP], pve: pve02 }
+  - { name: lan-dns-3, vmid: 204, ip: [LAN_DNS_3_IP], pve: pve03 }
+lan_dns_vip: [LAN_DNS_VIP]                    # VRRP unicast, 우선순위 같음·nopreempt. 가진 CT 의 dnsmasq 가 답하지 않고 다른 CT 는 답하면 넘어감
+lan_dns_vrrp_id: 53                           # 같은 LAN 의 다른 keepalived(쿠버네티스 API VIP 등)의 virtual_router_id 와 겹치지 않게
 lan_dns_template: debian-13-standard_13.6-1_amd64.tar.zst   # pveam available --section system
 lan_dns_domain: [DOMAIN]
 lan_dns_names: [argocd, grafana, headlamp, proxmox, auth, ha, z2m]   # 허브 서비스 이름(lan_dns_targets 로 답함). 지역 서비스 이름은 k8s_clusters.<지역>.lan_dns_names
@@ -166,13 +177,15 @@ dnsmasq 설정 템플릿이 답하는 이름은 다음과 같습니다. 그 밖�
 | `kubectl-<dns_name>`(`kubectl-hub` 등) | 그 클러스터의 첫 control plane(`retire` 가 붙은 노드 제외) |
 | `iot-<dns_name>`(`iot-dj` 등) | 그 클러스터의 서비스 VIP(Service `externalIPs`) |
 
-이름마다 `local=` 로 dnsmasq 가 직접 답하게 하고 `address=` 로 주소를 줍니다. `local=` 이 없으면 AAAA 처럼 `address=` 에 없는 질의를 상위로 넘겨 Cloudflare 의 IPv6 주소가 새어 나갑니다. `listen-address` 는 각 컨테이너의 주소라, 두 컨테이너가 같은 템플릿으로 같은 답을 줍니다. 그 주소에만 열 때 `bind-interfaces` 대신 `bind-dynamic` 을 씁니다. `bind-interfaces` 는 시작할 때 주소가 아직 붙어 있지 않으면 죽는데, 호스트를 재부팅한 뒤 컨테이너의 dnsmasq 가 주소가 붙기 전에 시작해 `Cannot assign requested address` 로 죽은 적이 있습니다.
+이름마다 `local=` 로 dnsmasq 가 직접 답하게 하고 `address=` 로 주소를 줍니다. `local=` 이 없으면 AAAA 처럼 `address=` 에 없는 질의를 상위로 넘겨 Cloudflare 의 IPv6 주소가 새어 나갑니다. `listen-address` 는 각 컨테이너의 주소와 VIP 라, 세 컨테이너가 같은 템플릿으로 같은 답을 주고 VIP 를 가진 컨테이너는 VIP 에서도 받습니다. 그 주소에만 열 때 `bind-interfaces` 대신 `bind-dynamic` 을 씁니다. `bind-interfaces` 는 시작할 때 주소가 아직 붙어 있지 않으면 죽는데, 호스트를 재부팅한 뒤 컨테이너의 dnsmasq 가 주소가 붙기 전에 시작해 `Cannot assign requested address` 로 죽은 적이 있습니다. VIP 는 그 컨테이너가 VIP 를 가질 때만 붙으므로 `bind-dynamic` 이 아니면 VIP 를 함께 둘 수 없습니다.
 
 {% raw %}
 ```text
 # proxmox-ansible 의 playbooks/lan-dns.yml 이 만듭니다. 직접 고치지 마세요.
 listen-address={{ ansible_host }}
-{# bind-dynamic: 주소가 아직 붙지 않았어도 시작하고, 붙으면 그때 엽니다(bind-interfaces 는 주소가 없으면 죽습니다) #}
+listen-address={{ lan_dns_vip }}
+{# bind-dynamic: 주소가 아직 붙지 않았어도 시작하고, 붙으면 그때 엽니다(bind-interfaces 는 주소가 없으면 죽습니다).
+   keepalived 가 VIP 를 이 CT 로 옮겨 오면 그때 VIP 에서도 받습니다 #}
 bind-dynamic
 no-resolv
 no-hosts
@@ -222,10 +235,57 @@ address=/{{ name }}.{{ lan_dns_domain }}/{{ ip }}
 {: file="templates/dnsmasq-lan.conf.j2" }
 {% endraw %}
 
+세 컨테이너는 keepalived 로 VIP 를 나눠 갖습니다. 쿠버네티스 API VIP 와 같은 방식으로, VRRP 를 멀티캐스트 대신 다른 두 컨테이너 주소로 유니캐스트하고, 우선순위가 모두 같고 `nopreempt` 라 VIP 를 가진 컨테이너가 죽거나 FAULT 일 때만 넘어갑니다. 넘길지는 검사 스크립트(`check-dnsmasq.sh`, 플레이북이 만듦)가 정합니다. 이 컨테이너의 dnsmasq 가 `lan_dns_names` 의 첫 이름을 기대한 주소로 답하지 못하고 다른 컨테이너 중 하나라도 답하면 실패해 VIP 를 놓습니다. 모두 답하지 못하면 성공으로 두어 누군가는 VIP 를 계속 가집니다. unprivileged 컨테이너도 자기 네트워크 이름공간에서는 주소를 붙이고 VRRP 를 보낼 수 있습니다.
+
+{% raw %}
+```text
+# {{ ansible_managed }} — proxmox-ansible playbooks/lan-dns.yml
+{% set peers = lan_dns_instances | rejectattr('name', 'equalto', inventory_hostname) | map(attribute='ip') | list %}
+global_defs {
+    router_id {{ inventory_hostname }}
+    script_user root
+    enable_script_security
+}
+
+# 이 CT 의 dnsmasq 가 답하지 않고 다른 DNS CT 는 답하면 FAULT 로 VIP 를 놓습니다. 모두 답하지 않으면 놓지 않습니다
+# (k8s-cluster.yml 의 API VIP 와 같은 방식. nopreempt 라 weight 로는 넘어가지 않아 검사 스크립트가 판정)
+vrrp_script dnsmasq {
+    script "/etc/keepalived/check-dnsmasq.sh"
+    interval 2
+    timeout 4
+    fall 3
+    rise 2
+}
+
+vrrp_instance lan_dns {
+    state BACKUP
+    interface eth0
+    virtual_router_id {{ lan_dns_vrrp_id }}
+    # 우선순위는 모두 같고 nopreempt 라, VIP 를 가진 CT 가 죽거나 FAULT 일 때만 넘어가고 돌아온 CT 가 다시 빼앗지 않습니다
+    priority 100
+    nopreempt
+    advert_int 1
+    unicast_src_ip {{ ansible_host }}
+    unicast_peer {
+{% for ip in peers %}
+        {{ ip }}
+{% endfor %}
+    }
+    virtual_ipaddress {
+        {{ lan_dns_vip }}/32 dev eth0
+    }
+    track_script {
+        dnsmasq
+    }
+}
+```
+{: file="templates/keepalived/lan-dns.conf.j2" }
+{% endraw %}
+
 > 와일드카드(`address=/[DOMAIN]/`)는 쓰지 않습니다. 같은 도메인의 다른 공개 이름(NAS 등)이 전부 노드로 가고, 공유기가 그 도메인을 DHCP 검색 도메인으로 주는 환경에서는 `github.com.[DOMAIN]` 같은 조회까지 노드로 풀려 클러스터 안의 외부 접속이 깨집니다.
 {: .prompt-danger }
 
-플레이북은 맨 앞에서 `main-node.yml` 을 불러 기준 노드를 고르고([Proxmox 두 대를 클러스터로 묶고 원격 NAS에 QDevice 붙이는 방법](/posts/53/)의 5단계), 다섯 플레이가 이어집니다. 모든 노드에 CT 템플릿 내려받기, 노드마다 CT 만들고 켜기, CT 안에 dnsmasq 설정, 기준 노드에서 호스트에 남은 옛 dnsmasq 제거와 DNS CT 마다 조회 검사, inventory 밖의 CT(`lan_dns_client_pct_vmids`)가 두 DNS 를 쓰도록 `pct set --nameserver` 로 지정하기입니다. 마지막 플레이는 모든 노드에서 돌고, 그 CT 가 있는 노드만 설정하고 나머지는 건너뜁니다. 여러 번 실행해도 결과가 같습니다.
+플레이북은 맨 앞에서 `main-node.yml` 을 불러 기준 노드를 고르고([Proxmox 두 대를 클러스터로 묶고 원격 NAS에 QDevice 붙이는 방법](/posts/53/)의 5단계), 다섯 플레이가 이어집니다. 모든 노드에 CT 템플릿 내려받기, 노드마다 CT 만들고 켜기, CT 안에 dnsmasq·keepalived 설정(dnsmasq 재시작이 겹치지 않게 한 CT 씩), 기준 노드에서 호스트에 남은 옛 dnsmasq 제거와 DNS CT 마다·VIP 조회 검사, inventory 밖의 CT(`lan_dns_client_pct_vmids`)가 세 DNS 와 상위 DNS 하나를 쓰도록 `pct set --nameserver` 로 지정하기입니다. 마지막 플레이는 모든 노드에서 돌고, 그 CT 가 있는 노드만 설정하고 나머지는 건너뜁니다. 여러 번 실행해도 결과가 같습니다.
 
 CT 에는 `features: [nesting=1]` 을 줍니다. Debian 13(systemd 257) 컨테이너는 nesting 이 없으면 `tmp.mount`, `run-lock.mount`, `dev-mqueue.mount` 가 실패합니다. dnsmasq 유닛에는 드롭인(`dnsmasq.service.d/restart.conf`)을 두어 네트워크가 준비된 뒤(`network-online.target`) 시작하고, 죽으면 5초 뒤 다시 시작하게(`Restart=on-failure`) 합니다. 기본 유닛은 한 번 죽으면 다시 뜨지 않아 재부팅 뒤 그 컨테이너의 DNS 가 멈춘 채로 남았습니다.
 
@@ -234,6 +294,8 @@ CT 에는 `features: [nesting=1]` 을 줍니다. Debian 13(systemd 257) 컨테�
 curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/main-node.yml -o playbooks/main-node.yml
 curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/lan-dns.yml -o playbooks/lan-dns.yml
 curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/dnsmasq-lan.conf.j2 -o templates/dnsmasq-lan.conf.j2
+mkdir -p templates/keepalived
+curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/templates/keepalived/lan-dns.conf.j2 -o templates/keepalived/lan-dns.conf.j2
 ```
 
 <details markdown="1">
@@ -242,6 +304,7 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/dnsmasq-lan.conf.j2 -o
 {% raw %}
 ```yaml
 # 내부망 DNS 컨테이너. 밖에 여는 서비스 이름만 클러스터 노드 IP 로 답해, 집 안에서는 Cloudflare 를 거치지 않고 노드로 직접 붙게 합니다.
+# 세 CT 가 keepalived 로 VIP(lan_dns_vip)를 나눠 가져 공유기 DHCP 에는 VIP 와 CT 주소 하나만 줍니다.
 #   ansible-playbook playbooks/lan-dns.yml   (PROXMOX_* 환경변수 필요, README 참고)
 ---
 - import_playbook: main-node.yml
@@ -297,6 +360,7 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/dnsmasq-lan.conf.j2 -o
 - name: CT 안에 dnsmasq 설정
   hosts: lan_dns
   gather_facts: false
+  serial: 1                       # 한 CT 씩(dnsmasq 재시작이 세 CT 에서 겹치지 않게)
   pre_tasks:
     - name: python3 준비 (Ansible 모듈 실행에 필요)
       ansible.builtin.raw: command -v python3 >/dev/null || (apt-get update -q && apt-get install -y -q python3)
@@ -343,6 +407,44 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/dnsmasq-lan.conf.j2 -o
         enabled: true
         state: started
         daemon_reload: true
+    # 공유기 DHCP 는 DNS 를 두 개만 받으므로 세 CT 가 VIP(lan_dns_vip)를 keepalived 로 나눠 갖습니다(k8s-cluster.yml 의 API VIP 와 같은 방식).
+    # unprivileged CT 도 자기 네트워크 이름공간에서는 주소를 붙이고 VRRP 를 보낼 수 있습니다
+    - name: keepalived·dig 설치
+      ansible.builtin.apt:
+        name: [keepalived, dnsutils]
+    - name: dnsmasq 검사 스크립트
+      ansible.builtin.copy:
+        dest: /etc/keepalived/check-dnsmasq.sh
+        mode: "0755"
+        content: |
+          #!/bin/bash
+          # keepalived track_script. 이 CT 의 dnsmasq 가 직접 가진 이름({{ check_name }})을 NOERROR 와 기대한 A 값({{ check_ip }})으로 답하면 성공입니다.
+          # 답하지 못하면 다른 DNS CT 중 하나라도 답할 때만 실패해 FAULT 로 VIP 를 놓습니다. 모두 답하지 못하면 성공으로 두어 누군가는 VIP 를 가집니다.
+          # 외부 이름은 캐시로 답할 수 있어 묻지 않습니다. 한 번에 1초까지, 다른 CT 들은 함께 물어 keepalived timeout(4초) 안에 끝납니다
+          ok() {
+            dig +time=1 +tries=1 +noall +comments +answer @"$1" {{ check_name }} A 2>/dev/null |
+              awk -v want={{ check_ip }} '/status: NOERROR/ {s=1} $4 == "A" && $5 == want {a=1} END {exit !(s && a)}'
+          }
+          ok {{ ansible_host }} && exit 0
+          pids=()
+          for ip in {{ lan_dns_instances | rejectattr('name', 'equalto', inventory_hostname) | map(attribute='ip') | join(' ') }}; do ok "$ip" & pids+=($!); done
+          for p in "${pids[@]}"; do wait "$p" && exit 1; done
+          exit 0
+      vars:
+        check_name: "{{ lan_dns_names[0] }}.{{ lan_dns_domain }}"
+        check_ip: "{{ lan_dns_targets[0] }}"
+    - name: keepalived 설정
+      ansible.builtin.template:
+        src: ../templates/keepalived/lan-dns.conf.j2
+        dest: /etc/keepalived/keepalived.conf
+        mode: "0644"
+      register: keepalived_conf
+    - name: keepalived 켜기
+      ansible.builtin.systemd:
+        name: keepalived
+        enabled: true
+        state: "{{ 'restarted' if keepalived_conf.changed else 'started' }}"
+      ignore_errors: "{{ ansible_check_mode }}"   # --check 에서는 패키지가 아직 없을 수 있음
   handlers:
     - name: dnsmasq 재시작
       ansible.builtin.systemd:
@@ -389,6 +491,14 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/dnsmasq-lan.conf.j2 -o
         fail_msg: "{{ item.item.name }}: {{ first_name }} 이 노드 IP 로 풀리지 않습니다"
       loop: "{{ dns_check.results }}"
       loop_control: { label: "{{ item.item.name }}" }
+    - name: VIP 로 답하는지 (keepalived 가 VIP 를 붙이고 dnsmasq 가 그 주소에서 받을 때까지)
+      ansible.builtin.command: dig +short +time=2 +tries=1 @{{ lan_dns_vip }} {{ first_name }} A
+      register: vip_check
+      until: lan_dns_targets[0] in vip_check.stdout_lines
+      retries: 15
+      delay: 2
+      changed_when: false
+      when: not ansible_check_mode
 
 - name: 내부망 DNS 를 쓰는 CT (inventory 밖, 그 CT 가 지금 있는 노드에서 pct 로 설정)
   hosts: proxmox
@@ -428,19 +538,21 @@ ansible-playbook playbooks/lan-dns.yml
 
 [kubeadm 클러스터 플레이북](/posts/46/)은 끝에서 이 플레이북을 다시 실행합니다. 노드를 더하거나 바꾸면 노드 이름과 `kubectl-<클러스터>` 같은 역할 이름이 새 주소로 바뀝니다.
 
-- **확인:** 마지막 `PLAY RECAP` 에 `failed=0`, 그 위 `결과` 태스크에 DNS CT 마다 네 줄이 보입니다. A 는 허브 VIP, AAAA 는 비어 있고, 공개 이름은 Cloudflare 주소, `github.com` 은 외부 주소입니다.
+- **확인:** 마지막 `PLAY RECAP` 에 `failed=0`, 그 위 `결과` 태스크에 DNS CT 마다 네 줄이 보입니다. A 는 허브 VIP, AAAA 는 비어 있고, 공개 이름은 Cloudflare 주소, `github.com` 은 외부 주소입니다. `VIP 로 답하는지` 태스크가 `ok` 입니다.
 
 ## 5. 공유기 DHCP 설정
 
 기기들이 이 DNS 를 쓰도록 공유기 DHCP 가 나눠 주는 DNS 주소를 바꿉니다. ipTIME 은 **고급 설정** > **네트워크 관리** > **내부 네트워크 설정** 의 DHCP 서버 항목에 있습니다.
 
-- **기본 DNS**: `[LAN_DNS_IP]`
+- **기본 DNS**: `[LAN_DNS_VIP]`
 - **보조 DNS**: `[LAN_DNS_2_IP]`
 
-> 두 DNS 가 서로 다른 Proxmox 노드에 있어 한 대가 꺼져도 내부 이름이 그대로 풀립니다. 두 서버가 모두 꺼지면 집 DNS 도 멈춥니다.
+공유기 DHCP 에는 DNS 를 두 개만 넣을 수 있습니다. VIP 는 살아 있는 컨테이너 중 하나가 가지므로, 기본 DNS 는 세 컨테이너 중 하나만 살아 있어도 답합니다. 보조 DNS 는 VIP 가 넘어가는 몇 초 동안이나 keepalived 가 멈췄을 때를 대비한 컨테이너 주소입니다.
+
+> 컨테이너 셋이 서로 다른 Proxmox 노드에 있어 두 대가 꺼져도 내부 이름이 그대로 풀립니다. 세 서버가 모두 꺼지면 집 DNS 도 멈춥니다.
 {: .prompt-warning }
 
-- **확인:** 기기의 Wi-Fi 를 껐다 켠 뒤(DHCP 갱신) 네트워크 설정에서 DNS 서버가 `[LAN_DNS_IP]`, `[LAN_DNS_2_IP]` 로 보입니다.
+- **확인:** 기기의 Wi-Fi 를 껐다 켠 뒤(DHCP 갱신) 네트워크 설정에서 DNS 서버가 `[LAN_DNS_VIP]`, `[LAN_DNS_2_IP]` 로 보입니다.
 
 ## 6. 확인
 
@@ -448,9 +560,13 @@ ansible-playbook playbooks/lan-dns.yml
 # 컨테이너 상태 (각 Proxmox 노드에서)
 ssh root@[PVE01_IP] "pct status 202 && pct config 202 | grep -E '^(onboot|unprivileged|net0)'"
 ssh root@[PVE02_IP] "pct status 203 && pct config 203 | grep -E '^(onboot|unprivileged|net0)'"
+ssh root@[PVE03_IP] "pct status 204 && pct config 204 | grep -E '^(onboot|unprivileged|net0)'"
 
-# 조회 (아무 PC 에서, 두 DNS 모두)
-for dns in [LAN_DNS_IP] [LAN_DNS_2_IP]; do
+# VIP 를 가진 CT (셋 중 하나에서만 주소가 보임)
+for ct in [LAN_DNS_IP] [LAN_DNS_2_IP] [LAN_DNS_3_IP]; do ssh root@$ct "hostname; ip -br addr show eth0 | grep -F [LAN_DNS_VIP]"; done
+
+# 조회 (아무 PC 에서, VIP 와 세 DNS 모두)
+for dns in [LAN_DNS_VIP] [LAN_DNS_IP] [LAN_DNS_2_IP] [LAN_DNS_3_IP]; do
   dig +short @$dns argocd.[DOMAIN]          # 허브 VIP
   dig +short @$dns argocd.[DOMAIN] AAAA     # 비어 있음
   dig +short @$dns pve02.[DOMAIN]           # pve02 주소
@@ -458,7 +574,7 @@ for dns in [LAN_DNS_IP] [LAN_DNS_2_IP]; do
 done
 ```
 
-- **확인:** 두 DNS 가 같은 답을 줍니다. 쿠버네티스 클러스터를 만든 뒤에는 `kubectl-hub.[DOMAIN]` 이 허브의 첫 control plane, `k8s-hub.[DOMAIN]` 이 허브 VIP, `ha-dj.[DOMAIN]` 이 지역 서비스 VIP 로 풀립니다. DHCP 를 새로 받은 기기에서 `https://argocd.[DOMAIN]` 을 열면 Cloudflare 를 거치지 않고 열리고, Traefik 액세스 로그(`kubectl -n traefik logs ds/traefik`)의 첫 열이 그 기기의 내부 IP 입니다. `lan_dns_client_pct_vmids` 의 CT 안에서는 `/etc/resolv.conf` 에 두 DNS 가 보입니다.
+- **확인:** VIP 와 세 DNS 가 같은 답을 주고, VIP 는 한 CT 에서만 보입니다. 쿠버네티스 클러스터를 만든 뒤에는 `kubectl-hub.[DOMAIN]` 이 허브의 첫 control plane, `k8s-hub.[DOMAIN]` 이 허브 VIP, `ha-dj.[DOMAIN]` 이 지역 서비스 VIP 로 풀립니다. DHCP 를 새로 받은 기기에서 `https://argocd.[DOMAIN]` 을 열면 Cloudflare 를 거치지 않고 열리고, Traefik 액세스 로그(`kubectl -n traefik logs ds/traefik`)의 첫 열이 그 기기의 내부 IP 입니다. `lan_dns_client_pct_vmids` 의 CT 안에서는 `/etc/resolv.conf` 에 세 DNS 와 상위 DNS 하나가 보입니다.
 
 ## 트러블슈팅
 
@@ -513,7 +629,7 @@ fatal: [localhost]: FAILED! => msg: 'An error occurred: ''name'''
 
 ## 마무리
 
-내부망 DNS 가 Proxmox 노드마다 하나씩 작은 컨테이너에서 돌고, 두 컨테이너는 플레이북 한 번으로 다시 만들 수 있습니다. 허브 서비스 이름은 허브 VIP 로, 지역 서비스 이름은 그 지역의 서비스 VIP 로, 호스트·노드·역할 이름은 각 주소로 답합니다. 서비스를 하나 더 열 때는 `lan_dns_names`(지역 서비스는 `k8s_clusters.<지역>.lan_dns_names`)에 이름을 넣고 플레이북을 다시 실행합니다.
+내부망 DNS 가 Proxmox 노드마다 하나씩 작은 컨테이너에서 돌고, 세 컨테이너가 VIP 를 나눠 가지며 플레이북 한 번으로 다시 만들 수 있습니다. 허브 서비스 이름은 허브 VIP 로, 지역 서비스 이름은 그 지역의 서비스 VIP 로, 호스트·노드·역할 이름은 각 주소로 답합니다. 서비스를 하나 더 열 때는 `lan_dns_names`(지역 서비스는 `k8s_clusters.<지역>.lan_dns_names`)에 이름을 넣고 플레이북을 다시 실행합니다.
 
 ## 참고 자료
 
@@ -521,3 +637,4 @@ fatal: [localhost]: FAILED! => msg: 'An error occurred: ''name'''
 - [Proxmox VE Administration Guide: Linux Container](https://pve.proxmox.com/pve-docs/chapter-pct.html)
 - [Proxmox VE: User Management (API Tokens)](https://pve.proxmox.com/wiki/User_Management#pveum_tokens)
 - [dnsmasq man page](https://thekelleys.org.uk/dnsmasq/docs/dnsmasq-man.html)
+- [Keepalived configuration synopsis](https://keepalived.readthedocs.io/en/latest/configuration_synopsis.html)
