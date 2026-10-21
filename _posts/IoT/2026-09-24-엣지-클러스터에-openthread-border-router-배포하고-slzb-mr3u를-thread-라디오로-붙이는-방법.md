@@ -271,7 +271,7 @@ HA 의 OpenThread Border Router 통합을 추가하면, 데이터셋이 없는 O
 
 ```bash
 # 허브 control plane
-bash setup-home-assistant.sh http://[EDGE_SERVICE_VIP]:8123
+bash setup-home-assistant.sh http://[SERVICE_VIP]:8123
 ```
 
 기본 네트워크 지정이 중요합니다. 휴대폰의 Home Assistant 앱으로 Thread 기기를 등록할 때 앱이 HA 의 기본 Thread 망 자격 증명을 받아 기기에 넘기기 때문입니다. 집에 다른 제조사의 Thread 보더 라우터(스마트 TV, 스피커 등)가 있어도 망이 다르면 서로 간섭하지 않습니다.
