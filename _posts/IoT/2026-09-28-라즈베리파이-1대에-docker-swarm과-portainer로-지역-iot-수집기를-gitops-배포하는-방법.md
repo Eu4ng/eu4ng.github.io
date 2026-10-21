@@ -8,6 +8,9 @@ mermaid: true
 permalink: /posts/75/
 ---
 
+> 2026-10-22 에 지역 엣지 클러스터를 허브 클러스터 하나로 합쳤습니다. 이 글은 합치기 전 구조를 기준으로 쓴 것이고, 현재 구조와 합친 과정은 [지역 엣지 쿠버네티스 클러스터를 허브 클러스터 하나로 합치는 방법](/posts/88/) 에 있습니다.
+{: .prompt-info }
+
 새 지역에 수집망을 가볍게 시작할 때, [쿠버네티스 엣지 클러스터](/posts/42/) 대신 라즈베리파이 한 대에 Docker Swarm 과 Portainer 를 올리고 수집기([Telegraf](/posts/82/))를 GitOps 로 배포합니다. Git 저장소의 `swarm/<지역>/<스택>/stack.yml` 을 Pi 의 Portainer 가 5분마다 읽어 반영하고, Telegraf 는 [대전 엣지와 같은 설정](/posts/43/)으로 브로커의 기기 메시지를 받아 디스크 버퍼를 거쳐 중앙 TimescaleDB 에 씁니다. 이 글은 수집기까지 다루고, Zigbee2MQTT·Home Assistant 같은 제어 쪽을 Pi 로 옮기는 것은 다루지 않습니다.
 
 1. Pi 준비

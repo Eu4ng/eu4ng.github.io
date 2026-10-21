@@ -7,6 +7,9 @@ tags: [iot, home-assistant, matter, thread, mqtt, telegraf, kubernetes, argo-cd,
 permalink: /posts/48/
 ---
 
+> 2026-10-22 에 지역 엣지 클러스터를 허브 클러스터 하나로 합쳤습니다. 이 글은 합치기 전 구조를 기준으로 쓴 것이고, 현재 구조와 합친 과정은 [지역 엣지 쿠버네티스 클러스터를 허브 클러스터 하나로 합치는 방법](/posts/88/) 에 있습니다.
+{: .prompt-info }
+
 엣지 클러스터에 **Home Assistant**(HA)와 **matterjs-server**([Matter](/posts/77/) 컨트롤러)를 배포하고, HA 의 [통합](/posts/78/) 설정을 스크립트로 넣은 뒤 밖에서 `ha-[SITE_CODE].[DOMAIN]` 으로 엽니다. HA 는 Matter 기기 등록 화면과 제어·자동화 대시보드로만 쓰고 수집 경로에는 두지 않습니다. Zigbee 는 [Zigbee2MQTT](/posts/44/)가 브로커로 바로 보내고, Matter 기기 상태와 HA 에서 내린 기기 제어 기록만 HA 자동화가 브로커로 발행해 [수집 파이프라인](/posts/43/)을 탑니다. 통합 추가, Thread 기본 네트워크 지정, 역방향 프록시 신뢰 설정은 모두 HA API 로 하므로 새 서버에서도 같은 명령 한 번이면 됩니다.
 
 1. 매니페스트 추가와 배포
