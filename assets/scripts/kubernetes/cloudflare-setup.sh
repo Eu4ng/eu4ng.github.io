@@ -156,3 +156,7 @@ else
   echo "존 상태가 '$zone_status' 입니다. 등록기관에서 네임서버를 아래 둘로 바꾸세요 (전파까지 수 분~수 시간):"
   for ns in $name_servers; do echo "  $ns"; done
 fi
+echo
+echo "남은 수동 작업:"
+echo "  - 공유기 포트포워딩: ssh ubuntu@<VIP 를 가진 control plane> python3 - --internal-ip [HUB_VIP] < router-portmap.py"
+echo "  - 저장소를 main 에 merge·push 하면 Argo CD 가 cert-manager·traefik·cloudflare-ddns 를 올립니다."
