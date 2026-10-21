@@ -77,14 +77,38 @@
       ansible.builtin.debug: { msg: "{{ ttm_now.stdout }}" }
       when: ttm_conf is not skipped
 
-- name: 모델 저장소 (pve01 thin LV 원본 + NFS 로 다른 노드와 단일 공유)
+- name: 모델 저장소 (ollama_nfs_host 의 thin LV 원본 + NFS 로 다른 노드와 단일 공유)
   hosts: proxmox
   gather_facts: false
   vars:
     backends_here: "{{ ollama_backends | selectattr('pve', 'eq', inventory_hostname) | list }}"
     is_nfs_host: "{{ inventory_hostname == ollama_nfs_host }}"
+    nfs_clients: "{{ ollama_backends | map(attribute='pve') | unique | reject('eq', ollama_nfs_host) | list }}"
   tasks:
-    # --- NFS 호스트 (pve01): 로컬 thin LV + ext4 마운트 + NFS export ---
+    # --- NFS 호스트를 옮겼을 때: 새 호스트의 옛 NFS 마운트를 내리고, 옛 호스트의 export 를 뺍니다 ---
+    # 새 호스트는 store 에 옛 호스트의 NFS 가 붙어 있어 그대로 로컬 LV 를 상위 경로에 붙이면 가려진 채 남습니다.
+    # CT 가 바인드로 쓰고 있으면 umount 가 실패하니 CT 를 끄고 실행합니다. 옛 호스트의 LV 는 지우지 않습니다(옮긴 것을 확인한 뒤 손으로).
+    - name: 옛 NFS 마운트 해제 (NFS 호스트가 된 노드)
+      ansible.builtin.shell: |
+        grep -qE '^[^#[:space:]]+:{{ ollama_models_dir }}/store[[:space:]]+{{ ollama_models_dir }}/store[[:space:]]+nfs' /etc/fstab || exit 0
+        if findmnt -t nfs,nfs4 {{ ollama_models_dir }}/store >/dev/null; then umount {{ ollama_models_dir }}/store || exit 1; fi
+        sed -i -E '\|^[^#[:space:]]+:{{ ollama_models_dir }}/store[[:space:]]+{{ ollama_models_dir }}/store[[:space:]]+nfs|d' /etc/fstab
+        systemctl daemon-reload
+        echo CHANGED
+      register: r
+      changed_when: "'CHANGED' in r.stdout"
+      when: is_nfs_host
+    - name: 옛 NFS export 제거 (NFS 호스트가 아니거나 내보낼 노드가 없을 때)
+      ansible.builtin.shell: |
+        [ -f /etc/exports.d/ollama.exports ] || exit 0
+        rm -f /etc/exports.d/ollama.exports
+        exportfs -ra
+        echo CHANGED
+      register: r
+      changed_when: "'CHANGED' in r.stdout"
+      when: not is_nfs_host or nfs_clients | length == 0
+
+    # --- NFS 호스트: 로컬 thin LV + ext4 마운트 + NFS export ---
     - name: thin LV (pve/ollama-models)
       community.general.lvol:
         vg: pve
@@ -125,24 +149,24 @@
       ansible.builtin.apt:
         name: nfs-kernel-server
         state: present
-      when: is_nfs_host
+      when: is_nfs_host and nfs_clients | length > 0
     - name: NFS export 설정 (/etc/exports.d/ollama.exports)
       ansible.builtin.copy:
         dest: /etc/exports.d/ollama.exports
         content: |
-          {% for h in ollama_backends | map(attribute='pve') | unique | reject('eq', ollama_nfs_host) %}
+          {% for h in nfs_clients %}
           {{ ollama_models_dir }}/store {{ hostvars[h].ansible_host }}(rw,sync,no_subtree_check,all_squash,anonuid=100000,anongid=100000)
           {% endfor %}
         mode: "0644"
       register: nfs_export
-      when: is_nfs_host
+      when: is_nfs_host and nfs_clients | length > 0
     - name: NFS export 갱신 및 서비스 재시작
       ansible.builtin.shell: |
         exportfs -ra
         systemctl restart nfs-server
-      when: is_nfs_host and (nfs_export is changed)
+      when: is_nfs_host and nfs_clients | length > 0 and (nfs_export is changed)
 
-    # --- NFS 클라이언트 호스트 (pve02 등): NFS 마운트 ---
+    # --- NFS 클라이언트 호스트: NFS 마운트 ---
     - name: NFS 클라이언트 마운트 폴더 준비
       ansible.builtin.file:
         path: "{{ ollama_models_dir }}/store"

@@ -18,6 +18,7 @@ import argparse
 import csv
 import json
 import logging
+import signal
 import socket
 import sys
 import threading
@@ -538,7 +539,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="ollama 라우터의 요청 로그(UDP)와 모델 서버의 /api/ps 를 Prometheus 지표로 낸다.",
         epilog=(
             "예:\n"
-            "  python3 metrics.py --socket 127.0.0.1:9999 --agent winpc-780m=192.168.0.15:11436\n"
+            "  python3 metrics.py --socket 127.0.0.1:9999 --agent winpc-780m=[WINPC_IP]:11436\n"
             "  python3 metrics.py --once                 # 서버 상태를 한 번 읽고 지표 텍스트를 stdout 에 낸다\n\n"
             "exit code: 0 정상, 1 runtime API 에 연결 실패(--once)"
         ),
@@ -591,6 +592,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(message)s")
+    # 컨테이너의 PID 1 이라 기본 SIGTERM 처리가 없다. 없으면 파드 종료가 유예 시간(7200초) 끝까지 걸린다
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     reg = build_registry()
     stop = threading.Event()
     if args.once:

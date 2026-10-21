@@ -1,6 +1,8 @@
 # proxmox-ansible 의 playbooks/lan-dns.yml 이 만듭니다. 직접 고치지 마세요.
 listen-address={{ ansible_host }}
-{# bind-dynamic: 주소가 아직 붙지 않았어도 시작하고, 붙으면 그때 엽니다(bind-interfaces 는 주소가 없으면 죽습니다) #}
+listen-address={{ lan_dns_vip }}
+{# bind-dynamic: 주소가 아직 붙지 않았어도 시작하고, 붙으면 그때 엽니다(bind-interfaces 는 주소가 없으면 죽습니다).
+   keepalived 가 VIP 를 이 CT 로 옮겨 오면 그때 VIP 에서도 받습니다 #}
 bind-dynamic
 no-resolv
 no-hosts

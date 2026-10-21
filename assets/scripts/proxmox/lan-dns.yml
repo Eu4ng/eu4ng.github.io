@@ -1,4 +1,5 @@
 # 내부망 DNS 컨테이너. 밖에 여는 서비스 이름만 클러스터 노드 IP 로 답해, 집 안에서는 Cloudflare 를 거치지 않고 노드로 직접 붙게 합니다.
+# 세 CT 가 keepalived 로 VIP(lan_dns_vip)를 나눠 가져 공유기 DHCP 에는 VIP 와 CT 주소 하나만 줍니다.
 #   ansible-playbook playbooks/lan-dns.yml   (PROXMOX_* 환경변수 필요, README 참고)
 ---
 - import_playbook: main-node.yml
@@ -54,6 +55,7 @@
 - name: CT 안에 dnsmasq 설정
   hosts: lan_dns
   gather_facts: false
+  serial: 1                       # 한 CT 씩(dnsmasq 재시작이 세 CT 에서 겹치지 않게)
   pre_tasks:
     - name: python3 준비 (Ansible 모듈 실행에 필요)
       ansible.builtin.raw: command -v python3 >/dev/null || (apt-get update -q && apt-get install -y -q python3)
@@ -100,6 +102,44 @@
         enabled: true
         state: started
         daemon_reload: true
+    # 공유기 DHCP 는 DNS 를 두 개만 받으므로 세 CT 가 VIP(lan_dns_vip)를 keepalived 로 나눠 갖습니다(k8s-cluster.yml 의 API VIP 와 같은 방식).
+    # unprivileged CT 도 자기 네트워크 이름공간에서는 주소를 붙이고 VRRP 를 보낼 수 있습니다
+    - name: keepalived·dig 설치
+      ansible.builtin.apt:
+        name: [keepalived, dnsutils]
+    - name: dnsmasq 검사 스크립트
+      ansible.builtin.copy:
+        dest: /etc/keepalived/check-dnsmasq.sh
+        mode: "0755"
+        content: |
+          #!/bin/bash
+          # keepalived track_script. 이 CT 의 dnsmasq 가 직접 가진 이름({{ check_name }})을 NOERROR 와 기대한 A 값({{ check_ip }})으로 답하면 성공입니다.
+          # 답하지 못하면 다른 DNS CT 중 하나라도 답할 때만 실패해 FAULT 로 VIP 를 놓습니다. 모두 답하지 못하면 성공으로 두어 누군가는 VIP 를 가집니다.
+          # 외부 이름은 캐시로 답할 수 있어 묻지 않습니다. 한 번에 1초까지, 다른 CT 들은 함께 물어 keepalived timeout(4초) 안에 끝납니다
+          ok() {
+            dig +time=1 +tries=1 +noall +comments +answer @"$1" {{ check_name }} A 2>/dev/null |
+              awk -v want={{ check_ip }} '/status: NOERROR/ {s=1} $4 == "A" && $5 == want {a=1} END {exit !(s && a)}'
+          }
+          ok {{ ansible_host }} && exit 0
+          pids=()
+          for ip in {{ lan_dns_instances | rejectattr('name', 'equalto', inventory_hostname) | map(attribute='ip') | join(' ') }}; do ok "$ip" & pids+=($!); done
+          for p in "${pids[@]}"; do wait "$p" && exit 1; done
+          exit 0
+      vars:
+        check_name: "{{ lan_dns_names[0] }}.{{ lan_dns_domain }}"
+        check_ip: "{{ lan_dns_targets[0] }}"
+    - name: keepalived 설정
+      ansible.builtin.template:
+        src: ../templates/keepalived/lan-dns.conf.j2
+        dest: /etc/keepalived/keepalived.conf
+        mode: "0644"
+      register: keepalived_conf
+    - name: keepalived 켜기
+      ansible.builtin.systemd:
+        name: keepalived
+        enabled: true
+        state: "{{ 'restarted' if keepalived_conf.changed else 'started' }}"
+      ignore_errors: "{{ ansible_check_mode }}"   # --check 에서는 패키지가 아직 없을 수 있음
   handlers:
     - name: dnsmasq 재시작
       ansible.builtin.systemd:
@@ -146,6 +186,14 @@
         fail_msg: "{{ item.item.name }}: {{ first_name }} 이 노드 IP 로 풀리지 않습니다"
       loop: "{{ dns_check.results }}"
       loop_control: { label: "{{ item.item.name }}" }
+    - name: VIP 로 답하는지 (keepalived 가 VIP 를 붙이고 dnsmasq 가 그 주소에서 받을 때까지)
+      ansible.builtin.command: dig +short +time=2 +tries=1 @{{ lan_dns_vip }} {{ first_name }} A
+      register: vip_check
+      until: lan_dns_targets[0] in vip_check.stdout_lines
+      retries: 15
+      delay: 2
+      changed_when: false
+      when: not ansible_check_mode
 
 - name: 내부망 DNS 를 쓰는 CT (inventory 밖, 그 CT 가 지금 있는 노드에서 pct 로 설정)
   hosts: proxmox

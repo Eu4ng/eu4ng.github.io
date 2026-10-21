@@ -14,7 +14,9 @@
 #
 # 라우터의 backend 마다 조건이 다르면 포트를 달리해 둘을 띄웁니다(-TaskName 으로 예약 작업 이름도 가릅니다). 상태 JSON 은 PC 에 하나면 되므로
 # 두 번째 작업은 -StatusPort 0 으로 끕니다(같은 포트를 둘이 잡으면 뒤의 것이 뜨지 못합니다). 예:
-#   작은 모델용(기본): 포트 11435, 메모리 기준 없음, 상태 JSON 11437
+#   작은 모델용(기본): 포트 11435, 상태 JSON 11437. 메모리 기준은 없지만, iGPU(UMA) PC 에서 큰 컨텍스트 모델이 UMA 밖 일반 RAM 을
+#     몇 GB 더 쓰면 -MinFreeGB 로 그만큼 남겨 둡니다 — 사람이 RAM 을 많이 쓰는 동안 새 요청이 와서 적재가 실패하지 않게 합니다. 예:
+#     powershell -ExecutionPolicy Bypass -File .\windows-agent.ps1 -Install -Port 11435 -StatusPort 11437 -Threshold 30 -HoldSeconds 120 -MinFreeGB 6
 #   30B 모델용:        powershell -ExecutionPolicy Bypass -File .\windows-agent.ps1 -Install -Port 11436 -MinFreeGB 22 -TaskName ollama-agent-big -StatusPort 0
 #     → 사람이 PC 를 써서 여유 메모리(Ollama 가 이미 쥔 메모리는 여유로 침)가 22GB 아래면 drain. 20GB 모델이 스왑으로 가는 것을 막습니다.
 #

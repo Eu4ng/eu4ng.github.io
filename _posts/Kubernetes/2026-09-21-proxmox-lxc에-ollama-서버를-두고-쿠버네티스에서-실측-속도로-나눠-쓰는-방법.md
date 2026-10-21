@@ -187,14 +187,38 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/templates/ollama/ollam
       ansible.builtin.debug: { msg: "{{ ttm_now.stdout }}" }
       when: ttm_conf is not skipped
 
-- name: 모델 저장소 (pve01 thin LV 원본 + NFS 로 다른 노드와 단일 공유)
+- name: 모델 저장소 (ollama_nfs_host 의 thin LV 원본 + NFS 로 다른 노드와 단일 공유)
   hosts: proxmox
   gather_facts: false
   vars:
     backends_here: "{{ ollama_backends | selectattr('pve', 'eq', inventory_hostname) | list }}"
     is_nfs_host: "{{ inventory_hostname == ollama_nfs_host }}"
+    nfs_clients: "{{ ollama_backends | map(attribute='pve') | unique | reject('eq', ollama_nfs_host) | list }}"
   tasks:
-    # --- NFS 호스트 (pve01): 로컬 thin LV + ext4 마운트 + NFS export ---
+    # --- NFS 호스트를 옮겼을 때: 새 호스트의 옛 NFS 마운트를 내리고, 옛 호스트의 export 를 뺍니다 ---
+    # 새 호스트는 store 에 옛 호스트의 NFS 가 붙어 있어 그대로 로컬 LV 를 상위 경로에 붙이면 가려진 채 남습니다.
+    # CT 가 바인드로 쓰고 있으면 umount 가 실패하니 CT 를 끄고 실행합니다. 옛 호스트의 LV 는 지우지 않습니다(옮긴 것을 확인한 뒤 손으로).
+    - name: 옛 NFS 마운트 해제 (NFS 호스트가 된 노드)
+      ansible.builtin.shell: |
+        grep -qE '^[^#[:space:]]+:{{ ollama_models_dir }}/store[[:space:]]+{{ ollama_models_dir }}/store[[:space:]]+nfs' /etc/fstab || exit 0
+        if findmnt -t nfs,nfs4 {{ ollama_models_dir }}/store >/dev/null; then umount {{ ollama_models_dir }}/store || exit 1; fi
+        sed -i -E '\|^[^#[:space:]]+:{{ ollama_models_dir }}/store[[:space:]]+{{ ollama_models_dir }}/store[[:space:]]+nfs|d' /etc/fstab
+        systemctl daemon-reload
+        echo CHANGED
+      register: r
+      changed_when: "'CHANGED' in r.stdout"
+      when: is_nfs_host
+    - name: 옛 NFS export 제거 (NFS 호스트가 아니거나 내보낼 노드가 없을 때)
+      ansible.builtin.shell: |
+        [ -f /etc/exports.d/ollama.exports ] || exit 0
+        rm -f /etc/exports.d/ollama.exports
+        exportfs -ra
+        echo CHANGED
+      register: r
+      changed_when: "'CHANGED' in r.stdout"
+      when: not is_nfs_host or nfs_clients | length == 0
+
+    # --- NFS 호스트: 로컬 thin LV + ext4 마운트 + NFS export ---
     - name: thin LV (pve/ollama-models)
       community.general.lvol:
         vg: pve
@@ -235,24 +259,24 @@ curl -fsSL https://eu4ng.github.io/assets/scripts/proxmox/templates/ollama/ollam
       ansible.builtin.apt:
         name: nfs-kernel-server
         state: present
-      when: is_nfs_host
+      when: is_nfs_host and nfs_clients | length > 0
     - name: NFS export 설정 (/etc/exports.d/ollama.exports)
       ansible.builtin.copy:
         dest: /etc/exports.d/ollama.exports
         content: |
-          {% for h in ollama_backends | map(attribute='pve') | unique | reject('eq', ollama_nfs_host) %}
+          {% for h in nfs_clients %}
           {{ ollama_models_dir }}/store {{ hostvars[h].ansible_host }}(rw,sync,no_subtree_check,all_squash,anonuid=100000,anongid=100000)
           {% endfor %}
         mode: "0644"
       register: nfs_export
-      when: is_nfs_host
+      when: is_nfs_host and nfs_clients | length > 0
     - name: NFS export 갱신 및 서비스 재시작
       ansible.builtin.shell: |
         exportfs -ra
         systemctl restart nfs-server
-      when: is_nfs_host and (nfs_export is changed)
+      when: is_nfs_host and nfs_clients | length > 0 and (nfs_export is changed)
 
-    # --- NFS 클라이언트 호스트 (pve02 등): NFS 마운트 ---
+    # --- NFS 클라이언트 호스트: NFS 마운트 ---
     - name: NFS 클라이언트 마운트 폴더 준비
       ansible.builtin.file:
         path: "{{ ollama_models_dir }}/store"
@@ -583,6 +607,8 @@ backend servers
   server pve02-780m ollama-780m.[DOMAIN]:11434 agent-check agent-port 11435 agent-inter 5s
   # 윈도우 PC 는 사용자 데스크톱입니다. 꺼지면 헬스체크로 빠지고, PC 의 상태 보고 스크립트(windows-agent.ps1, 포트 11435)가
   # "drain" 이라고 답하면(Ollama 가 아닌 프로그램이 GPU 를 쓰는 중) 새 요청을 보내지 않습니다. 스크립트가 없거나 답이 없으면 헬스체크만 봅니다.
+  # 같은 스크립트가 LXC 에이전트와 같은 상태 JSON(:11437/status, 계산 중인지)도 내고, metrics.py 가 그것을 :9100/status/<서버> 로 옮겨 쓰는 쪽이
+  # 이 서버로 간 호출의 멈춤도 상태로 판정합니다.
   server winpc-780m [WINPC_IP]:11434 agent-check agent-port 11435 agent-inter 5s
   # 평소 꺼 두는 GPU 데스크톱(RTX 4080 16GB). 보통 모델은 VRAM 에 다 올라가 iGPU 서버보다 생성 10배·입력 처리 30배 빠릅니다(실측).
   # OLLAMA_NUM_PARALLEL=2 라 maxconn 2. 꺼져 있으면 헬스체크로 빠지지만 대기 서버라 워크플로 자리(전원 컨트롤러 power.py 의 임대)로는
@@ -605,8 +631,9 @@ backend big
   # 생성이 780m 보다 느립니다(실측 1.87 tok/s vs 5.0). 요약처럼 출력이 수천 토큰인 요청은 생성 속도가 결정합니다.
 
 # 모델 확인·조회 전용(/api/tags·/api/version·/api/show·/api/ps). 추론이 아니라 자리(maxconn)를 두지 않습니다.
-# 응답한 서버에 모델이 없으면 멈추는 클라이언트가 있으므로, 라우터로 가는 모델을 모두 가진 서버(LXC)만 넣습니다.
-# 모델을 더하면 이 서버들에 모두 받고, 전원 컨트롤러의 --models 도 고칩니다.
+# 응답한 서버에 모델이 없으면 멈추는 클라이언트가 있으므로, 라우터로 가는 모델을 모두 가진 서버(LXC)만 넣습니다(윈도우 PC·GPU 데스크톱은
+# 모델 목록·digest 가 달라 넣지 않습니다). 모델 보유는 전원 컨트롤러가 1분마다 검사합니다(지표 ollama_meta_missing_models).
+# 모델을 더하면 이 서버들에 모두 받고, 전원 컨트롤러(power-deployment.yaml)의 --models 도 고칩니다.
 backend meta
   balance roundrobin
   option httpchk GET /api/version
@@ -647,6 +674,7 @@ import argparse
 import csv
 import json
 import logging
+import signal
 import socket
 import sys
 import time
@@ -773,6 +801,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(message)s")
+    # 컨테이너의 PID 1 이라 기본 SIGTERM 처리가 없다. 없으면 파드 종료가 유예 시간(7200초) 끝까지 걸린다
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     host, _, port = args.socket.rpartition(":")
     address = (host, int(port))
     meters: dict[str, Meter] = {}
@@ -847,6 +877,7 @@ import argparse
 import csv
 import json
 import logging
+import signal
 import socket
 import sys
 import threading
@@ -1367,7 +1398,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="ollama 라우터의 요청 로그(UDP)와 모델 서버의 /api/ps 를 Prometheus 지표로 낸다.",
         epilog=(
             "예:\n"
-            "  python3 metrics.py --socket 127.0.0.1:9999 --agent winpc-780m=192.168.0.15:11436\n"
+            "  python3 metrics.py --socket 127.0.0.1:9999 --agent winpc-780m=[WINPC_IP]:11436\n"
             "  python3 metrics.py --once                 # 서버 상태를 한 번 읽고 지표 텍스트를 stdout 에 낸다\n\n"
             "exit code: 0 정상, 1 runtime API 에 연결 실패(--once)"
         ),
@@ -1420,6 +1451,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(message)s")
+    # 컨테이너의 PID 1 이라 기본 SIGTERM 처리가 없다. 없으면 파드 종료가 유예 시간(7200초) 끝까지 걸린다
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     reg = build_registry()
     stop = threading.Event()
     if args.once:
