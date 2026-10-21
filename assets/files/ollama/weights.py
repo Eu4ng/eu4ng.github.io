@@ -13,6 +13,7 @@ import argparse
 import csv
 import json
 import logging
+import signal
 import socket
 import sys
 import time
@@ -139,6 +140,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(message)s")
+    # 컨테이너의 PID 1 이라 기본 SIGTERM 처리가 없다. 없으면 파드 종료가 유예 시간(7200초) 끝까지 걸린다
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     host, _, port = args.socket.rpartition(":")
     address = (host, int(port))
     meters: dict[str, Meter] = {}
