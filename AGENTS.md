@@ -11,13 +11,11 @@ Chirpy 테마를 쓰는 Jekyll 블로그(eu4ng.github.io)다. 글은 `_posts/카
 
 ## 발행 전 검증
 
-push 전에 저장소 루트에서 순서대로 실행한다. 3번이 `finished successfully` 를 낼 때까지 push 하지 않는다.
+push 전에 저장소 루트에서 실행한다. permalink 부여 → 운영 모드 빌드 → htmlproofer 를 차례로 돌리며,
+출력의 `ok` 가 `true` 가 될 때까지 push 하지 않는다. 자세한 해석은 블로그 스킬의 7절.
 
 ```bash
-python3 scripts/add_permalinks.py
-JEKYLL_ENV=production bundle exec jekyll b -d /tmp/_site
-bundle exec htmlproofer /tmp/_site --disable-external \
-  --ignore-urls "/^http:\/\/127.0.0.1/,/^http:\/\/0.0.0.0/,/^http:\/\/localhost/"
+uv run --script .agents/skills/blog-post/scripts/publish_check.py
 ```
 
 ## 저장소 규칙

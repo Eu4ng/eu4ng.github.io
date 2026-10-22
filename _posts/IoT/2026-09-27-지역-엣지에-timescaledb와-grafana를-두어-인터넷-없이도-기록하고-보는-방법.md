@@ -8,9 +8,6 @@ mermaid: true
 permalink: /posts/56/
 ---
 
-> 2026-10-22 에 지역 엣지 클러스터를 허브 클러스터 하나로 합쳤습니다. 이 글은 합치기 전 구조를 기준으로 쓴 것이고, 현재 구조와 합친 과정은 [지역 엣지 쿠버네티스 클러스터를 허브 클러스터 하나로 합치는 방법](/posts/88/) 에 있습니다.
-{: .prompt-info }
-
 지역 엣지 클러스터에 **지역 [TimescaleDB](/posts/85/)**와 **지역 Grafana**, 내부망 전용 **지역 인그레스**를 두어, [인터넷이나 허브가 끊겨도](/posts/62/) 그 지역의 기록과 조회가 지역 안에서 이어지게 합니다. 엣지 [Telegraf](/posts/82/) 는 같은 행을 지역 DB 에 먼저, 허브 DB 에 두 번째로 쓰므로 허브는 지금처럼 모든 지역을 모아 보고, 지역 DB 에는 그 지역 데이터만 쌓입니다. 두 DB 는 테이블 정의와 계정이 같고 대시보드 파일도 하나를 함께 써서, 어느 Grafana 에서 보든 같은 화면이 나옵니다.
 
 ```mermaid
@@ -68,7 +65,7 @@ flowchart LR
 ```bash
 # 작업 PC: Patroni 비밀번호 Secret (SUFFIX 는 허브 DB 를 만들 때와 같게)
 wget https://eu4ng.github.io/assets/scripts/kubernetes/timescaledb-ha-secrets.sh
-bash timescaledb-ha-secrets.sh [SUFFIX]
+bash timescaledb-ha-secrets.sh [SUFFIX] /home/ubuntu/k8s-[SITE].yaml
 ```
 
 > 스크립트는 비밀번호를 작업 PC 의 `~/.config/iot/secrets.env` 에서 읽고, 파일에 없으면 새로 만들어 허브 Secret 까지 그 값으로 덮어씁니다. 허브 DB 는 처음 만들 때의 비밀번호로 이미 초기화되어 있으므로, 반드시 허브 DB 를 만든 작업 PC(또는 그 파일을 옮긴 PC)에서 실행합니다.
@@ -79,7 +76,7 @@ bash timescaledb-ha-secrets.sh [SUFFIX]
 ```bash
 # 허브 control plane: 지역 DB·지역 Grafana Secret (스크립트 전문은 Telegraf 글 1단계)
 wget https://eu4ng.github.io/assets/scripts/iot/create-iot-secrets.sh
-bash create-iot-secrets.sh
+bash create-iot-secrets.sh k8s-[SITE].yaml
 ```
 
 - **확인:** 엣지에 Secret 4개가 있습니다. `kubectl --kubeconfig k8s-[SITE].yaml -n timescaledb get secret` 에 `timescaledb-patroni`, `timescaledb-credentials`, `-n grafana get secret` 에 `grafana-admin`, `grafana-timescale` 이 보입니다.
@@ -377,9 +374,6 @@ git push
 ## 3. 지역 DB 에 과거 기록 채우기
 
 지역 DB 에는 만든 뒤에 들어온 행만 있으므로, 그 전의 기록은 허브 DB 에서 그 지역(`site`) 행을 가져와 채웁니다. 스크립트는 허브 주 DB 에서 `COPY ... TO STDOUT` 으로 받은 행을 지역 주 DB 의 임시 테이블에 넣고, 지역에 없는 행만 옮깁니다. 두 DB 에 모두 있는 컬럼만 옮기고, 지역 DB 에 아직 없는 테이블(Telegraf 가 첫 행을 쓰기 전)은 건너뛰므로 여러 번 실행해도 됩니다. 작업 PC 에서 허브 control plane 에 ssh 로 실행합니다.
-
-> 이 스크립트는 지역 DB 를 다시 둘 때 참고용으로 남겨 두며, 2026-10-22 지역 클러스터를 허브로 합친 뒤에는 쓰지 않습니다.
-{: .prompt-info }
 
 ```bash
 # 작업 PC 에서 스크립트 내려받기

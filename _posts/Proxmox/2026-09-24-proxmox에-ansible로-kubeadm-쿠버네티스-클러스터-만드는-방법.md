@@ -7,9 +7,6 @@ tags: [proxmox, ansible, kubernetes, kubeadm, keepalived, longhorn, cloud-init, 
 permalink: /posts/46/
 ---
 
-> 2026-10-22 에 지역 엣지 클러스터를 허브 클러스터 하나로 합쳤습니다. 이 글은 합치기 전 구조를 기준으로 쓴 것이고, 현재 구조와 합친 과정은 [지역 엣지 쿠버네티스 클러스터를 허브 클러스터 하나로 합치는 방법](/posts/88/) 에 있습니다.
-{: .prompt-info }
-
 [템플릿 스크립트](/posts/33/)와 [클러스터 스크립트](/posts/32/)로 하던 일을 Ansible 플레이북으로 옮겨, CT·VM 을 만드는 모든 절차를 `proxmox-ansible` 저장소 하나에 모읍니다. 템플릿 플레이북이 Proxmox 노드마다 Ubuntu 24.04 클라우드 이미지로 VM 템플릿을 만들고, 클러스터 플레이북이 그 템플릿을 복제해 노드 VM 을 만든 뒤 [kubeadm](/posts/60/) 클러스터를 구성합니다. control plane 과 worker 를 세 Proxmox 노드에 하나씩 나눠 두어 etcd 가 control plane 3멤버가 되고 서버 한 대가 죽어도 과반이 남습니다. API 주소는 control plane 마다 둔 **keepalived** 가 VRRP 로 주인을 정해 ARP 로 알리는 VIP 로 받아 control plane 한 대가 꺼져도 같은 주소로 붙습니다. 클러스터 정의는 변수 파일에 목록으로 두고 `-e k8s_cluster=<이름>` 으로 골라, 중앙 허브와 지역 엣지를 같은 플레이북으로 만듭니다. 여러 번 실행해도 결과가 같고, 노드 교체와 삭제도 같은 플레이북으로 합니다.
 
 1. 변수 채우기

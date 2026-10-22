@@ -80,7 +80,7 @@ Chirpy 테마 기반 Jekyll 블로그다. 글을 쓰는 규칙과 발행 전 검
 ### 이미지와 참고 자료
 
 - 이미지는 `/assets/img/post/` 아래에 두고 대체 텍스트를 구체적으로 쓴다. 바로 아래 줄에 기울임 글씨로 캡션을 단다.
-- 참고 자료는 `- [제목](URL)` 목록이다. 공식 문서와 표준 문서를 먼저, 블로그를 뒤에 둔다.
+- 참고 자료는 한 줄에 링크 하나씩 목록으로 쓰고, 링크 글자는 문서 제목으로 한다. 공식 문서와 표준 문서를 먼저, 블로그를 뒤에 둔다.
   제목에 세로선이 있으면 역슬래시로 이스케이프한다.
 - 블로그 안의 다른 글은 `[글 제목](/posts/N/)` 로 링크한다. 번호는 대상 글의 `permalink` 값이며,
   아직 permalink 가 없는 새 글을 가리켜야 하면 5번을 먼저 실행해 번호를 확정한다.
@@ -147,13 +147,14 @@ assets 파일과 내용을 **정확히 일치**시킨다.
 ### 원본이 다른 저장소에 있는 사본
 
 `assets/files/`·`assets/scripts/` 의 파일과 글 속 `<details>` 의 전문 중 상당수는 다른 저장소(k8s-gitops,
-proxmox-ansible 등)에 있는 원본의 사본이다. 원본이 바뀌면 사본과 그 글이 낡는다.
+proxmox-ansible 등)에 있는 원본에서 가져온 사본이다. 글은 "이런 방법이 있다"를 소개하는 정보 공유 글이고, 사본은 그
+방법을 보여 주는 예시다. 글쓴이의 현재 구성을 기록하는 문서가 아니다.
 
-- 사본은 원본과 **같은 동작**이어야 한다. 다른 곳은 공개용으로 일반화한 부분뿐이다: 주소·도메인·계정을 `[UPPER_CASE]`
-  자리표시자로 바꾼 것, 날짜·사건 기록 같은 개인 메모를 일반 설명으로 바꾼 것.
-- 원본을 바꾸는 작업에서는 사본과 글을 같은 작업 안에서 고친다. 원본 쪽 커밋만 하고 끝내지 않는다.
-- 맞출 때는 원본과 사본을 `diff` 로 비교해, 일반화 말고 남은 차이(빠진 작업·옵션·설정 줄)를 사본에 옮긴다.
-  원본은 파일 이름으로 찾는다: `git -C <원본 저장소> ls-files | grep '/<파일 이름>$'`
+- 원본의 구성 변경(서비스 추가·제거, 장비 교체, 내 환경에 맞춘 값)은 사본과 글에 따라 옮기지 않는다.
+- 글이나 사본이 틀렸을 때만 고친다: 사실 오류, 동작하지 않는 명령·설정, 원본에서 찾아 고친 버그가 사본에도 있는 경우.
+- 사본을 고칠 때는 원본과 `diff` 로 비교해 그 버그·오류에 해당하는 줄만 옮긴다. 원본은 파일 이름으로 찾는다:
+  `git -C <원본 저장소> ls-files | grep '/<파일 이름>$'`
+- 공개용 일반화는 유지한다: 주소·도메인·계정은 `[UPPER_CASE]` 자리표시자, 날짜·사건 기록 같은 개인 메모는 일반 설명.
 - 사본을 고쳤으면 그 파일을 싣거나 링크한 글(`grep -rl '<파일 이름>' _posts`)의 `<details>` 전문과 설명도 맞춘다.
 - 원본이 없는 파일(블로그에서 처음 만든 설치 스크립트 등)은 이 블로그가 원본이다.
 
@@ -171,28 +172,33 @@ proxmox-ansible 등)에 있는 원본의 사본이다. 원본이 바뀌면 사�
 
 ## 7. 발행 전 검증 (건너뛰지 않는다)
 
-push 하기 전에 저장소 루트에서 아래를 순서대로 실행한다.
+push 하기 전에 저장소 루트에서 실행한다. 새 글 permalink 부여(`scripts/add_permalinks.py`) → 운영 모드 빌드 →
+htmlproofer 링크 검사(CI 와 같은 인자)를 차례로 돌리고 결과를 JSON 한 줄로 낸다.
 
 ```bash
-# 1. 새 글에 permalink 번호 부여 (날짜순으로 다음 번호를 매긴다)
-python3 scripts/add_permalinks.py
-
-# 2. 사이트 빌드
-JEKYLL_ENV=production bundle exec jekyll b -d /tmp/_site
-
-# 3. 링크 검사 (CI 와 같은 명령)
-bundle exec htmlproofer /tmp/_site --disable-external \
-  --ignore-urls "/^http:\/\/127.0.0.1/,/^http:\/\/0.0.0.0/,/^http:\/\/localhost/"
+uv run --script .agents/skills/blog-post/scripts/publish_check.py
 ```
 
-- htmlproofer 가 `HTML-Proofer finished successfully` 를 낼 때까지 push 하지 않는다.
+- `ok` 가 `false` 면 `stage`(permalinks·build·proofer)와 `build_errors`·`proofer_failures` 를 보고 고친 뒤 다시 돌린다.
+  전체 출력은 `logs` 의 파일에 있다. `permalinks_added` 에 나온 글은 front matter 가 바뀌었으니 함께 커밋한다.
+- 빌드 폴더는 임시로 만들고 지운다. 결과 사이트를 봐야 하면 `--keep-site` 를 붙인다.
+- worktree 처럼 gem 이 설치되지 않은 폴더에서는 빌드가 `command not found: jekyll` 로 실패한다. `bundle install` 하거나
+  gem 이 있는 폴더를 `--root` 로 준다.
+- `ok` 가 `true`(htmlproofer 의 `HTML-Proofer finished successfully`)가 될 때까지 push 하지 않는다.
   `pages-deploy.yml` 이 PR 에서 돌리는 것과 같은 검사이므로, 여기서 통과하면 CI 에서도 통과한다.
-- 1번을 건너뛰면 새 글이 슬러그 주소로 생성되어 다른 글이 걸어 둔 `/posts/N/` 링크가 전부 깨진다.
+- permalink 부여를 건너뛰면 새 글이 슬러그 주소로 생성되어 다른 글이 걸어 둔 `/posts/N/` 링크가 전부 깨진다.
   2026-09-21 에 게시글 4개가 이 상태로 push 되어 내부 링크 7건이 깨지고 CI 가 실패했다.
-- 빌드 중 나오는 태그 관련 `Conflict` 경고는 이전부터 있던 것으로 빌드를 실패시키지 않는다.
+- 빌드 중 나오는 태그 관련 `Conflict` 경고는 이전부터 있던 것으로 빌드를 실패시키지 않는다(스크립트도 오류 줄에서 뺀다).
 - 글은 `develop` 브랜치에 커밋한다. `main` 은 `develop` 에서 PR 로만 갱신되고, 병합되면 배포된다.
 
 ## 8. 발행
 
 검증(7번)을 통과하면 사용자에게 다시 묻지 않고 이 글과 관련된 변경을 커밋하고 `develop` 에 push 한다.
 이 글과 관련 없는 변경은 함께 커밋하지 않는다.
+
+## 스크립트
+
+- `scripts/publish_check.py`: 발행 전 검증(permalink 부여 → 운영 모드 빌드 → htmlproofer)을 차례로 돌리고 결과를 JSON 으로 낸다.
+  표준 라이브러리만 쓴다. `--help` 참고. uv 가 없으면 같은 순서를 직접 실행한다:
+  `python3 scripts/add_permalinks.py`, `JEKYLL_ENV=production bundle exec jekyll b -d <폴더>`, <!-- lint-allow: python3 -->
+  `bundle exec htmlproofer <폴더> --disable-external --ignore-urls "/^http:\/\/127.0.0.1/,/^http:\/\/0.0.0.0/,/^http:\/\/localhost/"`.
