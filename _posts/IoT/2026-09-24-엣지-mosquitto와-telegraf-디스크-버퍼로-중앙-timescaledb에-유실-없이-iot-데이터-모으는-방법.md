@@ -7,6 +7,9 @@ tags: [iot, mqtt, mosquitto, telegraf, timescaledb, postgresql, grafana, kuberne
 permalink: /posts/43/
 ---
 
+> 2026-10-22 에 지역 엣지 클러스터를 허브 클러스터 하나로 합쳤습니다. 이 글은 합치기 전 구조를 기준으로 쓴 것이고, 현재 구조와 합친 과정은 [지역 엣지 쿠버네티스 클러스터를 허브 클러스터 하나로 합치는 방법](/posts/88/) 에 있습니다.
+{: .prompt-info }
+
 허브 클러스터와 엣지 클러스터에 각각 **[TimescaleDB](/posts/85/)**를 두고, 엣지 클러스터에 **Mosquitto**([MQTT](/posts/80/) 브로커)와 **[Telegraf](/posts/82/)**(수집기)를 두어 기기 메시지가 `엣지 브로커 → 엣지 Telegraf → 지역 TimescaleDB, 허브 TimescaleDB`로 흐르게 합니다. Telegraf 는 같은 행을 지역 DB(첫 번째 출력)와 허브 DB(두 번째 출력)에 쓰므로 [허브나 인터넷이 끊겨도](/posts/62/) 지역에서는 기록이 이어집니다. 출력마다 디스크 버퍼를 따로 두어 한쪽 DB 가 안 닿는 동안 파드가 재시작되더라도 데이터를 잃지 않고, 페이로드의 시각을 써서 뒤늦게 도착해도 원래 시각으로 적재됩니다. 모든 기기 값은 수집기와 관계없이 `readings` 테이블 하나에 "행 하나 = 기기 하나의 속성 하나" 로 넣고, 지역·프로토콜·수집기·기기를 컬럼으로 두어 여러 지역과 여러 종류의 기기가 한 테이블에 섞여도 구분되도록 했습니다. 기기로 간 제어 명령은 `events` 테이블에 따로 남깁니다. 매니페스트는 [이전 글](/posts/42/)에서 만든 `iot/` 폴더 규칙(`iot/hub/`, `iot/edge/`, `iot/clusters/[SITE]/`)을 따릅니다.
 
 1. 비밀 값 만들기
@@ -59,11 +62,11 @@ wget https://eu4ng.github.io/assets/scripts/iot/create-iot-secrets.sh
 ```bash
 #!/usr/bin/env bash
 #
-# IoT 스택이 쓰는 비밀 값(Secret)을 허브와 엣지 클러스터에 만듭니다. GitOps 저장소에는 비밀 값을 넣지 않으므로 폴더를 push 하기 전에 실행합니다.
-# 엣지에는 지역 DB(TimescaleDB)와 지역 Grafana 도 있습니다. DB 계정(iot, grafana)의 비밀번호는 허브 DB 와 지역 DB 가 같습니다.
-# 허브에 kubectl 로 접근할 수 있고 엣지 kubeconfig 가 있는 곳(control plane)에서 실행합니다: bash create-iot-secrets.sh [EDGE_KUBECONFIG]
+# IoT 스택이 쓰는 비밀 값(Secret)을 클러스터에 만듭니다. GitOps 저장소에는 비밀 값을 넣지 않으므로 폴더를 push 하기 전에 실행합니다.
+# 브로커(Mosquitto)·Zigbee2MQTT·Telegraf 와 TimescaleDB·Grafana 가 한 클러스터에 있습니다(2026-10-22 지역 엣지 클러스터를 허브로 합침).
+# kubectl 로 클러스터에 접근할 수 있는 곳(control plane)에서 실행합니다: bash create-iot-secrets.sh
 # 비밀번호는 실행 중에 입력받습니다. 이미 있는 Secret 은 건너뜁니다(비밀번호를 바꾸려면 Secret 을 지우고 다시 실행).
-# 엣지 Grafana 관리자 계정은 허브의 monitoring/grafana-admin 을 복사합니다(Prometheus·Grafana 글에서 만듦).
+# Grafana 관리자 계정(monitoring/grafana-admin)은 Prometheus·Grafana 글의 스크립트가 만듭니다.
 
 set -euo pipefail
 
@@ -77,19 +80,12 @@ die() { echo -e "\033[1;31m[오류]\033[0m $*" >&2; exit 1; }
 trap 'echo -e "\033[1;31m[오류]\033[0m ${LINENO}번째 줄에서 중단되었습니다." >&2' ERR
 
 # 네임스페이스는 Argo CD 가 만들기 전에 미리 만들어도 그대로 씁니다.
-# ensure_ns <kubectl 옵션...> <ns>
-ensure_ns() { kubectl "${@:1:$#-1}" create namespace "${@: -1}" --dry-run=client -o yaml | kubectl "${@:1:$#-1}" apply -f - >/dev/null; }
-# secret_exists <kubectl 옵션...> <ns> <name>
-secret_exists() { kubectl "${@:1:$#-2}" -n "${@: -2:1}" get secret "${@: -1}" >/dev/null 2>&1; }
+ensure_ns() { kubectl create namespace "$1" --dry-run=client -o yaml | kubectl apply -f - >/dev/null; }
+secret_exists() { kubectl -n "$1" get secret "$2" >/dev/null 2>&1; }
 
 # ---------- 1. 사전 검사 ----------
 log "사전 검사"
-EDGE_KUBECONFIG=${1:-}
-[ -r "$EDGE_KUBECONFIG" ] || die "사용법: bash create-iot-secrets.sh [EDGE_KUBECONFIG]"
-kubectl get nodes >/dev/null || die "kubectl 로 허브 클러스터에 접근할 수 없습니다."
-HUB=()                                   # 허브: 현재 kubeconfig
-EDGE=(--kubeconfig "$EDGE_KUBECONFIG")   # 엣지
-kubectl "${EDGE[@]}" get nodes >/dev/null || die "엣지 kubeconfig 로 엣지 클러스터에 접근할 수 없습니다."
+kubectl get nodes >/dev/null || die "kubectl 로 클러스터에 접근할 수 없습니다."
 
 # ---------- 2. 비밀번호 입력 ----------
 log "비밀번호 입력 (화면에 표시되지 않음)"
@@ -100,69 +96,44 @@ for u in "${MQTT_USERS[@]}"; do read -rsp "MQTT 계정 $u: " MQTT_PASSWORD[$u]; 
 read -rsp "Zigbee2MQTT 프런트엔드 토큰: " Z2M_TOKEN; echo
 for v in PG_PASSWORD GRAFANA_PASSWORD Z2M_TOKEN; do [ -n "${!v}" ] || die "$v 가 비어 있습니다."; done
 
-# ---------- 3. 허브 ----------
-log "허브: timescaledb-credentials, grafana-timescale"
-for ns in timescaledb monitoring; do ensure_ns "${HUB[@]}" "$ns"; done
-if secret_exists "${HUB[@]}" timescaledb timescaledb-credentials; then echo "  timescaledb/timescaledb-credentials 있음, 건너뜀"; else
-  kubectl "${HUB[@]}" -n timescaledb create secret generic timescaledb-credentials \
+# ---------- 3. DB·Grafana ----------
+log "timescaledb-credentials, grafana-timescale"
+for ns in timescaledb monitoring; do ensure_ns "$ns"; done
+if secret_exists timescaledb timescaledb-credentials; then echo "  timescaledb/timescaledb-credentials 있음, 건너뜀"; else
+  kubectl -n timescaledb create secret generic timescaledb-credentials \
     --from-literal=POSTGRES_PASSWORD="$PG_PASSWORD" --from-literal=GRAFANA_PASSWORD="$GRAFANA_PASSWORD"
 fi
-if secret_exists "${HUB[@]}" monitoring grafana-timescale; then echo "  monitoring/grafana-timescale 있음, 건너뜀"; else
-  kubectl "${HUB[@]}" -n monitoring create secret generic grafana-timescale --from-literal=TIMESCALE_PASSWORD="$GRAFANA_PASSWORD"
+if secret_exists monitoring grafana-timescale; then echo "  monitoring/grafana-timescale 있음, 건너뜀"; else
+  kubectl -n monitoring create secret generic grafana-timescale --from-literal=TIMESCALE_PASSWORD="$GRAFANA_PASSWORD"
 fi
 
-# ---------- 4. 엣지: 브로커 계정 파일 ----------
-# mosquitto_passwd 가 만드는 해시 파일을 그대로 Secret 에 넣습니다. control plane 에 docker 가 없으므로 엣지에서 일회용 파드로 만듭니다.
-log "엣지: mosquitto-passwd"
-for ns in mosquitto zigbee2mqtt telegraf; do ensure_ns "${EDGE[@]}" "$ns"; done
-if secret_exists "${EDGE[@]}" mosquitto mosquitto-passwd; then echo "  mosquitto/mosquitto-passwd 있음, 건너뜀"; else
+# ---------- 4. 브로커 계정 파일 ----------
+# mosquitto_passwd 가 만드는 해시 파일을 그대로 Secret 에 넣습니다. control plane 에 docker 가 없으므로 클러스터의 일회용 파드로 만듭니다.
+log "mosquitto-passwd"
+for ns in mosquitto zigbee2mqtt telegraf; do ensure_ns "$ns"; done
+if secret_exists mosquitto mosquitto-passwd; then echo "  mosquitto/mosquitto-passwd 있음, 건너뜀"; else
   # mosquitto_passwd 는 파일 권한 경고를 표준 출력에 찍으므로, 미리 권한을 좁히고 출력은 버린 뒤 파일만 읽습니다.
   env_args=(); cmd=": > /tmp/passwd; chmod 600 /tmp/passwd"
   for u in "${MQTT_USERS[@]}"; do env_args+=(--env="PW_$u=${MQTT_PASSWORD[$u]}"); cmd+="; mosquitto_passwd -b /tmp/passwd $u \"\$PW_$u\" >/dev/null 2>&1"; done
   cmd+="; cat /tmp/passwd"
-  passwd_file=$(kubectl "${EDGE[@]}" -n mosquitto run mosquitto-passwd --rm -i -q --restart=Never --image="$MOSQUITTO_IMAGE" \
+  passwd_file=$(kubectl -n mosquitto run mosquitto-passwd --rm -i -q --restart=Never --image="$MOSQUITTO_IMAGE" \
     "${env_args[@]}" --command -- sh -c "$cmd")
   [ "$(printf '%s\n' "$passwd_file" | grep -cE '^[A-Za-z0-9_-]+:\$7\$')" -eq "${#MQTT_USERS[@]}" ] \
     && [ "$(printf '%s\n' "$passwd_file" | wc -l)" -eq "${#MQTT_USERS[@]}" ] || die "계정 파일 생성에 실패했습니다: $passwd_file"
-  kubectl "${EDGE[@]}" -n mosquitto create secret generic mosquitto-passwd --from-file=passwd=<(printf '%s\n' "$passwd_file")
+  kubectl -n mosquitto create secret generic mosquitto-passwd --from-file=passwd=<(printf '%s\n' "$passwd_file")
 fi
 
-# ---------- 5. 엣지: 클라이언트 계정 ----------
-log "엣지: zigbee2mqtt-credentials, telegraf-credentials"
-if secret_exists "${EDGE[@]}" zigbee2mqtt zigbee2mqtt-credentials; then echo "  zigbee2mqtt/zigbee2mqtt-credentials 있음, 건너뜀"; else
-  kubectl "${EDGE[@]}" -n zigbee2mqtt create secret generic zigbee2mqtt-credentials \
+# ---------- 5. 클라이언트 계정 ----------
+# Telegraf 는 LOCAL_PG_PASSWORD 로 DB 에 씁니다(엣지 시절의 HUB_PG_PASSWORD 는 더 쓰지 않음).
+log "zigbee2mqtt-credentials, telegraf-credentials"
+if secret_exists zigbee2mqtt zigbee2mqtt-credentials; then echo "  zigbee2mqtt/zigbee2mqtt-credentials 있음, 건너뜀"; else
+  kubectl -n zigbee2mqtt create secret generic zigbee2mqtt-credentials \
     --from-literal=MQTT_PASSWORD="${MQTT_PASSWORD[zigbee2mqtt]}" --from-literal=FRONTEND_AUTH_TOKEN="$Z2M_TOKEN"
 fi
-if secret_exists "${EDGE[@]}" telegraf telegraf-credentials; then echo "  telegraf/telegraf-credentials 있음, 건너뜀"; else
-  kubectl "${EDGE[@]}" -n telegraf create secret generic telegraf-credentials \
+if secret_exists telegraf telegraf-credentials; then echo "  telegraf/telegraf-credentials 있음, 건너뜀"; else
+  kubectl -n telegraf create secret generic telegraf-credentials \
     --from-literal=MQTT_USER=telegraf --from-literal=MQTT_PASSWORD="${MQTT_PASSWORD[telegraf]}" \
-    --from-literal=HUB_PG_PASSWORD="$PG_PASSWORD" --from-literal=LOCAL_PG_PASSWORD="$PG_PASSWORD"
-fi
-# 지역 DB 가 생기기 전에 만든 Secret 에는 LOCAL_PG_PASSWORD 가 없으므로 그 키만 더합니다
-if [ -z "$(kubectl "${EDGE[@]}" -n telegraf get secret telegraf-credentials -o jsonpath='{.data.LOCAL_PG_PASSWORD}')" ]; then
-  printf '{"stringData":{"LOCAL_PG_PASSWORD":"%s"}}' "$PG_PASSWORD" \
-    | kubectl "${EDGE[@]}" -n telegraf patch secret telegraf-credentials --type merge --patch-file=/dev/stdin >/dev/null
-  echo "  telegraf/telegraf-credentials 에 LOCAL_PG_PASSWORD 추가"
-fi
-
-# ---------- 6. 엣지: 지역 DB·Grafana ----------
-log "엣지: timescaledb-credentials, grafana-timescale, grafana-admin"
-for ns in timescaledb grafana; do ensure_ns "${EDGE[@]}" "$ns"; done
-if secret_exists "${EDGE[@]}" timescaledb timescaledb-credentials; then echo "  timescaledb/timescaledb-credentials 있음, 건너뜀"; else
-  kubectl "${EDGE[@]}" -n timescaledb create secret generic timescaledb-credentials \
-    --from-literal=POSTGRES_PASSWORD="$PG_PASSWORD" --from-literal=GRAFANA_PASSWORD="$GRAFANA_PASSWORD"
-fi
-if secret_exists "${EDGE[@]}" grafana grafana-timescale; then echo "  grafana/grafana-timescale 있음, 건너뜀"; else
-  kubectl "${EDGE[@]}" -n grafana create secret generic grafana-timescale --from-literal=TIMESCALE_PASSWORD="$GRAFANA_PASSWORD"
-fi
-if secret_exists "${EDGE[@]}" grafana grafana-admin; then echo "  grafana/grafana-admin 있음, 건너뜀"; else
-  kubectl "${HUB[@]}" -n monitoring get secret grafana-admin -o json | python3 -c '
-import sys, json
-d = json.load(sys.stdin)
-print(json.dumps({"apiVersion": "v1", "kind": "Secret", "type": d["type"],
-                  "metadata": {"name": "grafana-admin", "namespace": "grafana"}, "data": d["data"]}))' \
-    | kubectl "${EDGE[@]}" apply -f - >/dev/null
-  echo "  grafana/grafana-admin: 허브 monitoring/grafana-admin 복사"
+    --from-literal=LOCAL_PG_PASSWORD="$PG_PASSWORD"
 fi
 
 unset PG_PASSWORD GRAFANA_PASSWORD MQTT_PASSWORD Z2M_TOKEN passwd_file
@@ -174,7 +145,7 @@ log "완료. homeassistant 계정 비밀번호는 Home Assistant 의 MQTT 통합
 
 ```bash
 # 비밀번호 7개를 입력받아 Secret 생성 (이미 있는 Secret 은 건너뜀)
-bash create-iot-secrets.sh k8s-[SITE].yaml
+bash create-iot-secrets.sh
 ```
 
 > 비밀번호는 다른 곳에 안전하게 적어 둡니다. `homeassistant` 계정은 뒤에 Home Assistant 의 MQTT 통합 화면에서, `devices` 계정은 LAN 기기 설정에서 직접 입력하고, TimescaleDB 비밀번호는 Secret 을 지우고 다시 만들어도 이미 초기화된 DB 에는 반영되지 않습니다.

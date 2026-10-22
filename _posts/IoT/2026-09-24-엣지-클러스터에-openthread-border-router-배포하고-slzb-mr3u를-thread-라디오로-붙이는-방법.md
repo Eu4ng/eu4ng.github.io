@@ -7,6 +7,9 @@ tags: [iot, thread, matter, openthread, otbr, slzb-06, home-assistant, kubernete
 permalink: /posts/47/
 ---
 
+> 2026-10-22 에 지역 엣지 클러스터를 허브 클러스터 하나로 합쳤습니다. 이 글은 합치기 전 구조를 기준으로 쓴 것이고, 현재 구조와 합친 과정은 [지역 엣지 쿠버네티스 클러스터를 허브 클러스터 하나로 합치는 방법](/posts/88/) 에 있습니다.
+{: .prompt-info }
+
 [Thread](/posts/77/) 기기(Matter over Thread)를 LAN 과 잇는 **[OpenThread Border Router](/posts/83/)**(OTBR)를 엣지 클러스터의 파드로 띄웁니다. 라디오는 SLZB-MR3U 의 EFR32MG24 로, 기기 안에서 OTBR 을 돌리는 대신 라디오(RCP)로만 쓰고 TCP 포트로 파드와 연결합니다. 이렇게 하면 Thread 망의 데이터셋(네트워크 키, 채널 등)이 기기가 아니라 클러스터 볼륨에 남아서, SLZB 를 바꾸더라도 새 기기를 같은 주소에 두기만 하면 기기를 다시 등록하지 않고 망이 이어집니다. 공식 OTBR 이미지는 USB 시리얼 라디오를 전제로 해서, OpenThread 가 자식 프로세스를 시리얼처럼 쓰는 `forkpty` 방식으로 socat 을 띄워 TCP 를 연결합니다.
 
 1. 라디오 모드와 포트 확인
@@ -271,7 +274,7 @@ HA 의 OpenThread Border Router 통합을 추가하면, 데이터셋이 없는 O
 
 ```bash
 # 허브 control plane
-bash setup-home-assistant.sh http://[EDGE_SERVICE_VIP]:8123
+bash setup-home-assistant.sh http://[SERVICE_VIP]:8123
 ```
 
 기본 네트워크 지정이 중요합니다. 휴대폰의 Home Assistant 앱으로 Thread 기기를 등록할 때 앱이 HA 의 기본 Thread 망 자격 증명을 받아 기기에 넘기기 때문입니다. 집에 다른 제조사의 Thread 보더 라우터(스마트 TV, 스피커 등)가 있어도 망이 다르면 서로 간섭하지 않습니다.

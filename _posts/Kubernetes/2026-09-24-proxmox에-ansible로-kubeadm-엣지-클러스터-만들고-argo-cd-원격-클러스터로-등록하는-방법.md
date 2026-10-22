@@ -7,6 +7,9 @@ tags: [proxmox, ansible, kubeadm, kubernetes, keepalived, longhorn, argo-cd, git
 permalink: /posts/42/
 ---
 
+> 2026-10-22 에 지역 엣지 클러스터를 허브 클러스터 하나로 합쳤습니다. 이 글은 합치기 전 구조를 기준으로 쓴 것이고, 현재 구조와 합친 과정은 [지역 엣지 쿠버네티스 클러스터를 허브 클러스터 하나로 합치는 방법](/posts/88/) 에 있습니다.
+{: .prompt-info }
+
 허브 클러스터를 만든 플레이북 `k8s-cluster.yml` 에 지역 하나를 더 적어 **지역 엣지 클러스터**를 만들고, 허브의 **Argo CD** 에 원격 클러스터로 등록합니다. 엣지를 허브의 worker 로 붙이지 않고 별도 클러스터로 두는 이유는, [허브나 인터넷이 끊겨도](/posts/62/) 지역 안의 수집·제어가 자체 control plane 으로 계속 돌아야 하기 때문입니다. 엣지는 control plane 세 대와 worker 세 대를 세 Proxmox 노드에 하나씩 나눠 두어, etcd 가 control plane 3멤버라 서버 한 대가 죽어도 버티게 합니다. Argo CD 등록은 API 서버 로그인 대신 CLI 의 core 모드로 쿠버네티스 API 에 직접 써서 비밀번호 없이 끝냅니다.
 
 1. 지역 클러스터 값 추가
@@ -118,6 +121,9 @@ kubectl -n kube-system exec etcd-k8s-[SITE_SHORT]-cp-1 -- etcdctl \
 ## 4. Argo CD 에 클러스터 등록
 
 허브 Argo CD 가 엣지에 배포하려면 엣지의 API 서버 주소와 자격 증명이 Argo CD 의 cluster Secret 으로 있어야 합니다. `argocd cluster add` 가 이 일을 하는데, 대상 클러스터의 kubeconfig 컨텍스트와 Argo CD 가 있는 클러스터의 접근 권한이 한 kubeconfig 안에 함께 필요합니다. 2단계에서 가져온 kubeconfig 를 허브 control plane 에 복사하고, 그곳에서 스크립트를 실행합니다.
+
+> 이 스크립트는 지역 클러스터를 다시 둘 때 참고용으로 남겨 두며, 2026-10-22 지역 클러스터를 허브로 합친 뒤에는 쓰지 않습니다.
+{: .prompt-info }
 
 ```bash
 # 실행 PC: 엣지 kubeconfig 를 허브 control plane 으로 복사

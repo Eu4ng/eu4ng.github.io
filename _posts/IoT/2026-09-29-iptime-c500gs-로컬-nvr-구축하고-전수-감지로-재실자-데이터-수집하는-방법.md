@@ -7,6 +7,9 @@ tags: [iot, nvr, kubernetes, computer-vision, home-assistant, mqtt, timescaledb,
 permalink: /posts/76/
 ---
 
+> 2026-10-22 에 지역 엣지 클러스터를 허브 클러스터 하나로 합쳤습니다. 이 글은 합치기 전 구조를 기준으로 쓴 것이고, 현재 구조와 합친 과정은 [지역 엣지 쿠버네티스 클러스터를 허브 클러스터 하나로 합치는 방법](/posts/88/) 에 있습니다.
+{: .prompt-info }
+
 ipTIME C500GS IP 카메라를 공유기 방화벽으로 외부 인터넷과 완전히 차단한 상태에서 로컬 [NVR](/posts/79/)을 구축하고, 영상에서 재실자 수·위치·속도를 뽑아 호스트 센서와 같은 방식의 MQTT 센서로 Home Assistant 와 TimescaleDB 에 넣습니다. 움직임이 있을 때만 동작하는 모션 기반 감지기(Frigate 등)와 달리 초당 10프레임을 움직임과 무관하게 추적하므로, 잠든 사람처럼 오래 움직이지 않는 재실자도 놓치지 않습니다. 추적 결과는 초록 박스를 그린 실시간 측정 영상으로 남기고, 영상은 Longhorn 복제 볼륨에 당일치만 두고 자정 뒤 원격 NAS 로 보내므로, 서버 한 대가 죽어도 다른 워커에서 녹화와 감지가 이어집니다. 하루치 원본의 모든 프레임을 더 큰 모델로 다시 추적해 실시간 값과 다른 구간만 검수 클립으로 남기는 사후 검수도 함께 배포하지만, 정지 상태로 둡니다.
 
 1. 카메라 네트워크 차단 및 RTSP 설정
@@ -134,14 +137,14 @@ bash assets/scripts/iot/create-nvr-secrets.sh ~/k8s-daejeon.yaml
 ```bash
 #!/usr/bin/env bash
 #
-# NVR(go2rtc, recorder, occupancy 수집기, 일일 작업, 사후 검수)이 쓰는 Secret(nvr/nvr-credentials, nvr/backup-ssh, nvr/nvr-db)을 엣지 클러스터에 만듭니다.
+# NVR(go2rtc, recorder, occupancy 수집기, 일일 작업, 사후 검수)이 쓰는 Secret(nvr/nvr-credentials, nvr/backup-ssh, nvr/nvr-db)을 클러스터에 만듭니다.
 # GitOps 저장소에는 비밀 값을 넣지 않으므로 매니페스트를 push 하기 전에 실행합니다.
-# 허브에 kubectl 로 접근할 수 있고 엣지 kubeconfig 가 있는 곳(control plane)에서 실행합니다: bash create-nvr-secrets.sh [EDGE_KUBECONFIG]
+# kubectl 로 클러스터에 접근할 수 있는 곳(control plane)에서 실행합니다: bash create-nvr-secrets.sh
 # 카메라 RTSP 비밀번호는 환경 변수 CAMERA_RTSP_PASSWORD 가 있으면 그것을, 없으면 실행 중에 입력받습니다.
-# MQTT 비밀번호는 환경 변수 MQTT_PASSWORD 가 있으면 그것을, 없으면 엣지 telegraf-credentials 에서 가져옵니다.
+# MQTT 비밀번호는 환경 변수 MQTT_PASSWORD 가 있으면 그것을, 없으면 telegraf-credentials 에서 가져옵니다.
 # 수집기는 DB 에 직접 쓰지 않습니다(MQTT → Telegraf → readings). 사후 검수는 실시간 재실자 수와 비교하려 DB 를 읽기만 하므로
-# 엣지 timescaledb-credentials 의 읽기 전용 계정(grafana) 비밀번호를 nvr/nvr-db 로 복사합니다.
-# NAS 이관(SFTP)용 SSH 키(backup-ssh)는 엣지 backup 네임스페이스에서 복사합니다.
+# timescaledb-credentials 의 읽기 전용 계정(grafana) 비밀번호를 nvr/nvr-db 로 복사합니다.
+# NAS 이관(SFTP)용 SSH 키(backup-ssh)는 backup 네임스페이스에서 복사합니다.
 
 set -euo pipefail
 
@@ -158,24 +161,20 @@ trap 'echo -e "\033[1;31m[오류]\033[0m ${LINENO}번째 줄에서 중단되었�
 
 # ---------- 1. 사전 검사 ----------
 log "사전 검사"
-EDGE_KUBECONFIG=${1:-}
-[ -r "$EDGE_KUBECONFIG" ] || die "사용법: bash create-nvr-secrets.sh [EDGE_KUBECONFIG]"
-EDGE=(--kubeconfig "$EDGE_KUBECONFIG")
-kubectl get nodes >/dev/null || die "kubectl 로 허브 클러스터에 접근할 수 없습니다."
-kubectl "${EDGE[@]}" get nodes >/dev/null || die "엣지 kubeconfig 로 엣지 클러스터에 접근할 수 없습니다."
+kubectl get nodes >/dev/null || die "kubectl 로 클러스터에 접근할 수 없습니다."
 
 # 네임스페이스 준비
-kubectl "${EDGE[@]}" create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl "${EDGE[@]}" apply -f - >/dev/null
+kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
 # ---------- 2. nvr-credentials ----------
-if kubectl "${EDGE[@]}" -n "$NAMESPACE" get secret nvr-credentials >/dev/null 2>&1; then
-  echo "  엣지 $NAMESPACE/nvr-credentials 있음, 건너뜀"
+if kubectl -n "$NAMESPACE" get secret nvr-credentials >/dev/null 2>&1; then
+  echo "  $NAMESPACE/nvr-credentials 있음, 건너뜀"
 else
   log "비밀값 조회"
   # MQTT 비밀번호
   MQTT_PASSWORD=${MQTT_PASSWORD:-}
   if [ -z "$MQTT_PASSWORD" ]; then
-    MQTT_PASSWORD=$(kubectl "${EDGE[@]}" -n "${TELEGRAF_SECRET%%/*}" get secret "${TELEGRAF_SECRET##*/}" -o jsonpath='{.data.MQTT_PASSWORD}' | base64 -d) || true
+    MQTT_PASSWORD=$(kubectl -n "${TELEGRAF_SECRET%%/*}" get secret "${TELEGRAF_SECRET##*/}" -o jsonpath='{.data.MQTT_PASSWORD}' | base64 -d) || true
   fi
   [ -n "$MQTT_PASSWORD" ] || die "MQTT 비밀번호를 찾지 못했습니다."
 
@@ -187,31 +186,31 @@ else
     [ -n "$CAMERA_RTSP_PASSWORD" ] || die "카메라 RTSP 비밀번호가 비어 있습니다."
   fi
 
-  log "엣지 $NAMESPACE/nvr-credentials 생성"
+  log "$NAMESPACE/nvr-credentials 생성"
   printf 'RTSP_PASSWORD=%s\nMQTT_PASSWORD=%s\n' "$CAMERA_RTSP_PASSWORD" "$MQTT_PASSWORD" \
-    | kubectl "${EDGE[@]}" -n "$NAMESPACE" create secret generic nvr-credentials --from-env-file=/dev/stdin
+    | kubectl -n "$NAMESPACE" create secret generic nvr-credentials --from-env-file=/dev/stdin
   unset CAMERA_RTSP_PASSWORD MQTT_PASSWORD
 fi
 
 # ---------- 3. backup-ssh 복사 ----------
-if kubectl "${EDGE[@]}" -n "$NAMESPACE" get secret backup-ssh >/dev/null 2>&1; then
-  echo "  엣지 $NAMESPACE/backup-ssh 있음, 건너뜀"
+if kubectl -n "$NAMESPACE" get secret backup-ssh >/dev/null 2>&1; then
+  echo "  $NAMESPACE/backup-ssh 있음, 건너뜀"
 else
-  log "엣지 $NAMESPACE/backup-ssh 복사"
-  kubectl "${EDGE[@]}" -n "${BACKUP_SECRET%%/*}" get secret "${BACKUP_SECRET##*/}" -o json \
+  log "$NAMESPACE/backup-ssh 복사"
+  kubectl -n "${BACKUP_SECRET%%/*}" get secret "${BACKUP_SECRET##*/}" -o json \
     | jq --arg ns "$NAMESPACE" '.metadata = {"name": "backup-ssh", "namespace": $ns}' \
-    | kubectl "${EDGE[@]}" apply -f -
+    | kubectl apply -f -
 fi
 
 # ---------- 4. nvr-db (사후 검수의 DB 읽기) ----------
-if kubectl "${EDGE[@]}" -n "$NAMESPACE" get secret nvr-db >/dev/null 2>&1; then
-  echo "  엣지 $NAMESPACE/nvr-db 있음, 건너뜀"
+if kubectl -n "$NAMESPACE" get secret nvr-db >/dev/null 2>&1; then
+  echo "  $NAMESPACE/nvr-db 있음, 건너뜀"
 else
-  log "엣지 $NAMESPACE/nvr-db 생성 (읽기 전용 계정 grafana)"
-  PGPASSWORD=$(kubectl "${EDGE[@]}" -n "${DB_SECRET%%/*}" get secret "${DB_SECRET##*/}" -o jsonpath='{.data.GRAFANA_PASSWORD}' | base64 -d)
-  [ -n "$PGPASSWORD" ] || die "엣지 ${DB_SECRET} 에서 GRAFANA_PASSWORD 를 찾지 못했습니다."
+  log "$NAMESPACE/nvr-db 생성 (읽기 전용 계정 grafana)"
+  PGPASSWORD=$(kubectl -n "${DB_SECRET%%/*}" get secret "${DB_SECRET##*/}" -o jsonpath='{.data.GRAFANA_PASSWORD}' | base64 -d)
+  [ -n "$PGPASSWORD" ] || die "${DB_SECRET} 에서 GRAFANA_PASSWORD 를 찾지 못했습니다."
   printf 'PGPASSWORD=%s\n' "$PGPASSWORD" \
-    | kubectl "${EDGE[@]}" -n "$NAMESPACE" create secret generic nvr-db --from-env-file=/dev/stdin
+    | kubectl -n "$NAMESPACE" create secret generic nvr-db --from-env-file=/dev/stdin
   unset PGPASSWORD
 fi
 
