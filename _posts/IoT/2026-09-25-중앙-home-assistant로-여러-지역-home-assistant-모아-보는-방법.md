@@ -7,9 +7,6 @@ tags: [iot, home-assistant, kubernetes, argo-cd, gitops, edge]
 permalink: /posts/49/
 ---
 
-> 2026-10-22 에 지역 엣지 클러스터를 허브 클러스터 하나로 합쳤습니다. 이 글은 합치기 전 구조를 기준으로 쓴 것이고, 현재 구조와 합친 과정은 [지역 엣지 쿠버네티스 클러스터를 허브 클러스터 하나로 합치는 방법](/posts/88/) 에 있습니다.
-{: .prompt-info }
-
 지역마다 엣지 클러스터의 Home Assistant(HA)가 기기와 자동화를 맡고, 허브에는 기기를 붙이지 않은 **중앙 HA** 를 하나 둡니다. 중앙 HA 는 **Remote Home Assistant** 통합으로 각 지역 HA 의 WebSocket API 에 붙어 [엔티티](/posts/78/)를 가져오고, 중앙에서 누른 스위치는 원래 지역 HA 로 전달됩니다. 지역 HA 는 `ha-[SITE_CODE].[DOMAIN]`, 중앙 HA 는 `ha.[DOMAIN]` 으로 엽니다. 이 통합은 보통 HACS 로 설치하지만, 여기서는 initContainer 가 릴리스 버전을 고정해 설치하고 연결 설정도 API 스크립트로 넣습니다.
 
 1. 지역 HA 에 Remote Home Assistant 설치

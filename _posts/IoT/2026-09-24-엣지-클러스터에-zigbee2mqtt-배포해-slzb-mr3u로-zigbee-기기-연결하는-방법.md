@@ -7,9 +7,6 @@ tags: [iot, zigbee, zigbee2mqtt, slzb-06, mqtt, kubernetes, argo-cd, gitops, edg
 permalink: /posts/44/
 ---
 
-> 2026-10-22 에 지역 엣지 클러스터를 허브 클러스터 하나로 합쳤습니다. 이 글은 합치기 전 구조를 기준으로 쓴 것이고, 현재 구조와 합친 과정은 [지역 엣지 쿠버네티스 클러스터를 허브 클러스터 하나로 합치는 방법](/posts/88/) 에 있습니다.
-{: .prompt-info }
-
 엣지 클러스터에 **Zigbee2MQTT**를 배포해 SLZB-MR3U 의 [Zigbee](/posts/77/) 라디오(CC2674P10)에 TCP 로 붙이고, 기기 메시지가 `zigbee2mqtt/[기기]` [MQTT](/posts/80/) 토픽으로 브로커에 올라가 [수집 파이프라인](/posts/43/)을 타고 허브 TimescaleDB 에 들어가게 합니다. Zigbee2MQTT 는 기기를 추가할 때마다 자기 설정 파일을 다시 쓰므로 설정 파일은 PVC 에 두고 첫 기동에만 시드를 복사하며, 브로커 주소나 코디네이터 주소처럼 GitOps 가 관리할 값은 환경 변수로 매 기동 덮어씁니다. 코디네이터가 USB 가 아니라 네트워크 장비라 파드에 장치 패스스루가 필요 없습니다.
 
 1. 코디네이터 포트 확인

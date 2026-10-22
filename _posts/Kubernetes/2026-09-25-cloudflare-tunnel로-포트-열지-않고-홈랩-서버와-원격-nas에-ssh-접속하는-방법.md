@@ -7,9 +7,6 @@ tags: [cloudflare, cloudflare-tunnel, ssh, kubernetes, argo-cd, gitops, synology
 permalink: /posts/51/
 ---
 
-> 2026-10-22 에 지역 엣지 클러스터를 허브 클러스터 하나로 합쳤습니다. 이 글은 합치기 전 구조를 기준으로 쓴 것이고, 현재 구조와 합친 과정은 [지역 엣지 쿠버네티스 클러스터를 허브 클러스터 하나로 합치는 방법](/posts/88/) 에 있습니다.
-{: .prompt-info }
-
 **Cloudflare Tunnel** 은 서버 쪽 커넥터(cloudflared)가 Cloudflare 로 바깥 방향 연결을 맺고, 그 연결로 들어온 요청을 LAN 의 서비스로 넘깁니다. 공유기 포트포워딩이나 공인 IP 가 필요 없습니다. 터널 앞에는 **Cloudflare Access** 를 두어, 사람은 이메일로 받은 일회용 PIN 으로 로그인하고 백업 같은 자동화는 서비스 토큰으로 통과하게 합니다. 터널은 두 개입니다. 집의 허브 클러스터에서 도는 `homelab` 터널은 Proxmox·control plane·엣지 노드의 SSH 를 열고, 원격지 NAS 에서 도는 `nas` 터널은 NAS 자신의 SSH 를 엽니다. 터널·DNS·Access 설정은 대시보드 대신 API 스크립트로 만듭니다.
 
 1. 설정용 API 토큰 만들기
