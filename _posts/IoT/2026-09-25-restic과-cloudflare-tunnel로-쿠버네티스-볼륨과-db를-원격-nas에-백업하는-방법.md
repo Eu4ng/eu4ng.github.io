@@ -196,7 +196,7 @@ git push
 ```bash
 # 허브 control plane (kubectl 과 SSH 개인 키가 있는 곳)
 wget https://eu4ng.github.io/assets/scripts/iot/create-backup-secrets.sh
-bash create-backup-secrets.sh [NAS_USER] /backup/k8s ~/.ssh/id_ed25519
+bash create-backup-secrets.sh [NAS_USER] /backup/k8s ~/k8s-[SITE].yaml ~/.ssh/id_ed25519
 ```
 
 <details markdown="1">
@@ -205,11 +205,11 @@ bash create-backup-secrets.sh [NAS_USER] /backup/k8s ~/.ssh/id_ed25519
 ```bash
 #!/usr/bin/env bash
 #
-# 원격 NAS 백업(restic + SFTP, Cloudflare Tunnel 경유)에 필요한 비밀 값을 클러스터의 backup 네임스페이스에 만들고, 볼륨을 올리는 네임스페이스에 복사합니다.
-# kubectl 로 클러스터에 접근할 수 있는 곳에서 실행합니다: bash create-backup-secrets.sh [NAS_USER] [REPO_PATH] [SSH_KEY]
-#   예: bash create-backup-secrets.sh [NAS_USER] /backup/k8s ~/.ssh/id_ed25519
-# SSH_KEY 는 NAS 에 이미 등록된 개인 키입니다(터미널 접속에 쓰는 서버용 키를 그대로 씁니다). 키를 바꿀 때는 새 키로 다시 실행하면 모든 네임스페이스의 키가 교체됩니다.
-# 앞서 cloudflare-tunnel-setup.sh 가 backup/cloudflare-access(서비스 토큰)를 만들어 두어야 합니다. backup-credentials 는 이미 있으면 건너뜁니다(비밀번호 유지).
+# 원격 NAS 백업(restic + SFTP, Cloudflare Tunnel 경유)에 필요한 비밀 값을 허브와 엣지 클러스터의 backup 네임스페이스에 만듭니다.
+# 허브에 kubectl 로 접근할 수 있는 곳에서 실행합니다: bash create-backup-secrets.sh [NAS_USER] [REPO_PATH] [EDGE_KUBECONFIG] [SSH_KEY]
+#   예: bash create-backup-secrets.sh [NAS_USER] /backup/k8s ~/k8s-[SITE].yaml ~/.ssh/id_ed25519
+# SSH_KEY 는 NAS 에 이미 등록된 개인 키입니다(터미널 접속에 쓰는 서버용 키를 그대로 씁니다). 키를 바꿀 때는 새 키로 다시 실행하면 두 클러스터의 키가 교체됩니다.
+# 앞서 cloudflare-tunnel-setup.sh 가 허브에 backup/cloudflare-access(서비스 토큰)를 만들어 두어야 합니다. backup-credentials 는 이미 있으면 건너뜁니다(비밀번호 유지).
 
 set -euo pipefail
 
@@ -217,7 +217,7 @@ set -euo pipefail
 NAS_HOST=nas-ssh.[DOMAIN]                   # Cloudflare Tunnel 로 연 NAS 의 SSH 이름
 CLOUDFLARED=$HOME/.local/bin/cloudflared
 CLOUDFLARED_VERSION=2026.9.1
-VOLUME_NAMESPACES=(monitoring home-assistant zigbee2mqtt matter otbr mosquitto)   # 볼륨을 백업하는 네임스페이스(k8s-gitops services/backup/cronjob-files.yaml)
+EDGE_VOLUME_NAMESPACES=(home-assistant zigbee2mqtt matter otbr mosquitto grafana)   # 엣지에서 볼륨을 백업하는 네임스페이스
 # --------------------------------------
 
 log() { echo -e "\n\033[1;32m==>\033[0m $*"; }
@@ -227,18 +227,19 @@ TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 
 # ---------- 1. 사전 검사 ----------
 log "사전 검사"
-NAS_USER=${1:-}; REPO_PATH=${2:-}; SSH_KEY=${3:-$HOME/.ssh/id_ed25519}
-[ -n "$NAS_USER" ] && [[ "$REPO_PATH" == /* ]] && [ -r "$SSH_KEY" ] \
-  || die "사용법: bash create-backup-secrets.sh [NAS_USER] [REPO_PATH] [SSH_KEY]"
-kubectl get nodes >/dev/null || die "kubectl 로 클러스터에 접근할 수 없습니다."
-kubectl -n backup get secret cloudflare-access >/dev/null || die "backup/cloudflare-access 가 없습니다. cloudflare-tunnel-setup.sh 를 먼저 실행하세요."
+NAS_USER=${1:-}; REPO_PATH=${2:-}; EDGE_KUBECONFIG=${3:-}; SSH_KEY=${4:-$HOME/.ssh/id_ed25519}
+[ -n "$NAS_USER" ] && [[ "$REPO_PATH" == /* ]] && [ -r "$EDGE_KUBECONFIG" ] && [ -r "$SSH_KEY" ] \
+  || die "사용법: bash create-backup-secrets.sh [NAS_USER] [REPO_PATH] [EDGE_KUBECONFIG] [SSH_KEY]"
+HUB=(kubectl); EDGE=(kubectl --kubeconfig "$EDGE_KUBECONFIG")
+"${HUB[@]}" -n backup get secret cloudflare-access >/dev/null || die "허브에 backup/cloudflare-access 가 없습니다. cloudflare-tunnel-setup.sh 를 먼저 실행하세요."
+"${EDGE[@]}" get nodes >/dev/null || die "엣지 kubeconfig 로 접근할 수 없습니다."
 if [ ! -x "$CLOUDFLARED" ]; then
   mkdir -p "$(dirname "$CLOUDFLARED")"
   curl -fsSL -o "$CLOUDFLARED" "https://github.com/cloudflare/cloudflared/releases/download/$CLOUDFLARED_VERSION/cloudflared-linux-amd64"
   chmod +x "$CLOUDFLARED"
 fi
-TOKEN_ID=$(kubectl -n backup get secret cloudflare-access -o jsonpath='{.data.CF_ACCESS_CLIENT_ID}' | base64 -d)
-TOKEN_SECRET=$(kubectl -n backup get secret cloudflare-access -o jsonpath='{.data.CF_ACCESS_CLIENT_SECRET}' | base64 -d)
+TOKEN_ID=$("${HUB[@]}" -n backup get secret cloudflare-access -o jsonpath='{.data.CF_ACCESS_CLIENT_ID}' | base64 -d)
+TOKEN_SECRET=$("${HUB[@]}" -n backup get secret cloudflare-access -o jsonpath='{.data.CF_ACCESS_CLIENT_SECRET}' | base64 -d)
 
 # ---------- 2. NAS 호스트 키와 로그인 확인 ----------
 # 백업 파드는 StrictHostKeyChecking=yes 로 접속하므로 NAS 의 호스트 키를 받아 두고, 그 키로 SFTP 에 로그인되는지 확인합니다.
@@ -250,48 +251,64 @@ echo "pwd" | TUNNEL_SERVICE_TOKEN_ID=$TOKEN_ID TUNNEL_SERVICE_TOKEN_SECRET=$TOKE
 cut -d' ' -f2- "$TMP/known_hosts" | sed 's/^/  호스트 키: /'
 
 # ---------- 3. restic 저장소 비밀번호 ----------
-# 이미 있으면 그것을 씁니다(저장소를 다시 열 수 있어야 하므로 바꾸지 않음).
-RESTIC_PASSWORD=$(kubectl -n backup get secret backup-credentials -o jsonpath='{.data.RESTIC_PASSWORD}' 2>/dev/null | base64 -d || true)
+# 저장소 하나를 두 클러스터가 함께 쓰므로 비밀번호도 하나입니다. 허브에 있으면 그것을 씁니다.
+RESTIC_PASSWORD=$("${HUB[@]}" -n backup get secret backup-credentials -o jsonpath='{.data.RESTIC_PASSWORD}' 2>/dev/null | base64 -d || true)
 NEW_PASSWORD=no
 if [ -z "$RESTIC_PASSWORD" ]; then RESTIC_PASSWORD=$(openssl rand -base64 30 | tr -d '/+=' | cut -c1-32); NEW_PASSWORD=yes; fi
 
-# ---------- 4. backup 네임스페이스 Secret ----------
+# ---------- 4. 클러스터별 Secret ----------
 # backup-credentials(환경 변수)는 없을 때만 만들고, backup-ssh(키·known_hosts)는 항상 덮어써 키 교체를 재실행으로 끝냅니다.
-log "backup 네임스페이스 Secret"
-kubectl get ns backup >/dev/null 2>&1 || kubectl create ns backup >/dev/null
-if ! kubectl -n backup get secret backup-credentials >/dev/null 2>&1; then
-  kubectl -n backup create secret generic backup-credentials \
-    --from-literal=RESTIC_REPOSITORY="sftp:$NAS_USER@$NAS_HOST:$REPO_PATH" \
-    --from-literal=RESTIC_PASSWORD="$RESTIC_PASSWORD" \
-    --from-literal=TUNNEL_SERVICE_TOKEN_ID="$TOKEN_ID" \
-    --from-literal=TUNNEL_SERVICE_TOKEN_SECRET="$TOKEN_SECRET" >/dev/null
-  echo "  backup-credentials 만듦"
-else echo "  backup-credentials 있음, 건너뜀"; fi
-kubectl -n backup create secret generic backup-ssh --from-file=id_ed25519="$SSH_KEY" --from-file=known_hosts="$TMP/known_hosts" \
-  --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-echo "  backup-ssh 적용 ($(ssh-keygen -lf "$SSH_KEY" | cut -d' ' -f2))"
-# TimescaleDB 를 pg_dump 로 받으므로 DB 비밀번호를 같은 Secret 에 넣습니다.
-PGPASS=$(kubectl -n timescaledb get secret timescaledb-credentials -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d)
+make_secrets() {
+  local name=$1; shift
+  "$@" get ns backup >/dev/null 2>&1 || "$@" create ns backup >/dev/null
+  if ! "$@" -n backup get secret backup-credentials >/dev/null 2>&1; then
+    "$@" -n backup create secret generic backup-credentials \
+      --from-literal=RESTIC_REPOSITORY="sftp:$NAS_USER@$NAS_HOST:$REPO_PATH" \
+      --from-literal=RESTIC_PASSWORD="$RESTIC_PASSWORD" \
+      --from-literal=TUNNEL_SERVICE_TOKEN_ID="$TOKEN_ID" \
+      --from-literal=TUNNEL_SERVICE_TOKEN_SECRET="$TOKEN_SECRET" >/dev/null
+    echo "  $name: backup-credentials 만듦"
+  else echo "  $name: backup-credentials 있음, 건너뜀"; fi
+  "$@" -n backup create secret generic backup-ssh --from-file=id_ed25519="$SSH_KEY" --from-file=known_hosts="$TMP/known_hosts" \
+    --dry-run=client -o yaml | "$@" apply -f - >/dev/null
+  echo "  $name: backup-ssh 적용 ($(ssh-keygen -lf "$SSH_KEY" | cut -d' ' -f2))"
+}
+log "허브 Secret"; make_secrets hub "${HUB[@]}"
+log "엣지 Secret"; make_secrets edge "${EDGE[@]}"
+# 허브는 TimescaleDB 를 pg_dump 로 받으므로 DB 비밀번호를 같은 Secret 에 넣습니다.
+PGPASS=$("${HUB[@]}" -n timescaledb get secret timescaledb-credentials -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d)
 printf '{"stringData":{"PGPASSWORD":"%s"}}' "$PGPASS" \
-  | kubectl -n backup patch secret backup-credentials --type merge --patch-file=/dev/stdin >/dev/null
+  | "${HUB[@]}" -n backup patch secret backup-credentials --type merge --patch-file=/dev/stdin >/dev/null
 
-# 이미지 pull Secret ghcr-pull 은 mineru 의 것을 backup 네임스페이스로 복사합니다.
-copy_secret() {  # copy_secret <원본 ns/이름> <대상 ns>
-  kubectl get ns "$2" >/dev/null 2>&1 || kubectl create ns "$2" >/dev/null
-  kubectl -n "${1%/*}" get secret "${1#*/}" -o json | python3 -c '
+# 엣지는 지역 DB 를 pg_dump 로 받으므로 지역 DB 비밀번호를 같은 Secret 에 넣습니다(지역 DB 가 있을 때).
+PGPASS_EDGE=$("${EDGE[@]}" -n timescaledb get secret timescaledb-credentials -o jsonpath='{.data.POSTGRES_PASSWORD}' 2>/dev/null | base64 -d || true)
+if [ -n "$PGPASS_EDGE" ]; then
+  printf '{"stringData":{"PGPASSWORD":"%s"}}' "$PGPASS_EDGE" \
+    | "${EDGE[@]}" -n backup patch secret backup-credentials --type merge --patch-file=/dev/stdin >/dev/null
+fi
+# 이미지 pull Secret ghcr-pull 은 허브 mineru 의 것을 두 클러스터의 backup 네임스페이스로 복사합니다.
+copy_secret() {  # copy_secret <원본 kubectl 옵션 배열 이름> <대상 kubectl 옵션 배열 이름> <원본 ns/이름> <대상 ns>
+  local -n from=$1 to=$2
+  "${to[@]}" get ns "$4" >/dev/null 2>&1 || "${to[@]}" create ns "$4" >/dev/null
+  "${from[@]}" -n "${3%/*}" get secret "${3#*/}" -o json | python3 -c '
 import sys, json
 d = json.load(sys.stdin); d["data"].pop("PGPASSWORD", None)
 print(json.dumps({"apiVersion": "v1", "kind": "Secret", "type": d["type"],
-                  "metadata": {"name": d["metadata"]["name"], "namespace": sys.argv[1]}, "data": d["data"]}))' "$2" \
-    | kubectl apply -f - >/dev/null
+                  "metadata": {"name": d["metadata"]["name"], "namespace": sys.argv[1]}, "data": d["data"]}))' "$4" \
+    | "${to[@]}" apply -f - >/dev/null
 }
-copy_secret mineru/ghcr-pull backup
+copy_secret HUB HUB mineru/ghcr-pull backup
+copy_secret HUB EDGE mineru/ghcr-pull backup
 
 # Longhorn 볼륨은 PVC 가 있는 네임스페이스의 CronJob 이 마운트해 올립니다. 그 CronJob 들이 쓸 Secret 을 복사합니다(DB 비밀번호는 빼고).
-log "볼륨 네임스페이스에 복사"
-for ns in "${VOLUME_NAMESPACES[@]}"; do
-  for src in backup/backup-credentials backup/backup-ssh backup/ghcr-pull; do copy_secret "$src" "$ns"; done
-  echo "  $ns 에 backup-credentials·backup-ssh·ghcr-pull 복사"
+# 허브: Grafana, 중앙 HA. 엣지: 지역 상태 볼륨(k8s-gitops iot/edge/backup/cronjob-files.yaml 의 네임스페이스)
+for ns in monitoring home-assistant; do
+  for src in backup/backup-credentials backup/backup-ssh backup/ghcr-pull; do copy_secret HUB HUB "$src" "$ns"; done
+  echo "  hub: $ns 에 backup-credentials·backup-ssh·ghcr-pull 복사"
+done
+for ns in "${EDGE_VOLUME_NAMESPACES[@]}"; do
+  for src in backup/backup-credentials backup/backup-ssh backup/ghcr-pull; do copy_secret EDGE EDGE "$src" "$ns"; done
+  echo "  edge: $ns 에 backup-credentials·backup-ssh·ghcr-pull 복사"
 done
 
 # ---------- 5. 안내 ----------

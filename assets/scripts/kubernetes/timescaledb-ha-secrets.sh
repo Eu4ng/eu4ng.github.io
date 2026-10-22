@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 #
-# TimescaleDB Patroni 클러스터(iot/timescaledb, stacks/seoul/timescaledb)의 비밀값을 만듭니다. 여러 번 실행해도 됩니다.
+# TimescaleDB Patroni 클러스터(iot/hub/timescaledb, stacks/seoul/timescaledb)의 비밀값을 만듭니다. 여러 번 실행해도 됩니다.
 #   - Patroni superuser(postgres)·replication(replicator) 비밀번호: ~/.config/iot/secrets.env 에 없으면 무작위로 만들어 적습니다
 #   - 허브 timescaledb/timescaledb-patroni Secret (PATRONI_SUPERUSER_PASSWORD, PATRONI_REPLICATION_PASSWORD)
 #   - 서울 NAS 멤버용 파일(~/.config/portainer/secrets/, portainer-stack.sh 가 Swarm secret 으로 만듦):
 #       timescaledb_superuser_password_<SUFFIX>, timescaledb_replication_password_<SUFFIX>,
 #       timescaledb_kubeconfig_<SUFFIX>  (ServiceAccount patroni-nas 토큰. timescaledb 네임스페이스 안에서만 권한이 있음)
+#   - 지역 DB(iot/edge/timescaledb)의 timescaledb/timescaledb-patroni Secret (EDGE_KUBECONFIG 를 준 지역마다, 허브와 같은 값)
 # 허브의 iot·grafana 비밀번호(timescaledb-credentials)는 blog 의 create-iot-secrets.sh 가 만든 것을 그대로 씁니다.
 #
-# 사용법: bash scripts/timescaledb-ha-secrets.sh [SUFFIX]
-#   SUFFIX 기본값 v1(값을 바꿀 때는 새 SUFFIX 로)
+# 사용법: bash scripts/timescaledb-ha-secrets.sh [SUFFIX] [EDGE_KUBECONFIG ...]
+#   SUFFIX 기본값 v1(값을 바꿀 때는 새 SUFFIX 로). EDGE_KUBECONFIG 는 허브 kubectl 호스트 기준 경로(예: /home/ubuntu/k8s-daejeon.yaml)
 #   NAS_MEMBER=1 이면 NAS 멤버 자리표시 Pod 도 만듭니다(NAS 멤버가 실제로 돌 때만)
 
 set -euo pipefail
@@ -20,6 +21,7 @@ API_SERVER=https://[API_VIP]:6443             # NAS 가 붙을 API 주소(VIP, T
 # --------------------------------------
 
 SUFFIX=${1:-v1}
+EDGE_KUBECONFIGS=("${@:2}")
 ENV_FILE=$HOME/.config/iot/secrets.env
 OUT=$HOME/.config/portainer/secrets
 log() { echo -e "\n\033[1;32m==>\033[0m $*"; }
@@ -46,16 +48,26 @@ printf 'PATRONI_SUPERUSER_PASSWORD=%s\nPATRONI_REPLICATION_PASSWORD=%s\n' "$PATR
   | "${KUBECTL[@]}" -n timescaledb create secret generic timescaledb-patroni --from-env-file=/dev/stdin --dry-run=client -o yaml \
   | "${KUBECTL[@]}" apply -f - >/dev/null
 
+# ---------- 2-1. 지역 DB Secret ----------
+for k in "${EDGE_KUBECONFIGS[@]}"; do
+  log "지역 timescaledb/timescaledb-patroni ($k)"
+  E=("${KUBECTL[@]}" --kubeconfig "$k")
+  "${E[@]}" create namespace timescaledb --dry-run=client -o yaml | "${E[@]}" apply -f - >/dev/null
+  printf 'PATRONI_SUPERUSER_PASSWORD=%s\nPATRONI_REPLICATION_PASSWORD=%s\n' "$PATRONI_SUPERUSER_PASSWORD" "$PATRONI_REPLICATION_PASSWORD" \
+    | "${E[@]}" -n timescaledb create secret generic timescaledb-patroni --from-env-file=/dev/stdin --dry-run=client -o yaml \
+    | "${E[@]}" apply -f - >/dev/null
+done
+
 # ---------- 3. NAS 멤버 파일 ----------
 log "NAS 멤버 파일 → $OUT"
 printf '%s' "$PATRONI_SUPERUSER_PASSWORD" > "$OUT/timescaledb_superuser_password_$SUFFIX"
 printf '%s' "$PATRONI_REPLICATION_PASSWORD" > "$OUT/timescaledb_replication_password_$SUFFIX"
-# ServiceAccount 토큰은 iot/timescaledb/patroni-rbac.yaml 의 Secret 에 컨트롤러가 채웁니다(Argo CD 동기화 뒤)
+# ServiceAccount 토큰은 iot/hub/timescaledb/patroni-rbac.yaml 의 Secret 에 컨트롤러가 채웁니다(Argo CD 동기화 뒤)
 # jsonpath 는 ssh 너머에서 따옴표·역슬래시가 풀리므로 JSON 으로 받아 여기서 꺼냅니다
 SA_JSON=$("${KUBECTL[@]}" -n timescaledb get secret patroni-nas-token -o json 2>/dev/null || echo '{}')
 TOKEN=$(python3 -c 'import sys,json,base64; d=json.loads(sys.stdin.read()).get("data",{}); print(base64.b64decode(d.get("token","")).decode())' <<<"$SA_JSON")
 CA=$(python3 -c 'import sys,json; print(json.loads(sys.stdin.read()).get("data",{}).get("ca.crt",""))' <<<"$SA_JSON")
-[ -n "$TOKEN" ] && [ -n "$CA" ] || die "timescaledb/patroni-nas-token 에 토큰·CA 가 없습니다. iot/timescaledb 가 동기화된 뒤 다시 실행합니다."
+[ -n "$TOKEN" ] && [ -n "$CA" ] || die "timescaledb/patroni-nas-token 에 토큰·CA 가 없습니다. iot/hub/timescaledb 가 동기화된 뒤 다시 실행합니다."
 cat > "$OUT/timescaledb_kubeconfig_$SUFFIX" <<EOF
 apiVersion: v1
 kind: Config
