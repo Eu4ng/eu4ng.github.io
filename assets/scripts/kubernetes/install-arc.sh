@@ -16,12 +16,21 @@ RUNNERS=(
   "arc-linux-xs      1  2Gi"   # 원격 서비스(추출·모델 서버)를 기다리기만 하는 작업용. wiki-papers paper job 실측 0.5GiB
   "arc-linux-low     2  4Gi"
   "arc-linux-medium  4  8Gi"
-  "arc-linux-high    6 12Gi 8 15Gi"   # 16Gi worker 의 allocatable(약 15.5Gi)에 들어가게 보장값을 낮추고 상한은 그 안에서 크게
+  "arc-linux-high    6  9Gi 8  9Gi"   # 메모리는 보장값 = 상한. 큰 worker 의 allocatable 에서 선점할 수 없는 상주 파드 요청을 뺀 만큼
 )
 # 러너 파드의 우선순위 등급(PriorityClass 이름, 비우면 기본 0). 러너는 기본 우선순위가 0 이라 그보다 낮은 등급의 서비스 파드
 # (예: 음수 등급으로 둔 추출·모델 서버)를 선점해 내쫓습니다 — 그러면 러너 위의 작업이 그 서비스를 기다리다 멈춥니다. 러너를 그
 # 서비스와 같은 등급으로 두면 선점이 없고, 자리가 없는 러너는 뜨지 않은 채 GitHub 쪽 대기열에 남습니다. 등급은 미리 만들어 둬야 합니다.
 RUNNER_PRIORITY_CLASS=optional
+# 러너별로 따로 줄 우선순위 등급과 노드 조건(선택). 여기에 없는 러너는 RUNNER_PRIORITY_CLASS 를 쓰고 노드를 가리지 않습니다.
+# 큰 러너만 더 높은 등급으로 두면, 자리가 없을 때 그보다 낮은 등급의 서비스·작은 러너를 선점해 자리를 만듭니다.
+declare -A RUNNER_PRIORITY_CLASSES=(
+  [arc-linux-high]=ci-high
+)
+# "라벨=값" 인 노드에만 띄웁니다(nodeSelector). 메모리를 크게 잡은 러너를 그 메모리가 있는 노드에 묶을 때 씁니다.
+declare -A RUNNER_NODE_SELECTORS=(
+  [arc-linux-high]=eu4ng.com/pve=pve01
+)
 # Docker Hub 이미지 캐시: 보존 기간과 최대 용량입니다.
 CACHE_TTL=720h    # 받은 시점부터 이 시간이 지나면 삭제되고 다음에 필요할 때 다시 받습니다 (30일). 사용 여부와는 관계없습니다. 0 이면 만료가 없어 용량 한도에 닿을 때까지 쌓입니다.
 CACHE_SIZE=20Gi   # 넘으면 캐시 파드가 퇴출되어 새로 만들어지며 캐시 전체가 초기화됩니다. worker 노드의 디스크를 러너와 나눠 씁니다.
@@ -60,8 +69,17 @@ done
 # 캐시 설정 형식 검사
 [[ "$CACHE_TTL" =~ ^([0-9]+[smh]|0)$ ]] || die "CACHE_TTL 은 30m, 720h 같은 형식이거나 0 이어야 합니다: $CACHE_TTL"
 [[ "$CACHE_SIZE" =~ ^[0-9]+(Mi|Gi)$ ]] || die "CACHE_SIZE 는 512Mi, 20Gi 같은 형식이어야 합니다: $CACHE_SIZE"
-[ -z "$RUNNER_PRIORITY_CLASS" ] || kubectl get priorityclass "$RUNNER_PRIORITY_CLASS" >/dev/null \
-  || die "PriorityClass $RUNNER_PRIORITY_CLASS 가 없습니다. 먼저 만들거나 RUNNER_PRIORITY_CLASS 를 비웁니다."
+for class in "$RUNNER_PRIORITY_CLASS" "${RUNNER_PRIORITY_CLASSES[@]}"; do
+  [ -z "$class" ] || kubectl get priorityclass "$class" >/dev/null \
+    || die "PriorityClass $class 가 없습니다. 먼저 만들거나 RUNNER_PRIORITY_CLASS(ES) 에서 뺍니다."
+done
+for name in "${!RUNNER_PRIORITY_CLASSES[@]}" "${!RUNNER_NODE_SELECTORS[@]}"; do
+  [[ " ${RUNNERS[*]} " == *" $name "* ]] || die "RUNNERS 에 없는 러너입니다: $name"
+done
+for selector in "${RUNNER_NODE_SELECTORS[@]}"; do
+  [[ "$selector" =~ ^[A-Za-z0-9./_-]+=[A-Za-z0-9._-]+$ ]] || die "노드 조건은 \"라벨=값\" 형식이어야 합니다: $selector"
+  [ -n "$(kubectl get nodes -l "$selector" -o name)" ] || die "\"$selector\" 라벨이 붙은 노드가 없습니다."
+done
 
 # 저장소(또는 조직)마다 네임스페이스를 나눠, 모든 저장소에서 같은 러너 이름을 쓸 수 있게 합니다.
 slug=$(basename "$GITHUB_CONFIG_URL" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//' | cut -c1-51 | sed -E 's/-+$//')
@@ -244,7 +262,14 @@ sed -i "s|__CACHE_ADDR__|$CACHE_ADDR|g" "$TEMPLATE_VALUES"
 # 자원은 파드 단위(쿠버네티스 1.34 이상)로 지정해 러너, Docker 데몬, 작업 컨테이너가 한 예산을 같이 씁니다.
 for runner in "${RUNNERS[@]}"; do
   read -r name cpu mem cpu_limit mem_limit <<<"$runner"
-  log "러너 스케일 셋 설치 ($name: CPU $cpu, 메모리 $mem)"
+  priority=${RUNNER_PRIORITY_CLASSES[$name]:-$RUNNER_PRIORITY_CLASS}
+  node_args=()
+  node_selector=${RUNNER_NODE_SELECTORS[$name]:-}
+  if [ -n "$node_selector" ]; then
+    label=${node_selector%%=*}
+    node_args=(--set-string "template.spec.nodeSelector.${label//./\\.}=${node_selector#*=}")
+  fi
+  log "러너 스케일 셋 설치 ($name: CPU $cpu, 메모리 $mem${priority:+, 등급 $priority}${node_selector:+, 노드 $node_selector})"
   helm upgrade --install "$name" "$CHART_BASE/gha-runner-scale-set" \
     --namespace "$RUNNER_NS" \
     --version "$ARC_VERSION" \
@@ -255,13 +280,19 @@ for runner in "${RUNNERS[@]}"; do
     --set-string template.spec.resources.requests.memory="$mem" \
     --set-string template.spec.resources.limits.cpu="${cpu_limit:-$cpu}" \
     --set-string template.spec.resources.limits.memory="${mem_limit:-$mem}" \
-    ${RUNNER_PRIORITY_CLASS:+--set-string template.spec.priorityClassName="$RUNNER_PRIORITY_CLASS"}
+    ${priority:+--set-string template.spec.priorityClassName="$priority"} \
+    "${node_args[@]}"
 
   applied=$(kubectl get autoscalingrunnerset "$name" -n "$RUNNER_NS" -o jsonpath='{.spec.template.spec.resources.limits.cpu}')
   [ -n "$applied" ] || die "$name 에 자원 설정이 적용되지 않았습니다. 쿠버네티스 1.34 이상인지 확인합니다."
   dind_args=$(kubectl get autoscalingrunnerset "$name" -n "$RUNNER_NS" -o jsonpath='{.spec.template.spec.initContainers[*].args}')
   [[ "$dind_args" == *cgroup-parent* && "$dind_args" == *registry-mirror* ]] \
     || die "$name 의 Docker 데몬 설정이 적용되지 않았습니다."
+  applied=$(kubectl get autoscalingrunnerset "$name" -n "$RUNNER_NS" -o jsonpath='{.spec.template.spec.priorityClassName}')
+  [ "$applied" = "$priority" ] || die "$name 의 우선순위 등급이 $priority 가 아니라 '$applied' 입니다."
+  applied=$(kubectl get autoscalingrunnerset "$name" -n "$RUNNER_NS" -o jsonpath='{.spec.template.spec.nodeSelector}')
+  [ -z "$node_selector" ] || [[ "$applied" == *"\"${node_selector%%=*}\":\"${node_selector#*=}\""* ]] \
+    || die "$name 의 노드 조건이 적용되지 않았습니다: $applied"
 done
 
 # ---------- 9. listener 확인 ----------
